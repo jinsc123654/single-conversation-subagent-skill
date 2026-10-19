@@ -29,6 +29,17 @@ flowchart TD
 
 完整流程、四选一、验证范围、记忆布局和回传格式见 [docs/单对话subagent-两级协作协议.md](docs/单对话subagent-两级协作协议.md)。
 
+## 架构视图
+
+<a href="docs/archify/skill-architecture.html">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/archify/skill-architecture-dark.png">
+    <img alt="single-conversation-subagent 架构视图：Skill 包与安装产物、主对话、执行子 Agent、三级记忆" src="docs/archify/skill-architecture-light.png">
+  </picture>
+</a>
+
+架构图展示 Skill 包、`install.sh` 安装产物、主对话、原生 Agent 工具、执行子 Agent，以及项目/协作/证据三类记忆。交互版：[docs/archify/skill-architecture.html](docs/archify/skill-architecture.html)（下载后用浏览器打开）。
+
 每个新的用户任务开始时先四选一：**快速处理 / 标准执行 / 长任务 / 只调查**，包括“推送吧”“改一下”“跑一下”这类直接命令；同一任务的追问不重复问，只有明确说“不用问，直接做”时才可跳过。纯问答、搜索、单文件小改、简单 Excel、快速查询一般选快速处理；选快速处理或只调查后，不再做验证范围多选。
 
 四选一必须带推荐项并默认勾选；纯问答/小改推荐快速处理，普通工程推荐标准执行，长验证推荐长任务，只读排查推荐只调查；拿不准默认标准执行。

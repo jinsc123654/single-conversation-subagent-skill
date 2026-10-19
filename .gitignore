@@ -9,3 +9,6 @@
 *.bak.*
 *.tmp
 .DS_Store
+
+# archify 本地工作目录
+.archify/
