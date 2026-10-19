@@ -1,0 +1,11 @@
+# 发布产物
+*.zip
+*.tar.gz
+*.sha256
+*.SHA256SUMS
+
+# 备份与临时文件
+*.bak
+*.bak.*
+*.tmp
+.DS_Store
