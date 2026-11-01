@@ -2,7 +2,7 @@
 
 （主对话（协调层） → 执行子 Agent）
 
-记录日期：2026-10-19（Asia/Shanghai）；更新：2026-10-25（四选一不得按任务大小自动跳过）；2026-11-01（入口压缩与边界澄清）；2026-10-28（codex-review 联动问；按 Codex 审查修正超时/分支/检测语义）
+记录日期：2026-10-19（Asia/Shanghai）；更新：2026-10-25（四选一不得按任务大小自动跳过）；2026-11-01（入口压缩与边界澄清；记忆/证据改为 docs-root/agent，vault 根=docs-root）；2026-10-28（codex-review 联动问；按 Codex 审查修正超时/分支/检测语义）
 
 ## 结构
 
@@ -91,7 +91,7 @@ flowchart TD
 
 1. 四选一（每个新任务必问，不得按任务大小自动跳过）；标准/长任务再问验证范围，本地装了 codex-review 时最后追加一问收尾是否用 Codex 独立审查（默认不使用）；快速处理/只调查只问四选一。
 2. 主对话定义工作包：目标、验收、目录、基线、允许/禁止操作、子 Agent 类型、证据要求。
-3. 主对话读写默认记忆：`docs/agent/AGENT_PROJECT.md`、`docs/agent/AGENT_COORDINATION.md`、`docs/agent/evidence/`。
+3. 主对话读写默认记忆：`<docs-root>/agent/AGENT_PROJECT.md`、`<docs-root>/agent/AGENT_COORDINATION.md`、`<docs-root>/agent/evidence/`。
 4. 拆分子任务；独立只读可并行，同文件/板卡/串口/烧录串行。
 5. 用 `Agent` 工具创建执行子 Agent，名称按任务；提示含子任务、范围、禁止、检查、证据路径、“不得再委派”。
 6. 子 Agent 执行并落证据；只回传状态、动作、证据路径、首异常、剩余问题、资源释放，不贴原始日志。
@@ -101,16 +101,17 @@ flowchart TD
 
 ## 文档输出位置
 
-例外优先：`AGENT_PROJECT.md`、`AGENT_COORDINATION.md` 固定 `docs/agent/`；WP 审查报告按 `04_test/report/`；证据按 `docs/agent/evidence/`。
+记忆根 = docs-root/agent：docs-root 取首个存在的 `00_doc` / `00_docs` / `docs` / `doc`；均无则新建 `docs`。`AGENT_PROJECT.md`、`AGENT_COORDINATION.md`、`evidence/` 都在 `docs-root/agent/`。
 
-其余正式文档（设计、方案、说明、总结、教程、会议纪要等）按以下顺序取首个已有目录：
+WP 审查报告固定 `04_test/report/`。其余正式文档（设计、方案、说明、总结、教程、会议纪要等）落 docs-root（不是 `agent/`）；不因目录规则自动迁移既有文件。
 
-| 顺序 | 目录 | 条件 |
+| 顺序 | docs-root | 条件 |
 | --- | --- | --- |
 | 1 | `<项目根>/00_doc/` | 存在就用 |
-| 2 | `<项目根>/docs/` | 存在就用 |
-| 3 | `<项目根>/doc/` | 存在就用（与 `docs/` 视为同级别名） |
-| 4 | `<项目根>/docs/` | 都不存在时新建 |
+| 2 | `<项目根>/00_docs/` | 存在就用 |
+| 3 | `<项目根>/docs/` | 存在就用 |
+| 4 | `<项目根>/doc/` | 存在就用 |
+| 5 | `<项目根>/docs/` | 都不存在时新建 |
 
 不因目录规则自动迁移既有文件；目录规则只决定新文档落点，既有记录仍按职责维护。
 
@@ -120,9 +121,9 @@ flowchart TD
 
 | 文件/目录 | 维护者 | 内容 |
 | --- | --- | --- |
-| `docs/agent/AGENT_PROJECT.md` | 主对话 | 目标、决定、撤回方案、进度、验收 |
-| `docs/agent/AGENT_COORDINATION.md` | 主对话 | 阶段记忆、子任务、依赖、证据索引、异常 |
-| `docs/agent/evidence/WP-<id>/R<rev>/<subtask-id>/` | 子 Agent/主对话 | 完整日志、测试输出、截图、报告 |
+| `<docs-root>/agent/AGENT_PROJECT.md` | 主对话 | 目标、决定、撤回方案、进度、验收 |
+| `<docs-root>/agent/AGENT_COORDINATION.md` | 主对话 | 阶段记忆、子任务、依赖、证据索引、异常 |
+| `<docs-root>/agent/evidence/WP-<id>/R<rev>/<subtask-id>/` | 子 Agent/主对话 | 完整日志、测试输出、截图、报告 |
 
 - 三级记忆：主对话摘要 → 协作记录 → 证据文件；主对话只读关键证据。
 - 子 Agent 回传有界（建议 ≤1–2 KB），不贴原始日志。
@@ -130,7 +131,7 @@ flowchart TD
 - 长测试后台化：子 Agent 返回 PID/日志/状态/停止方式后结束，主对话按检查点查询。
 - 子 Agent 上下文过大时停止并新建，传摘要和证据路径。
 - 同一对话内保持系统提示/AGENTS/skill 稳定；规则变更新会话生效。
-- 项目适配：只读视图（如 Obsidian acceptance vault）不是事实源；源仍是 `AGENT_*` 与 evidence，视图只读、可重生成。
+- 项目适配：只读视图（如 Obsidian acceptance vault）不是事实源；源仍是 `AGENT_*` 与 evidence，视图只读、可重生成；vault 根=docs-root。
 - 与桥接模式共存时先明确冲突处理与文件名；未经用户明确授权，不改默认 `AGENT_PROJECT.md` / `AGENT_COORDINATION.md`，也不改桥接受管文件。
 
 ## 回传格式
@@ -143,7 +144,7 @@ flowchart TD
   "revision": 1,
   "state": "REVIEW_READY",
   "memory": "事实、假设、排除项、关键决定",
-  "children": [{"id": "agentId 或 T1", "task": "...", "status": "PASS", "evidence": "docs/agent/evidence/..."}],
+  "children": [{"id": "agentId 或 T1", "task": "...", "status": "PASS", "evidence": "<docs-root>/agent/evidence/..."}],
   "risks": ["..."],
   "next_steps": ["..."],
   "needs_user_decision": ["..."]
@@ -196,7 +197,7 @@ Agent(
 禁止事项：<...>
 基线：<...>
 检查方法：<...>
-证据写入：<项目根>/docs/agent/evidence/WP-<id>/R<n>/<subtask-id>/
+证据写入：<docs-root>/agent/evidence/WP-<id>/R<n>/<subtask-id>/
 最终消息：实际动作、逐项结果、证据路径、首异常、剩余问题、资源释放。
 """
 )

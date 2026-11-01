@@ -1,6 +1,6 @@
 ---
 name: single-conversation-subagent
-description: 两级协作（单对话 subagent/主对话协调/执行子 Agent/验证范围）：新任务必问四选一，仅明确“不用问，直接做”可跳过；标准/长任务再问验证范围与 Codex 收尾审查。
+description: 两级协作（单对话 subagent/主对话协调/执行子 Agent/验证范围）：新任务必问四选一，仅明确“不用问，直接做”可跳过；记忆在 docs-root/agent，标准/长任务再问验证范围与 Codex 收尾审查。
 ---
 
 # 两级协作
@@ -28,8 +28,8 @@ Codex 是外部只读审查者，由主对话按 codex-review 启动，非子 Ag
 
 ## 路径
 
-相对项目根，例外优先：AGENT_PROJECT.md、AGENT_COORDINATION.md 固定 docs/agent/；WP 审查报告 04_test/report/；证据 docs/agent/evidence/。
+记忆根 = docs-root/agent：docs-root 取首个存在的 00_doc/00_docs/docs/doc；均无则新建 docs。AGENT_PROJECT.md、AGENT_COORDINATION.md、evidence/ 都在 docs-root/agent/。
 
-其余正式文档取首个已有目录：00_doc/→docs/→doc/；均无则新建 docs/。不因目录规则自动迁移既有文件。
+WP 审查报告固定 04_test/report/。其余正式文档落 docs-root（不是 agent/）；不因目录规则自动迁移既有文件。Obsidian vault 根=docs-root；只读视图在 docs-root/agent/acceptance/。
 
 标准/长任务加载正文；快速/只调查只用 AGENTS，不加载正文/协议；规则变更新会话生效。

@@ -1,6 +1,6 @@
-# single-conversation-subagent skill 1.2.1
+# single-conversation-subagent skill 1.3.0
 
-记录日期：2026-10-19（1.0.x）；更新日期：2026-11-01（1.2.1；1.2.0 为 2026-10-28）
+记录日期：2026-10-19（1.0.x）；更新日期：2026-11-01（1.3.0；1.2.1 同日）
 
 把“单对话 subagent：两级协作协议”打包成用户级 skill。安装后，新的会话在每个新任务开始时先四选一，再按选中的模式执行：
 
@@ -21,13 +21,13 @@
 
 未选择或超时不得提前落默认值：只有用户明确不选或客户端报告 15 秒倒计时结束时，才按推荐项继续，不重复追问；真正的 15 秒倒计时由客户端实现。
 
-默认记忆布局跟随项目根目录：
+默认记忆布局跟随 docs-root：docs-root 取首个存在的 `00_doc` / `00_docs` / `docs` / `doc`；均无则新建 `docs`。
 
 ```markdown
 ## 记忆文件
-- 项目记录：<项目根>/docs/agent/AGENT_PROJECT.md
-- 协作记录：<项目根>/docs/agent/AGENT_COORDINATION.md
-- 证据目录：<项目根>/docs/agent/evidence/
+- 项目记录：<docs-root>/agent/AGENT_PROJECT.md
+- 协作记录：<docs-root>/agent/AGENT_COORDINATION.md
+- 证据目录：<docs-root>/agent/evidence/
 ```
 
 技能生成的正式文档（设计、方案、说明、总结、教程、会议纪要等）默认按以下顺序落盘：
@@ -35,11 +35,12 @@
 | 顺序 | 目录 | 条件 |
 | --- | --- | --- |
 | 1 | `<项目根>/00_doc/` | 存在就用 |
-| 2 | `<项目根>/docs/` | 存在就用 |
-| 3 | `<项目根>/doc/` | 存在就用（与 `docs/` 视为同级别名） |
-| 4 | `<项目根>/docs/` | 都不存在时新建 |
+| 2 | `<项目根>/00_docs/` | 存在就用 |
+| 3 | `<项目根>/docs/` | 存在就用 |
+| 4 | `<项目根>/doc/` | 存在就用 |
+| 5 | `<项目根>/docs/` | 都不存在时新建 |
 
-协议记忆、WP 审查报告、证据保持既有路径（`docs/agent/`、`04_test/report/`、`docs/agent/evidence/`），不因本规则改道；目录规则只决定新文档落点，不自动迁移既有文件。
+记忆、WP 审查报告、证据保持既有职责：记忆/证据在 `<docs-root>/agent/`，WP 审查报告在 `04_test/report/`；目录规则只决定新文档落点，不自动迁移既有文件。
 
 标准执行和长任务在同一对话内每个新任务开始前先做一次验证范围多选：操作、时机（本轮/收尾）、目的、预计耗时、资源、风险、说明。只给一个推荐路径：**快速冒烟（本轮）+ 定向回归（收尾）**；其他选项不单独标推荐/默认。定向/全量回归和稳定性放在收尾执行，不每轮重复；未选中的操作不进入计划；烧录/擦除等破坏性操作单独确认。
 
@@ -51,7 +52,7 @@
 
 ## 设计初衷与上下文预算
 
-长任务模式的核心是隔离长执行线：主对话只保留目标、决策、未决问题、下一步和证据路径；执行细节下沉到子 Agent 和 `docs/agent/evidence/`。它不是缓存清理机制，主对话仍会随轮次增长。
+长任务模式的核心是隔离长执行线：主对话只保留目标、决策、未决问题、下一步和证据路径；执行细节下沉到子 Agent 和 `<docs-root>/agent/evidence/`。它不是缓存清理机制，主对话仍会随轮次增长。
 
 - 三级记忆：主对话 → `AGENT_COORDINATION.md` → 证据文件。
 - 子 Agent 最终回传固定字段，不贴原始日志（建议 ≤ 1–2 KB）。
@@ -60,6 +61,12 @@
 - 子 Agent 上下文过大时停止并新建，传入摘要和证据路径。
 
 ## 版本变化
+
+### 1.3.0
+
+- 记忆根改为 **docs-root/agent**：docs-root 取首个存在的 `00_doc` / `00_docs` / `docs` / `doc`；均无则新建 `docs`。`AGENT_PROJECT.md`、`AGENT_COORDINATION.md`、`evidence/` 都在 docs-root/agent/，不再固定 `docs/agent`。
+- Obsidian vault 根 = docs-root；只读视图在 docs-root/agent/acceptance/。esp32_epd 已迁移到 `00_doc/agent`，vault 根 `00_doc`。
+- 同步 SKILL、protocol、AGENTS 片段、README、长文档；`04_test/report` 仍是 WP 审查报告路径。
 
 ### 1.2.1
 
@@ -148,8 +155,8 @@ bash install.sh --with-default-rule
 解压后进入包目录：
 
 ```bash
-tar -xzf single-conversation-subagent-skill-1.2.1.tar.gz
-cd single-conversation-subagent-skill-1.2.1
+tar -xzf single-conversation-subagent-skill-1.3.0.tar.gz
+cd single-conversation-subagent-skill-1.3.0
 ```
 
 ### 推荐：安装 skill 并设为默认规则
@@ -236,6 +243,6 @@ bash install.sh --uninstall --instructions-file /path/to/AGENTS.md
 - 简单问答、单步查询、纯解释性对话也必须先四选一，不得自动跳过；选快速处理或只调查后，不强行起协调层，避免为小问题增加两层 Agent 开销；一旦选择标准执行/长任务，立即按两级流程执行。
 - 工作区自己的指令文件加载在用户级规则之后，可以覆盖或收窄这条默认规则。
 - 执行子 Agent 的名称统一用 `<任务>子 Agent`，不要固定使用模型名或其他固定称呼。
-- 同一项目仍使用桥接模式时先明确冲突处理与文件名；未经用户明确授权，不改默认 `docs/agent/AGENT_PROJECT.md` / `docs/agent/AGENT_COORDINATION.md`，也不手工修改桥接管理的受管文件。
+- 同一项目仍使用桥接模式时先明确冲突处理与文件名；未经用户明确授权，不改默认 `<docs-root>/agent/AGENT_PROJECT.md` / `AGENT_COORDINATION.md`，也不手工修改桥接管理的受管文件。
 - 原生模式没有桥接式父子目录独立核验；需要严格进程级审计时，继续使用三层桥接模式。
-- skill 和协议不包含密钥、Cookie 或项目私有数据；不要把实际项目的 `docs/agent/AGENT_PROJECT.md` / `docs/agent/AGENT_COORDINATION.md` 打进分发包。
+- skill 和协议不包含密钥、Cookie 或项目私有数据；不要把实际项目的 `<docs-root>/agent/AGENT_PROJECT.md` / `AGENT_COORDINATION.md` 打进分发包。
