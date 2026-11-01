@@ -7,5 +7,6 @@
 - 三问仅在明确不选或客户端报告15秒倒计时结束才按推荐/默认继续；等待不落默认值、不重复追问；倒计时由客户端实现。
 - 快速/只调查不问验证多选；快速不建子 Agent；只调查只读，范围大时可派只读分析子 Agent。
 - 记忆在项目根下 `docs/agent/`：`AGENT_PROJECT.md`、`AGENT_COORDINATION.md`、`evidence/`。
+- 生成的正式文档默认写 `<项目根>/00_doc/`；没有则 `docs/`，再没有则 `doc/`；都没有就新建 `docs/`。协议记忆、审查报告、证据保持既有路径（`docs/agent/`、`04_test/report/`、`docs/agent/evidence/`），不要改道。
 - 标准/长任务加载 `single-conversation-subagent`；快速/只调查只用本规则，不加载正文/完整协议。规则变更新会话生效。
 <!-- single-conversation-subagent end -->

@@ -22,10 +22,10 @@ usage() {
 Usage: bash install.sh [options]
 
 Options:
-  --with-default-rule   Install the skill and append the marked default rule
-                        to $AGENT_HOME/AGENTS.md.
+  --with-default-rule   Install the skill and add/update the marked default
+                        rule in $AGENT_HOME/AGENTS.md.
   --instructions-file <path>
-                        Append the marked rule to a specific user-level
+                        Add/update the marked rule in a specific user-level
                         instruction file. Implies --with-default-rule.
   --uninstall           Remove the installed skill and the marked rule block.
   -h, --help            Show this help.
@@ -54,10 +54,29 @@ assert_safe_skill_dir() {
   esac
 }
 
+validate_rule_block() {
+  local target="$1"
+  local begin_count end_count begin_line end_line
+  begin_count=$(grep -cxF "$BEGIN" "$target" || true)
+  end_count=$(grep -cxF "$END" "$target" || true)
+  if [ "$begin_count" -ne 1 ] || [ "$end_count" -ne 1 ]; then
+    echo "Malformed rule block in $target (BEGIN=$begin_count, END=$end_count); not modified." >&2
+    return 1
+  fi
+  begin_line=$(grep -nxF "$BEGIN" "$target" | cut -d: -f1)
+  end_line=$(grep -nxF "$END" "$target" | cut -d: -f1)
+  if [ "$begin_line" -ge "$end_line" ]; then
+    echo "Malformed rule block in $target (END before BEGIN); not modified." >&2
+    return 1
+  fi
+  return 0
+}
+
 remove_rule_block() {
   [ -n "$INSTRUCTIONS_FILE" ] || return 0
   [ -f "$INSTRUCTIONS_FILE" ] || return 0
-  grep -qF "$BEGIN" "$INSTRUCTIONS_FILE" || return 0
+  grep -qxF "$BEGIN" "$INSTRUCTIONS_FILE" || return 0
+  validate_rule_block "$INSTRUCTIONS_FILE" || return 1
   backup_path "$INSTRUCTIONS_FILE"
   local tmp
   tmp="$(mktemp "${INSTRUCTIONS_FILE}.tmp.XXXXXX")"
@@ -66,8 +85,25 @@ remove_rule_block() {
     $0 == end   { skip=0; next }
     !skip       { print }
   ' "$INSTRUCTIONS_FILE" > "$tmp"
-  mv "$tmp" "$INSTRUCTIONS_FILE"
+  cat "$tmp" > "$INSTRUCTIONS_FILE"
+  rm -f "$tmp"
   echo "Removed default rule from $INSTRUCTIONS_FILE"
+}
+
+replace_rule_block() {
+  local target="$1" snippet="$2" tmp
+  tmp="$(mktemp "${target}.tmp.XXXXXX")"
+  awk -v snippet_file="$snippet" -v begin="$BEGIN" -v end="$END" '
+    BEGIN {
+      while ((getline line < snippet_file) > 0) snip = snip line ORS
+      close(snippet_file)
+    }
+    $0 == begin { printf "%s", snip; skip=1; next }
+    $0 == end   { skip=0; next }
+    !skip       { print }
+  ' "$target" > "$tmp"
+  cat "$tmp" > "$target"
+  rm -f "$tmp"
 }
 
 WITH_RULE=0
@@ -99,6 +135,9 @@ if [ "$WITH_RULE" -eq 1 ] && [ -z "$INSTRUCTIONS_FILE" ]; then
 fi
 
 if [ "$UNINSTALL" -eq 1 ]; then
+  if [ -f "$INSTRUCTIONS_FILE" ] && grep -qxF "$BEGIN" "$INSTRUCTIONS_FILE"; then
+    validate_rule_block "$INSTRUCTIONS_FILE" || exit 1
+  fi
   if [ -d "$DEST_DIR" ]; then
     assert_safe_skill_dir
     backup_path "$DEST_DIR"
@@ -107,7 +146,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
   else
     echo "Skill not installed at $DEST_DIR"
   fi
-  remove_rule_block
+  remove_rule_block || exit 1
   echo "Uninstall complete. Start a new session."
   exit 0
 fi
@@ -136,8 +175,11 @@ if [ "$WITH_RULE" -eq 1 ]; then
     echo "Refusing to modify symlinked $INSTRUCTIONS_FILE" >&2
     exit 1
   fi
-  if [ -f "$INSTRUCTIONS_FILE" ] && grep -qF "$BEGIN" "$INSTRUCTIONS_FILE"; then
-    echo "Default rule already present in $INSTRUCTIONS_FILE; left unchanged."
+  if [ -f "$INSTRUCTIONS_FILE" ] && grep -qxF "$BEGIN" "$INSTRUCTIONS_FILE"; then
+    validate_rule_block "$INSTRUCTIONS_FILE" || exit 1
+    backup_path "$INSTRUCTIONS_FILE"
+    replace_rule_block "$INSTRUCTIONS_FILE" "$SNIPPET"
+    echo "Updated default rule in $INSTRUCTIONS_FILE"
   else
     if [ -f "$INSTRUCTIONS_FILE" ]; then
       backup_path "$INSTRUCTIONS_FILE"

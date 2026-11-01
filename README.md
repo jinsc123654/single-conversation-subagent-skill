@@ -1,6 +1,6 @@
-# single-conversation-subagent skill 1.2.0
+# single-conversation-subagent skill 1.2.1
 
-记录日期：2026-10-19（1.0.x）；更新日期：2026-10-28（1.2.0；1.1.0 为 2026-10-25）
+记录日期：2026-10-19（1.0.x）；更新日期：2026-11-01（1.2.1；1.2.0 为 2026-10-28）
 
 把“单对话 subagent：两级协作协议”打包成用户级 skill。安装后，新的会话在每个新任务开始时先四选一，再按选中的模式执行：
 
@@ -13,20 +13,13 @@
 
 完整流程、四选一、验证范围、记忆布局和回传格式见 [docs/单对话subagent-两级协作协议.md](docs/单对话subagent-两级协作协议.md)。
 
-<a href="docs/archify/skill-architecture.html">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/archify/skill-architecture-dark.gif">
-    <img alt="single-conversation-subagent 架构视图：Skill 包与安装产物、主对话、执行子 Agent、三级记忆" src="docs/archify/skill-architecture-light.gif">
-  </picture>
-</a>
-
-架构图展示 Skill 包、`install.sh` 安装产物、主对话、原生 Agent 工具、执行子 Agent、确认验证范围入口、codex-review 联动入口，以及项目/协作/证据三类记忆。GIF 为 4 秒循环，按系统深浅色自动切换；完整交互版（缩放、路径、动效开关）见 [docs/archify/skill-architecture.html](docs/archify/skill-architecture.html)（下载后用浏览器打开）。
+架构图在源码仓库的 `docs/archify/`（HTML/GIF）；发行包为控制体积不包含这些资源。需要查看时在源码仓库打开 `docs/archify/skill-architecture.html`。
 
 每个新的用户任务开始时先四选一：**快速处理 / 标准执行 / 长任务 / 只调查**，包括“推送吧”“改一下”“跑一下”这类直接命令；同一任务的追问不重复问，只有明确说“不用问，直接做”时才可跳过。**不得按任务大小/类型（纯问答、小改、单文件、快速查询等）自动跳过；任务大小只影响推荐项，不决定是否提问。** 纯问答、搜索、单文件小改、简单 Excel、快速查询一般推荐快速处理；选快速处理或只调查后，不再做验证范围多选。
 
 四选一必须带推荐项并默认勾选；纯问答/小改推荐快速处理，普通工程推荐标准执行，长验证推荐长任务，只读排查推荐只调查；拿不准时推荐标准执行。推荐项只决定默认选中，不代表可以跳过提问。
 
-未选择或超时按推荐项继续，不重复追问；真正的 15 秒倒计时由客户端实现。
+未选择或超时不得提前落默认值：只有用户明确不选或客户端报告 15 秒倒计时结束时，才按推荐项继续，不重复追问；真正的 15 秒倒计时由客户端实现。
 
 默认记忆布局跟随项目根目录：
 
@@ -36,6 +29,17 @@
 - 协作记录：<项目根>/docs/agent/AGENT_COORDINATION.md
 - 证据目录：<项目根>/docs/agent/evidence/
 ```
+
+技能生成的正式文档（设计、方案、说明、总结、教程、会议纪要等）默认按以下顺序落盘：
+
+| 顺序 | 目录 | 条件 |
+| --- | --- | --- |
+| 1 | `<项目根>/00_doc/` | 存在就用 |
+| 2 | `<项目根>/docs/` | 存在就用 |
+| 3 | `<项目根>/doc/` | 存在就用（与 `docs/` 视为同级别名） |
+| 4 | `<项目根>/docs/` | 都不存在时新建 |
+
+协议记忆、WP 审查报告、证据保持既有路径（`docs/agent/`、`04_test/report/`、`docs/agent/evidence/`），不因本规则改道；目录规则只决定新文档落点，不自动迁移既有文件。
 
 标准执行和长任务在同一对话内每个新任务开始前先做一次验证范围多选：操作、时机（本轮/收尾）、目的、预计耗时、资源、风险、说明。只给一个推荐路径：**快速冒烟（本轮）+ 定向回归（收尾）**；其他选项不单独标推荐/默认。定向/全量回归和稳定性放在收尾执行，不每轮重复；未选中的操作不进入计划；烧录/擦除等破坏性操作单独确认。
 
@@ -57,13 +61,22 @@
 
 ## 版本变化
 
+### 1.2.1
+
+- 压缩入口 `SKILL.md`：8,476 → 3,147 字节（1,393 字符，-62.9%），六项行为基线不变；模板/字段/异常细节继续按需读 `references/protocol.md`。
+- 明确 Codex 外部审查边界：非子 Agent、只能由主对话启动、子 Agent 不得启动。
+- 文档输出例外前置；明确目录规则只决定新文档落点，不自动迁移既有文件。
+- 修正 README 的超时旧表述、验证示例和字符数记录；长文档流程图补齐“明确要求审查/未知注册/不用问直接做”分支。
+- 移除默认文件名与 `_NATIVE` 隐式改名的冲突：共存需显式授权。
+
 ### 1.2.0
 
+- 增加正式文档输出位置规则：`00_doc/` → `docs/` → `doc/` → 新建 `docs/`；协议记忆、审查报告、证据保持既有路径。
 - 增加与 `codex-review` 技能的联动：本地装了 codex-review 时，标准执行/长任务在验证范围问完后追加一问“收尾是否用 Codex 独立审查”；默认与 15 秒超时均为“不使用”，不重复追问。
 - 本地未装 codex-review 时自动跳过该问，不影响原有四选一 + 验证范围两问流程；联动问只出现在标准执行/长任务，快速处理/只调查只有四选一。SKILL.md、references/protocol.md、AGENTS.snippet.md 三处同步更新。
 - 四选一超时语义修正（2026-10-28 用户定）：15 秒未选择按推荐项继续（此前固定按“标准执行”）；验证范围超时=唯一推荐路径，联动问超时=不使用，三问统一为“超时=推荐/默认”。
 - 按 Codex 独立审查（REJECT）修正：超时只在“明确不选或客户端报告超时”时生效，等待期间不落默认值；只调查可派只读分析子 Agent（与“不建执行子 Agent”的矛盾消除）；联动问改为注册状态三态判断，明确要求审查时直接执行，同工作包/修订只审一次，迟到回复绑定问题与修订；设计文档 mermaid 补 Codex 审查分支。
-- 上下文瘦身（2026-10-28，Codex 执行，零语义变化）：SKILL.md 4460→3524 字符（描述 441→167），AGENTS.snippet 1073→721；`references/protocol.md` 保持按需加载、未压缩。
+- 上下文瘦身（2026-10-28 记录，后续 1.2.1 再压缩）：当时 SKILL.md 为 8,476 字节；1.2.1 压到约 3.0 KB，`references/protocol.md` 保持按需加载、未压缩。
 - 设计记录 docs/单对话subagent-两级协作协议.md 与架构视图（HTML/GIF/PNG）同步重生：新增 codex-review 联动节点与“装了才追问”连线。
 
 ### 1.1.0
@@ -135,8 +148,8 @@ bash install.sh --with-default-rule
 解压后进入包目录：
 
 ```bash
-tar -xzf single-conversation-subagent-skill-1.2.0.tar.gz
-cd single-conversation-subagent-skill-1.2.0
+tar -xzf single-conversation-subagent-skill-1.2.1.tar.gz
+cd single-conversation-subagent-skill-1.2.1
 ```
 
 ### 推荐：安装 skill 并设为默认规则
@@ -192,7 +205,7 @@ AGENT_HOME=/path/to/agent-home bash install.sh --with-default-rule
 
    若使用了自定义 `AGENT_HOME` 或 `--instructions-file`，把路径换成实际位置。
 
-3. 在会话里给一个跨文件任务，例如“调查这个 bug 的根因并给出修复与测试”，模型应加载 `single-conversation-subagent`，由主对话定义工作包、维护阶段记忆、拆分并创建执行子 Agent。
+3. 在会话里给一个跨文件任务，例如“调查这个 bug 的根因并给出修复与测试”，模型应先完成四选一；选标准执行/长任务后继续问验证范围（本地装了 codex-review 时再追加收尾审查问），再由主对话定义工作包、维护阶段记忆、拆分并创建执行子 Agent。
 4. 如果客户端支持斜杠命令，也可显式调用 `/single-conversation-subagent <任务>`。
 
 ## 手动安装（Windows / 无 bash）
@@ -223,6 +236,6 @@ bash install.sh --uninstall --instructions-file /path/to/AGENTS.md
 - 简单问答、单步查询、纯解释性对话也必须先四选一，不得自动跳过；选快速处理或只调查后，不强行起协调层，避免为小问题增加两层 Agent 开销；一旦选择标准执行/长任务，立即按两级流程执行。
 - 工作区自己的指令文件加载在用户级规则之后，可以覆盖或收窄这条默认规则。
 - 执行子 Agent 的名称统一用 `<任务>子 Agent`，不要固定使用模型名或其他固定称呼。
-- 同一项目仍使用桥接模式时，原生模式应改用 `docs/agent/AGENT_PROJECT_NATIVE.md` / `docs/agent/AGENT_COORDINATION_NATIVE.md`，不要手工修改桥接管理的受管文件。
+- 同一项目仍使用桥接模式时先明确冲突处理与文件名；未经用户明确授权，不改默认 `docs/agent/AGENT_PROJECT.md` / `docs/agent/AGENT_COORDINATION.md`，也不手工修改桥接管理的受管文件。
 - 原生模式没有桥接式父子目录独立核验；需要严格进程级审计时，继续使用三层桥接模式。
 - skill 和协议不包含密钥、Cookie 或项目私有数据；不要把实际项目的 `docs/agent/AGENT_PROJECT.md` / `docs/agent/AGENT_COORDINATION.md` 打进分发包。
