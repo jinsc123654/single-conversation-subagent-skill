@@ -1,6 +1,6 @@
-# single-conversation-subagent skill 1.3.0
+# single-conversation-subagent skill 1.3.1
 
-记录日期：2026-10-19（1.0.x）；更新日期：2026-11-01（1.3.0；1.2.1 同日）
+记录日期：2026-10-19（1.0.x）；更新日期：2026-11-02（1.3.1；1.3.0 为 2026-11-01）
 
 把“单对话 subagent：两级协作协议”打包成用户级 skill。安装后，新的会话在每个新任务开始时先四选一，再按选中的模式执行：
 
@@ -61,6 +61,12 @@
 - 子 Agent 上下文过大时停止并新建，传入摘要和证据路径。
 
 ## 版本变化
+
+### 1.3.1
+
+- 上下文压缩：SKILL.md 1,514 → 1,154 字符（-23.8%）；常驻 AGENTS 标记块 985 → 700 字符（-28.9%）；description 110 → 59 字符。
+- protocol 不压缩、保持按需加载；六项行为基线（四选一、验证范围、Codex 联动、超时、docs-root/agent、子 Agent 边界）保留。
+- 同步 `~/.codex/skills` 的旧副本（原先仍固定 docs/agent、无 1.3.0 边界）。
 
 ### 1.3.0
 
@@ -155,8 +161,8 @@ bash install.sh --with-default-rule
 解压后进入包目录：
 
 ```bash
-tar -xzf single-conversation-subagent-skill-1.3.0.tar.gz
-cd single-conversation-subagent-skill-1.3.0
+tar -xzf single-conversation-subagent-skill-1.3.1.tar.gz
+cd single-conversation-subagent-skill-1.3.1
 ```
 
 ### 推荐：安装 skill 并设为默认规则
