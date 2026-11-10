@@ -5,9 +5,9 @@
 - PyQt 项目栏改为可展开/收起的项目与工作包树，记住折叠状态，按最后 MCP 活动或显式打开时间自动排序。
 - Obsidian 首次一键打开：本地 `.obsidian` 与项目独立 profile/库映射自动准备，使用 `--user-data-dir` 启动，不修改全局库列表、不关闭用户其他库。MCP 初始化同步生成 profile；工具数量增至17（interaction_ask）。
 - 新增 `interaction_ask`：MCP form + 服务端 `timeout_seconds`（默认 15s），仅 legacy back-channel；超时标记 `TIMED_OUT` 并返回推荐项，不写 `CONFIRMED`。modern/无 form fallback 保持 `WAITING_USER` 和 `question_id`，用户明确回复后直接 `interaction_submit`；RPC 异常统一记 `FAILED/RPC_ERROR`。ZCode 原生 AskUserQuestion 自动解析为 60s 隐藏 + 5min 截止，不是 15s。
-- 宿主适配：安装器新增 `--host codex|zcode|claude|generic` 与 `--question-channel auto|native|mcp|text`，默认 codex→native、zcode→mcp、其他→auto；写入 `SCS_HOST`/`SCS_QUESTION_CHANNEL` 和 `host-profile.json`。`session_open` 返回 channel，Skill 按 native/text/mcp/auto 路由；四选一前只允许一次 `session_open`，不读项目配置/记忆；执行子 Agent 继承 mode/verification，不重新提问。
+- 宿主适配：安装器新增 `--host codex|zcode|claude|generic` 与 `--question-channel auto|native|mcp|text`，默认 codex→native、zcode→mcp、其他→auto；写入 `SCS_HOST`/`SCS_QUESTION_CHANNEL` 和 `host-profile.json`。`session_open` 返回 channel，Skill 按 native/text/mcp/auto 路由；四选一前只允许一次 `session_open`，不读项目配置/记忆；执行子 Agent 继承 mode/verification，不重新提问。`session_open` 的 client_name 按配置 host 前缀命名空间（`host-client_name`），跨宿主同 conversation ID 不共用会话；补跨宿主与 RPC 异常测试。
 - 当前 Linux / Obsidian 1.14.4 完成真实首次笔记窗口验证。新配置冲突保留原内容；已有库设置保持原样。
-- ZCode stdio 兼容：识别 ZCode 的 2026-07-28 `server/discover` 探测与后续 legacy 请求混用；本地回绝探测并剥离保留 `_meta` 信封，回落 2025-11-25 握手，明确标识的非 ZCode 客户端仍走 modern。全套 130 项 pytest、6 项 host-channel 测试、真实 stdio 序列与 PyQt live 17 工具通过。
+- ZCode stdio 兼容：识别 ZCode 的 2026-07-28 `server/discover` 探测与后续 legacy 请求混用；本地回绝探测并剥离保留 `_meta` 信封，回落 2025-11-25 握手，明确标识的非 ZCode 客户端仍走 modern。全套 132 项 pytest、8 项 host-channel 测试、真实 stdio 序列与 PyQt live 17 工具通过。
 
 ## 2.1.0 — 2026-11-10
 

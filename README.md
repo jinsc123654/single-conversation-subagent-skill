@@ -2,22 +2,25 @@
 
 单对话两级 Subagent 协作，采用 **Skill 策略 + 可选本地 MCP 状态/交互 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不是独立 Agent 桥接器。
 
-重点修复首次四选一有时不出现时的处理：优先真实调用宿主原生提问，其次使用声明支持的 MCP 表单，最后显示完整文本选项并结束当轮等待明确回复。**安装 MCP 不保证弹窗出现。** 推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认。
+首次四选一的通道由安装期 `SCS_QUESTION_CHANNEL` 决定：`native` 用宿主原生，`text` 用完整文本，`mcp` 用 legacy MCP form/15s，`auto` 按声明能力回落；`session_open` 返回实际 channel。**安装 MCP 不保证弹窗出现。** 推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认。
 
 ```mermaid
 flowchart TD
-  S["真实对话首次任务"] --> N{"原生提问可用？"}
-  N -->|是| A["调用宿主原生提问"]
-  N -->|否| M{"MCP 可见且声明表单能力？"}
-  M -->|是| E["Resolver / Elicit 交互"]
-  M -->|否| T["完整文本选项，结束当轮等待"]
-  E -->|失败| T
+  S["真实对话首次任务"] --> O["session_open → question_channel"]
+  O -->|native| A["调用宿主原生提问"]
+  O -->|text| T["完整文本选项，结束当轮等待"]
+  O -->|mcp| M{"legacy form 可用？"}
+  O -->|auto| M
+  M -->|是| E["interaction_ask(timeout=15s)"]
+  M -->|否| T
+  E -->|TIMED_OUT + 推荐项| C["按推荐项继续（不写 CONFIRMED）"]
+  E -->|其他失败| T
   A --> R{"明确接受？"}
-  E --> R
   T --> R
-  R -->|是| C["绑定 question_id 确认选择"]
+  R -->|是| Q["绑定 question_id 确认选择"]
   R -->|取消/拒绝/超时| W["保持未确认，等用户决定"]
   C --> P["按需工作包 → 原生执行子 Agent"]
+  Q --> P
   P --> V["证据与修订 → 主对话最终验收"]
 ```
 
@@ -71,6 +74,10 @@ Codex TOML 示例（复制前按实际路径修改，不需要放宽审批或信
 [mcp_servers.single-conversation-subagent]
 command = "/absolute/repository/.venv/bin/python"
 args = ["-m", "scs_mcp", "--project-root", "/absolute/project"]
+
+[mcp_servers.single-conversation-subagent.env]
+SCS_HOST = "codex"
+SCS_QUESTION_CHANNEL = "native"
 ```
 
 JSON stdio 示例（适用于使用 mcpServers 格式的客户端；逐客户端核对导入位置）：
@@ -174,7 +181,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 只读资源 `scs://session/{id}`、`scs://work-package/{id}`。完整参数、错误码、使用与恢复示例见 [MCP 用法](single-conversation-subagent/references/mcp.md)。
 
-会话不以 cwd、PID、MCP 连接 ID 识别；不同宿主命名空间隔离，无可靠 ID 则显式临时会话。SQLite schema 2、WAL、事务、busy timeout；多进程使用相同项目 DB，工作包更新必须携带 expected_version。数据库路径及伴随文件不得为符号链接；证据读取通过目录描述符逐级拒绝符号链接和越界。状态目录不是进程级沙箱，不能防止同一用户的恶意外部进程替换整个目录；本服务不适合不互信多用户。
+会话不以 cwd、PID、MCP 连接 ID 识别；`session_open` 的 client_name 由配置 host 前缀命名空间（`host-client_name`，省略时为 `host-host`），不同宿主使用同一 conversation ID 也不会共用会话；无可靠 ID 则显式临时会话。SQLite schema 2、WAL、事务、busy timeout；多进程使用相同项目 DB，工作包更新必须携带 expected_version。数据库路径及伴随文件不得为符号链接；证据读取通过目录描述符逐级拒绝符号链接和越界。状态目录不是进程级沙箱，不能防止同一用户的恶意外部进程替换整个目录；本服务不适合不互信多用户。
 
 Markdown 由主对话同步：docs-root 依次为 00_doc、00_docs、docs、doc，均无则创建 docs。保持 `<docs-root>/agent/AGENT_PROJECT.md`、`AGENT_COORDINATION.md`、`evidence/WP-<id>/R<rev>/<subtask-id>/` 及 `04_test/report/`。服务只初始化缺失记忆文件，绝不覆盖既有内容；所有工作包变更提示 record_sync_required。MCP 断开时纯 Skill 维护文件；恢复前显式核对，当前不提供自动导入器或自动覆盖。
 

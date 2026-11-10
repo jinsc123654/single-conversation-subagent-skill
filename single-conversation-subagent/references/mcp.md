@@ -6,7 +6,7 @@
 
 ## 初次交互
 
-1. `session_open(client_name="host", conversation_id="宿主真实对话ID", review_registration="registered|unregistered|unknown")`。`project_root` 可省略，省略时用服务端启动配置的根；返回 `question_channel`（auto/native/mcp/text）与 `host`。只做这一次绑定，不要先读项目配置/记忆或检查 MCP 注册。ID 未知时省略并保留返回 ID；不得伪造真实 ID、用项目路径当对话 ID。
+1. `session_open(client_name=..., conversation_id="宿主真实对话ID", review_registration="registered|unregistered|unknown")`。`project_root` 可省略，省略时用服务端启动配置的根；`client_name` 也可省略，服务端按配置 host 前缀命名空间（`host-client_name`，省略时 `host-host`），不同宿主同 ID 不共用会话。返回 `question_channel`（auto/native/mcp/text）与 `host`。只做这一次绑定，不要先读项目配置/记忆或检查 MCP 注册。ID 未知时省略并保留返回 ID；不得伪造真实 ID、用项目路径当对话 ID。
 2. 按 `question_channel` 路由。`native`：用宿主原生 Ask/Question，没有时用文本；`text`：完整显示选项、推荐与 question_id，结束当轮等待；`mcp`：`interaction_ask(session_id=...,kind="mode",recommendation=["standard"],timeout_seconds=15)`，仅 legacy stdio 的 back-channel 打开 MCP form，到点标记 `TIMED_OUT` 并返回 recommendation，不写 `CONFIRMED`；`auto`：form 可用则按 mcp，否则按 native/text。
 3. `MODERN_NO_BACKCHANNEL`/`ELICITATION_UNSUPPORTED`/`TEXT_FALLBACK_REQUIRED`：问题保持 `WAITING_USER` 并带 `question_id`；显示完整选项与唯一推荐，用户明确回复后直接 `interaction_submit(...,action="accept",choices=[...],source="text"|"native")`。modern 无回通道只表示不能做服务端限时 form，不等于客户端完全不支持 elicitation。原生/文本路径不声称 15 秒；15 秒只用于 mcp form 路径。ZCode 原生 AskUserQuestion 是 60 秒隐藏 + 5 分钟截止。
 4. 需要显式 MCP 记账时，`interaction_request(...,channel="native")` 只登记，然后真实调用原生工具，再将用户明确答复以返回 `question_id` 提交；服务不越过宿主调用 UI。

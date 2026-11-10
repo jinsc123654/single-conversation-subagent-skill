@@ -12,7 +12,7 @@ description: 单对话两级 Subagent 协作；每个真实对话首个任务选
 2. `text`：完整展示选项、唯一推荐与 question_id，结束当轮等待明确回复。
 3. `mcp`：先 `interaction_ask(timeout_seconds=15)`；返回 `MODERN_NO_BACKCHANNEL`/`ELICITATION_UNSUPPORTED`/`TEXT_FALLBACK_REQUIRED` 时，用同一 `question_id` 改走原生/文本，明确回复后直接 `interaction_submit`。
 4. `auto`：MCP form 可用则按 `mcp`，否则按 `native`/`text`。
-原生/文本路径不声称 15 秒；15 秒只属于 `mcp` form 路径。MCP 路径先 `session_open` 绑定宿主真实 conversation ID（可省略 project_root）；原生提问不需要 session_open。
+原生/文本路径不声称 15 秒；15 秒只属于 `mcp` form 路径。MCP 路径先 `session_open` 绑定宿主真实 conversation ID（可省略 project_root/client_name，服务端按 host 命名空间）；原生提问不需要 session_open。
 
 同一时刻只用一路提问。原生已提问时，不再打开 MCP 表单；若用 MCP 记账，interaction_request(channel="native") 只登记，再将真实回复 interaction_submit。原生失败后先记录失败，显式重开问题再换下一路。确认过的选择不重复问；取消/拒绝保持未确认，只有用户要求重试或改变时显式重开。超时仅认可宿主真实可观测结果且事先告知的配置策略；`interaction_ask` 的服务端截止时间是可观测结果，到点标记 `TIMED_OUT` 并返回推荐项；命令等待、RPC 超时、UI 不出现均不是用户超时。fallback（native/text、无 form、modern 无回通道）保持问题 `WAITING_USER`，可直接 `interaction_submit`；RPC 异常才标 `FAILED`，需显式 reopen 后重试。`TIMED_OUT` 不写 `CONFIRMED`，主对话可按本对话策略采用返回的推荐项继续。ZCode 原生 AskUserQuestion 自动解析为 **60 秒隐藏 + 5 分钟截止（空答案）**，不是 15 秒；15 秒路径默认用 `interaction_ask`。工具已调用不能证明用户看见 UI。
 

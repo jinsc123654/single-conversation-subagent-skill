@@ -1,6 +1,7 @@
 """Official SDK v2 stdio server. No agent creation, process execution, or HTTP."""
 
 import json
+import re
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Annotated, Literal, Any
@@ -88,22 +89,26 @@ class SafeServer(MCPServer):
 def create_server(project_root: str | Path, question_channel: str = "auto", host: str = "generic") -> SafeServer:
     if question_channel not in {"auto", "native", "mcp", "text"}:
         question_channel = "auto"
+    host = re.sub(r"[^\w .-]", "_", (host or "generic").strip())[:32] or "generic"
     store = Store(project_root)
     mcp = SafeServer(store)
     state = mcp.state
 
     @mcp.tool(structured_output=True)
-    async def session_open(project_root: str | None = None, client_name: str = "host", conversation_id: str | None = None,
+    async def session_open(project_root: str | None = None, client_name: str | None = None, conversation_id: str | None = None,
                      review_registration: Literal["registered", "unregistered", "unknown"] = "unknown",
                      explicit_skip: bool = False) -> dict[str, Any]:
         """Bind a host conversation to the configured root and report the host question channel.
 
-        project_root defaults to the server's configured root; omitting it is the
-        intended first-question path. review_registration is host registry
-        evidence, not a guess. explicit_skip attests that the user explicitly
-        said no questions; it authorizes no destructive operation.
+        project_root defaults to the server's configured root. client_name is
+        namespaced by the configured host (host-client_name) so two hosts with
+        the same conversation ID cannot reuse one session; omitting it uses
+        host-host. review_registration is host registry evidence, not a guess.
+        explicit_skip attests that the user explicitly said no questions; it
+        authorizes no destructive operation.
         """
-        result = state.open(project_root or str(store.root), client_name, conversation_id, review_registration, explicit_skip)
+        resolved_client = f"{host}-{client_name or host}"
+        result = state.open(project_root or str(store.root), resolved_client, conversation_id, review_registration, explicit_skip)
         result["question_channel"] = question_channel
         result["host"] = host
         return result
@@ -171,12 +176,13 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         channel: Literal["auto", "native", "text"] = "auto",
         question_id: str | None = None,
     ) -> dict[str, Any]:
-        """Ask once: native route first when available; auto uses declared MCP form support, else TEXT_FALLBACK_REQUIRED.
+        """Ask once using the configured host channel; an explicit native/text overrides it.
 
         Supply one recommended path: mode=[quick|standard|long|investigate],
         verification=[smoke,targeted,...] or [none] or [method-only], codex_review=[no].
-        Use channel=native when a native host question tool is available. Never open
-        two channels at once. question_id pins a known question during a resumed call.
+        channel=auto follows SCS_QUESTION_CHANNEL; use channel=native/text only
+        for an explicit route. Never open two channels at once. question_id pins
+        a known question during a resumed call.
         """
         if answer.action == "accept" and isinstance(answer.data, dict):
             return answer.data
