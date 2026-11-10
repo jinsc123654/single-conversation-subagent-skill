@@ -25,7 +25,7 @@ async def main(args):
                 diagnostics = await call('diagnostics_check')
                 assert diagnostics['server_version'] == '2.2.0'
                 tools = await client.list_tools()
-                assert len(tools.tools) == 16
+                assert len(tools.tools) == 17
                 sid = (await call('session_open', project_root=root, client_name='wheel-probe', explicit_skip=True))['id']
                 view = await call('project_view_refresh', session_id=sid, initialize_vault=True)
                 assert view['view_initialized'] and view['local_config_present']

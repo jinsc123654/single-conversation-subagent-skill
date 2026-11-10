@@ -113,7 +113,7 @@ async def test_independent_stdio_obsidian_view_auto_refresh(mode, tmp_path):
         out = await call("project_view_refresh", session_id=sid, initialize_vault=True)
         assert out["view_initialized"] and out["local_config_present"]
         tools = await client.list_tools()
-        assert len(tools.tools) == 16
+        assert len(tools.tools) == 17
         p = await call("work_package_create", session_id=sid, goal="View stdio probe", allowed_files=["src"], acceptance=["live view"], request_key="view",
             subtasks=[{"id":"T1", "kind":"analyze", "allowed_files":["src"], "acceptance":["view report"]}])
         assert p["view_update"]["status"] == "OK"

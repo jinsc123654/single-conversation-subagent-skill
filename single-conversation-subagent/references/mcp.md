@@ -9,8 +9,9 @@
 1. `session_open(project_root=..., client_name="host", conversation_id="宿主真实对话ID", review_registration="registered|unregistered|unknown")`。ID 未知时省略并保留返回 ID，每次省略都会新建临时会话。不得伪造真实 ID、用项目路径当对话 ID。
 2. 原生工具可用时，直接用原生提问。若需要 MCP 记账，先 `interaction_request(session_id=...,kind="mode",recommendation=["long"],channel="native")`，然后真实调用原生工具，将用户明确答复以返回 question_id 提交。服务不越过宿主调用 UI。
 3. 原生不可用时 `interaction_request(...,channel="auto")`，由实际连接声明能力决定能否用 MCP。Resolver/Elicit 兼容现代多轮和 legacy 回调。服务端不按客户端名称猜测。
-4. TEXT_FALLBACK_REQUIRED：显示 display_text 中完整选项与唯一推荐，结束当轮等回复；再 `interaction_submit(session_id=...,question_id=...,action="accept",choices=["long"],source="text")`。不把文本当原生弹窗成功。
-5. `session_get` 读取已确认选择与未决问题。同题重复 request 不弹第二个 UI，已确认直接返回 ALREADY_CONFIRMED。
+4. 需要服务端 15 秒截止时用 `interaction_ask(session_id=...,kind="mode",recommendation=["standard"],timeout_seconds=15)`。它只在 legacy stdio 的 back-channel 上打开 MCP form；到点标记 `TIMED_OUT` 并返回 recommendation，不写 `CONFIRMED`。modern 协议返回 `TEXT_FALLBACK_REQUIRED`（`MODERN_NO_BACKCHANNEL`），改用原生/文本。ZCode 原生 AskUserQuestion 是 60 秒隐藏 + 5 分钟截止，不是 15 秒。
+5. TEXT_FALLBACK_REQUIRED：显示 display_text 中完整选项与唯一推荐，结束当轮等回复；再 `interaction_submit(session_id=...,question_id=...,action="accept",choices=["long"],source="text")`。不把文本当原生弹窗成功。
+6. `session_get` 读取已确认选择与未决问题。同题重复 request 不弹第二个 UI，已确认直接返回 ALREADY_CONFIRMED。
 
 模式值 `quick/standard/long/investigate`。推荐是单元素列表。仅首次进入 standard/long 后请求 verification，值为 `smoke/targeted/full/stability/none/method-only`，支持多选；推荐只有一个列表组合。`none` 和 `method-only` 各自排除所有其他项。冒烟本轮，定向/全量/稳定性收尾；用户指定预算、资源、方法写入协调记录。危险操作不在此表单授权范围。
 
@@ -18,7 +19,7 @@ verification 确认后，只有宿主确证注册 codex-review 才请求 codex_r
 
 ## 问题与故障
 
-`interaction_submit` 接受 accept/decline/cancel/timeout/unsupported/error。accept 必须有明确合法选择。timeout 需要宿主可观测超时回执 `observed_timeout=true`，仍不自动选项。RPC 超时提交 error，不能填 timeout。decline/cancel/timeout 保持终态未确认。
+`interaction_submit` 接受 accept/decline/cancel/timeout/unsupported/error。accept 必须有明确合法选择。timeout 需要宿主可观测超时回执 `observed_timeout=true`，仍不自动选项；`interaction_ask` 的服务端截止时间即该回执，超时返回推荐项供主对话继续，不写 `CONFIRMED`。RPC 超时提交 error，不能填 timeout。decline/cancel/timeout 保持终态未确认。
 
 重试或用户明确改变时用 `interaction_reopen(session_id,kind,explicit_user_change=...)`；活动/已确认问题必须有用户明确变更。然后 request 获取新 question_id，旧回复返回 LATE_REPLY。原生失败时先记录 unsupported/error，再 reopen，最后请求 auto；MCP 失败后可直接按同题显示文本并 submit。客户端重启使 SDK 密封 requestState 失效时，核对 session_get 的未决题，显式 reopen，再请求；不要复用旧响应。
 
@@ -55,4 +56,4 @@ MCP 断开：纯 Skill 继续合法文本交互，工作包/修订/证据按原�
 
 ## Obsidian 项目视图
 
-新增 project_view_refresh / project_view_info，仍是单个 MCP 服务、共 16 个工具。生成、自动刷新、首次打开、批注保留与升级边界见 [obsidian.md](obsidian.md)。
+新增 project_view_refresh / project_view_info，仍是单个 MCP 服务、共 17 个工具；`interaction_ask` 提供 legacy form 的服务端超时。生成、自动刷新、首次打开、批注保留与升级边界见 [obsidian.md](obsidian.md)。

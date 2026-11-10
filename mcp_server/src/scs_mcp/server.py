@@ -180,6 +180,61 @@ def create_server(project_root: str | Path) -> SafeServer:
         return state.submit(session_id, q["id"], answer.action, choices, source="mcp")
 
     @mcp.tool(structured_output=True)
+    async def interaction_ask(
+        ctx: Context,
+        session_id: str,
+        kind: Literal["mode", "verification", "codex_review"],
+        recommendation: list[str],
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        """Ask through the MCP form with a server-side deadline.
+
+        On timeout the question is marked TIMED_OUT and the recommendation is
+        returned so the main conversation can continue deterministically. Hosts
+        without form support get the normal TEXT_FALLBACK_REQUIRED description.
+        """
+        import anyio
+        from mcp_types.version import MODERN_PROTOCOL_VERSIONS
+
+        if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
+            return {
+                "status": "TEXT_FALLBACK_REQUIRED",
+                "fallback_reason": "MODERN_NO_BACKCHANNEL",
+                "kind": kind,
+                "recommendation": recommendation,
+                "display_text": MESSAGES[kind] + "\n唯一推荐：" + ", ".join(recommendation),
+                "next": "Use interaction_request on this protocol or a native question.",
+                "destructive_operations_authorized": False,
+            }
+        outcome = await prepare(session_id, kind, recommendation, "auto", None, ctx)
+        if not isinstance(outcome, Elicit):
+            return outcome
+        qid = _asked_question.get()
+        if not qid:
+            raise ScsError("QUESTION_NOT_FOUND", "No question was prepared for the form.")
+        message = outcome.message
+        if timeout_seconds is not None and timeout_seconds > 0:
+            message += f"；{timeout_seconds:g} 秒后按推荐项继续。"
+            try:
+                with anyio.fail_after(timeout_seconds):
+                    answer = await ctx.elicit(message, outcome.schema)
+            except TimeoutError:
+                result = state.submit(session_id, qid, "timeout", None, "mcp", True)
+                result["recommendation"] = recommendation
+                result["next"] = "Use the recommended choice; the MCP form timed out."
+                return result
+        else:
+            answer = await ctx.elicit(message, outcome.schema)
+        if answer.action == "accept":
+            data = answer.data
+            value = data.choice if hasattr(data, "choice") else (data or {}).get("choice")
+            if value is None:
+                raise ScsError("CHOICE_INVALID", "The form answer did not contain a choice.")
+            choices = value if isinstance(value, list) else [value]
+            return state.submit(session_id, qid, "accept", choices, "mcp")
+        return state.submit(session_id, qid, answer.action, None, "mcp")
+
+    @mcp.tool(structured_output=True)
     async def interaction_submit(session_id: str, question_id: str,
                            action: Literal["accept", "decline", "cancel", "timeout", "unsupported", "error"],
                            choices: list[str] | None = None, source: Literal["text", "native"] = "text",

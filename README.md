@@ -103,7 +103,7 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
 }
 ```
 
-ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
+ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。需要 15 秒服务端截止时用 `interaction_ask(timeout_seconds=15)`（仅 legacy form）；ZCode 原生 AskUserQuestion 自动解析是 60 秒隐藏 + 5 分钟截止，不是 15 秒。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
 
 混合安装器生成的示例使用稳定的 runtime/launcher.py 入口，无需依赖仓库位置。Codex 配置格式参考 [官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 并与本机 CLI help 核对；Claude Code JSON/stdio 参考 [官方 MCP 文档](https://code.claude.com/docs/en/mcp)。
 
@@ -117,13 +117,13 @@ ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，�
 | 官方 Python SDK 1.30.0 旧客户端 | 不适用 | 已验证：独立环境连接最终安装包 | 不支持原生 UI | 已验证三问、多选及无能力回退；无图形 UI |
 | 当前 Codex 桌面聊天；CLI 0.163.0-alpha.10.2 | 已加载现有 Skill；新版待重开验证 | 待验证；配置格式已核对 | 已验证工具调用并收到本聊天用户确认；未独立视觉观察 | NOT_TESTED；未安装新服务器进当前会话 |
 | Claude Code 2.1.1（本机版本） | 待验证 | 待验证；官方有 stdio 文档 | 待验证 | NOT_TESTED |
-| ZCode 3.15（用户级 `mcp.servers`） | 已加载现有 Skill；新会话待重开 | 已验证：stdio 兼容层（ZCode 2026-07-28 探测回落 2025-11-25），16 工具 | 待宿主确认 | NOT_TESTED |
+| ZCode 3.15（用户级 `mcp.servers`） | 已加载现有 Skill；新会话待重开 | 已验证：stdio 兼容层（ZCode 2026-07-28 探测回落 2025-11-25），17 工具；15s 走 `interaction_ask`（legacy form），原生 60s+5min | 待宿主确认 | NOT_TESTED |
 
 当前宿主的原生提问链路已收集真实用户选择；本服务器的完整会话→提问→提交→工作包→证据→handoff 链路由 SDK 参考客户端实际运行。ZCode 已完成用户级 stdio 注册与原始握手验证；尚未在 Codex/Claude/ZCode 的新会话内视觉观察本服务的 elicitation UI，不能宣称桌面客户端 UI 已通过或 100% 弹窗。
 
 ## Obsidian 项目管理
 
-仍是 **1 个 MCP 服务，现在提供 16 个工具**。新增两个视图工具，不需要再安装另一套 MCP 或 Obsidian 社区插件。
+仍是 **1 个 MCP 服务，现在提供 17 个工具**。新增两个视图工具，不需要再安装另一套 MCP 或 Obsidian 社区插件。
 
 每个项目选中的 docs-root 就是独立的 Obsidian 库根。默认 `00_doc → 00_docs → docs → doc`，都没有时使用 docs；视图在 `<docs-root>/agent/acceptance/`，与项目资料、记忆和证据保持同一文档根。
 
@@ -147,6 +147,7 @@ ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，�
 | --- | --- |
 | session_open / session_get | 宿主真实对话身份、已确认选择、未决问题 |
 | interaction_request / interaction_submit / interaction_reopen | 原生记账、兼容 MCP 提问、文本回退、幂等提交与显式重试 |
+| interaction_ask | legacy form 的服务端 `timeout_seconds`（默认 15s）；超时返回 `TIMED_OUT` + 推荐项；modern 返回 `MODERN_NO_BACKCHANNEL` 文本回退 |
 | diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
 | work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告 |
 | evidence_verify | 文件、路径、非空、内容与测试结果结构验证；不替代验收 |

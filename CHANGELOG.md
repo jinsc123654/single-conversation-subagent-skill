@@ -3,7 +3,8 @@
 ## 2.2.0 — 2026-11-11
 
 - PyQt 项目栏改为可展开/收起的项目与工作包树，记住折叠状态，按最后 MCP 活动或显式打开时间自动排序。
-- Obsidian 首次一键打开：本地 `.obsidian` 与项目独立 profile/库映射自动准备，使用 `--user-data-dir` 启动，不修改全局库列表、不关闭用户其他库。MCP 初始化同步生成 profile；工具数量仍16。
+- Obsidian 首次一键打开：本地 `.obsidian` 与项目独立 profile/库映射自动准备，使用 `--user-data-dir` 启动，不修改全局库列表、不关闭用户其他库。MCP 初始化同步生成 profile；工具数量增至17（interaction_ask）。
+- 新增 `interaction_ask`：MCP form + 服务端 `timeout_seconds`（默认 15s），仅 legacy back-channel；超时标记 `TIMED_OUT` 并返回推荐项，不写 `CONFIRMED`。modern 协议明确返回 `MODERN_NO_BACKCHANNEL` 文本回退。Skill 四选一前不再调查项目根/MCP 注册；ZCode 原生 AskUserQuestion 自动解析为 60s 隐藏 + 5min 截止，不是 15s。
 - 当前 Linux / Obsidian 1.14.4 完成真实首次笔记窗口验证。新配置冲突保留原内容；已有库设置保持原样。
 - ZCode stdio 兼容：识别 ZCode 的 2026-07-28 `server/discover` 探测与后续 legacy 请求混用；本地回绝探测并剥离保留 `_meta` 信封，回落 2025-11-25 握手，明确标识的非 ZCode 客户端仍走 modern。新增过滤层 3 项测试；全套 124 项 pytest 与真实 stdio 序列通过。
 
