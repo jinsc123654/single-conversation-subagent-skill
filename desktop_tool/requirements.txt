@@ -1,0 +1,2 @@
+# Optional desktop companion only; never installed by the MCP installer.
+PyQt5>=5.15,<6

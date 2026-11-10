@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="generator" content="archify 3.2.0">
   <meta name="archify-reader-contract" content="declared-wide-v1">
-  <title>single-conversation-subagent 1.3.1 架构</title>
+  <title>1.x 历史架构参考 · single-conversation-subagent 1.3.1 架构</title>
   <script>
     // Resolve the theme before first paint so light-preference users don't
     // see a dark flash. The toolbar script below re-applies with UI state.
@@ -5715,10 +5715,10 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>入口</h3>
         </div>
         <ul>
-          <li>每个新任务先四选一；只给一个推荐项；只有明确不选或客户端倒计时结束才按推荐项</li>
+          <li>每个真实对话首个任务四选一；唯一动态推荐须明确提交；原生提问优先，失败后文本回退并等待</li>
           <li>快速处理/只调查只问四选一，不进入后两问</li>
           <li>标准/长任务再问验证范围；明确不选/倒计时结束按唯一推荐路径</li>
-          <li>确认已注册 codex-review 才追加收尾审查问；默认/超时=不使用；明确要求直接执行</li>
+          <li>确认已注册 codex-review 才追加收尾审查问；唯一推荐不使用，须明确确认；明确要求沿用</li>
         </ul>
       </div>
 

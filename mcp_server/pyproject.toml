@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scs-mcp"
+version = "2.2.0"
+description = "Local state and interaction tools for single-conversation-subagent"
+requires-python = ">=3.11"
+dependencies = ["mcp==2.3.0", "pydantic>=2.12,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "pytest-asyncio>=1,<2"]
+
+[project.scripts]
+scs-mcp = "scs_mcp.__main__:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

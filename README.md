@@ -1,268 +1,196 @@
-# single-conversation-subagent skill 1.3.4
+# single-conversation-subagent 2.2.0
 
-记录日期：2026-10-19（1.0.x）；更新日期：2026-11-02（1.3.4；1.3.3/1.3.2/1.3.1 同日）
+单对话两级 Subagent 协作，采用 **Skill 策略 + 可选本地 MCP 状态/交互 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不是独立 Agent 桥接器。
 
-把“单对话 subagent：两级协作协议”打包成用户级 skill。安装后，每个对话只在首个任务开始时先四选一，后续沿用已选模式：
+重点修复首次四选一有时不出现时的处理：优先真实调用宿主原生提问，其次使用声明支持的 MCP 表单，最后显示完整文本选项并结束当轮等待明确回复。**安装 MCP 不保证弹窗出现。** 推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认。
 
-- **主对话（第一级 / 协调层）**：发现问题、分析需求、制定顶层目标、授权范围和最终验收；同时直接维护阶段记忆、拆分子任务、创建和调度执行子 Agent、汇总结果。第一级协调不再交给另一个子 Agent。
-- **执行子 Agent（第二级）**：名称由主对话按任务起（如“支付模块分析子 Agent”），模型和类型由当前会话环境决定；负责分析、实现或测试，返回证据，不再创建下一级 Agent。
-
-不使用外部桥接式分发。
-
-## 架构视图
-
-完整流程、四选一、验证范围、记忆布局和回传格式见 [docs/单对话subagent-两级协作协议.md](docs/单对话subagent-两级协作协议.md)。
-
-架构图在源码仓库的 `docs/archify/`（HTML/GIF）；发行包为控制体积不包含这些资源。需要查看时在源码仓库打开 `docs/archify/skill-architecture.html`。
-
-每个对话只在首个任务开始时先四选一：**快速处理 / 标准执行 / 长任务 / 只调查**，包括“推送吧”“改一下”“跑一下”这类直接命令；同一对话后续交互沿用已选模式，不重问；只有明确说“不用问，直接做”时才可跳过。**不得按任务大小/类型（纯问答、小改、单文件、快速查询等）自动跳过；任务大小只影响首次推荐项，不决定是否提问。** 推荐项由 agent 在必要只读调查后按范围/风险/成本决定，不固定同一项；选快速处理或只调查后，不再做验证范围多选。
-
-四选一必须带推荐项并默认勾选；先做必要的只读调查，再由 agent 按范围、风险、改动面、验证成本选择，不固定同一项；拿不准可推荐标准执行。推荐项只决定默认选中，不代表可以跳过提问。用户明确要求改变执行方式，或任务性质明显需要另一模式时，直接切换并说明，不重问。
-
-未选择或超时不得提前落默认值：只有用户明确不选或 15 秒超时（客户端倒计时或 `sleep 15`）时，才按推荐项继续，不重复追问；默认用普通文本提问并 `sleep 15` 做有界等待，仅明确有倒计时才用交互提问，不用会无限阻塞的 AskUserQuestion 等工具；仍未回复就继续。
-
-默认记忆布局跟随 docs-root：docs-root 取首个存在的 `00_doc` / `00_docs` / `docs` / `doc`；均无则新建 `docs`。
-
-```markdown
-## 记忆文件
-- 项目记录：<docs-root>/agent/AGENT_PROJECT.md
-- 协作记录：<docs-root>/agent/AGENT_COORDINATION.md
-- 证据目录：<docs-root>/agent/evidence/
+```mermaid
+flowchart TD
+  S["真实对话首次任务"] --> N{"原生提问可用？"}
+  N -->|是| A["调用宿主原生提问"]
+  N -->|否| M{"MCP 可见且声明表单能力？"}
+  M -->|是| E["Resolver / Elicit 交互"]
+  M -->|否| T["完整文本选项，结束当轮等待"]
+  E -->|失败| T
+  A --> R{"明确接受？"}
+  E --> R
+  T --> R
+  R -->|是| C["绑定 question_id 确认选择"]
+  R -->|取消/拒绝/超时| W["保持未确认，等用户决定"]
+  C --> P["按需工作包 → 原生执行子 Agent"]
+  P --> V["证据与修订 → 主对话最终验收"]
 ```
 
-技能生成的正式文档（设计、方案、说明、总结、教程、会议纪要等）默认按以下顺序落盘：
+本对话模式：快速处理 / 标准执行 / 长任务 / 只调查，只给一个按风险、范围、成本动态决定的推荐。后续沿用本对话结果；新对话重新开始。标准/长任务首次确认验证范围；只有明确注册 codex-review 才追加收尾使用/不使用，唯一推荐不使用。已有明确用户授权可直接记录沿用。快速与只调查不强制初始化工作包。
 
-| 顺序 | 目录 | 条件 |
-| --- | --- | --- |
-| 1 | `<项目根>/00_doc/` | 存在就用 |
-| 2 | `<项目根>/00_docs/` | 存在就用 |
-| 3 | `<项目根>/docs/` | 存在就用 |
-| 4 | `<项目根>/doc/` | 存在就用 |
-| 5 | `<项目根>/docs/` | 都不存在时新建 |
-
-记忆、WP 审查报告、证据保持既有职责：记忆/证据在 `<docs-root>/agent/`，WP 审查报告在 `04_test/report/`；目录规则只决定新文档落点，不自动迁移既有文件。
-
-标准执行和长任务在同一对话内只在首次标准/长任务前做一次验证范围多选：操作、时机（本轮/收尾）、目的、预计耗时、资源、风险、说明。只给一个推荐路径：由 agent 先做必要的只读调查，再按改动风险、影响面、验证成本、资源和回滚难度选择，不固定为“快速冒烟+定向回归”；其他选项不单独标推荐/默认；后续任务沿用该验证范围，用户明确要求改变时按新要求。定向/全量回归和稳定性放在收尾执行，不每轮重复；未选中的操作不进入计划；烧录/擦除等破坏性操作单独确认。
-
-“不做测试”和“不做测试，记录测试方法”二选一，且与测试操作互斥；前者标记 `NOT_RUN`，后者只记录方法，不标 `PASS`。
-
-四选一和验证范围每次只能有一个推荐路径，不得出现多个“推荐/默认”。只有在明确不选或 15 秒超时（客户端倒计时或 sleep 15）时才按推荐/默认继续，等待期间不落默认值，不重复追问；默认用普通文本提问并 sleep 15，仅明确有倒计时才用交互提问，不用会无限阻塞的 AskUserQuestion 等工具。
-
-本地装了 `codex-review` 技能（联动技能）时，同一对话首次标准/长任务在验证范围问完后紧接着追加一问：**收尾是否用 Codex 独立审查？** 后续任务沿用该答案，不重问。只有“不使用（默认）”与“使用：收尾按 codex-review 技能做只读独立审查”两个选项，默认与超时均为“不使用”，不重复追问。注册状态分三态：确定已装才问，确定未装跳过，未知按未装处理（可查 `~/.agents/skills/codex-review/SKILL.md` 或项目 `.zcode/skills/codex-review/SKILL.md` 辅助）。用户已明确要求 Codex 审查时不再问此问，直接执行；同一工作包/修订只审一次。
-
-## 设计初衷与上下文预算
-
-长任务模式的核心是隔离长执行线：主对话只保留目标、决策、未决问题、下一步和证据路径；执行细节下沉到子 Agent 和 `<docs-root>/agent/evidence/`。它不是缓存清理机制，主对话仍会随轮次增长。
-
-- 三级记忆：主对话 → `AGENT_COORDINATION.md` → 证据文件。
-- 子 Agent 最终回传固定字段，不贴原始日志（建议 ≤ 1–2 KB）。
-- 每个工作包/阶段结束写 handoff；主对话接近上下文上限时新开会话恢复。
-- 长测试后台执行，返回 PID/日志/停止方式；不长期占用子 Agent。
-- 子 Agent 上下文过大时停止并新建，传入摘要和证据路径。
-
-## 版本变化
-
-### 1.3.4
-
-- 四选一、验证范围、Codex 联动问改为**每个对话只问一次**：首个任务问四选一，首次标准/长任务问验证范围和 Codex；后续交互沿用，不重问。新对话重新开始，不沿用旧对话选择。
-- 用户明确要求改变执行方式/验证范围，或任务性质明显需要另一模式时，直接切换并说明，不重新弹全套问题。
-
-### 1.3.3
-
-- 四选一和验证范围的推荐项改为 agent 在必要只读调查后按范围/风险/改动面/验证成本选择，不再固定“标准执行”或“快速冒烟+定向回归”；仍只标一个推荐并默认勾选，推荐不免问。
-
-### 1.3.2
-
-- 有界等待：默认用普通文本提问并执行 `sleep 15`；仅明确有倒计时才用交互提问，不使用会无限阻塞的 `AskUserQuestion` 等工具；仍未回复就按推荐/默认继续，不无限等待。
-- SKILL、AGENTS 片段、protocol、长文档、README 同步“客户端倒计时或 sleep 15”的超时语义。
-
-### 1.3.1
-
-- 上下文压缩：SKILL.md 1,514 → 1,154 字符（-23.8%）；常驻 AGENTS 标记块 985 → 700 字符（-28.9%）；description 110 → 59 字符。
-- protocol 不压缩、保持按需加载；六项行为基线（四选一、验证范围、Codex 联动、超时、docs-root/agent、子 Agent 边界）保留。
-- 同步 `~/.codex/skills` 的旧副本（原先仍固定 docs/agent、无 1.3.0 边界）。
-
-### 1.3.0
-
-- 记忆根改为 **docs-root/agent**：docs-root 取首个存在的 `00_doc` / `00_docs` / `docs` / `doc`；均无则新建 `docs`。`AGENT_PROJECT.md`、`AGENT_COORDINATION.md`、`evidence/` 都在 docs-root/agent/，不再固定 `docs/agent`。
-- Obsidian vault 根 = docs-root；只读视图在 docs-root/agent/acceptance/。esp32_epd 已迁移到 `00_doc/agent`，vault 根 `00_doc`。
-- 同步 SKILL、protocol、AGENTS 片段、README、长文档；`04_test/report` 仍是 WP 审查报告路径。
-
-### 1.2.1
-
-- 压缩入口 `SKILL.md`：8,476 → 3,147 字节（1,393 字符，-62.9%），六项行为基线不变；模板/字段/异常细节继续按需读 `references/protocol.md`。
-- 明确 Codex 外部审查边界：非子 Agent、只能由主对话启动、子 Agent 不得启动。
-- 文档输出例外前置；明确目录规则只决定新文档落点，不自动迁移既有文件。
-- 修正 README 的超时旧表述、验证示例和字符数记录；长文档流程图补齐“明确要求审查/未知注册/不用问直接做”分支。
-- 移除默认文件名与 `_NATIVE` 隐式改名的冲突：共存需显式授权。
-
-### 1.2.0
-
-- 增加正式文档输出位置规则：`00_doc/` → `docs/` → `doc/` → 新建 `docs/`；协议记忆、审查报告、证据保持既有路径。
-- 增加与 `codex-review` 技能的联动：本地装了 codex-review 时，标准执行/长任务在验证范围问完后追加一问“收尾是否用 Codex 独立审查”；默认与 15 秒超时均为“不使用”，不重复追问。
-- 本地未装 codex-review 时自动跳过该问，不影响原有四选一 + 验证范围两问流程；联动问只出现在标准执行/长任务，快速处理/只调查只有四选一。SKILL.md、references/protocol.md、AGENTS.snippet.md 三处同步更新。
-- 四选一超时语义修正（2026-10-28 用户定）：15 秒未选择按推荐项继续（此前固定按“标准执行”）；验证范围超时=唯一推荐路径，联动问超时=不使用，三问统一为“超时=推荐/默认”。
-- 按 Codex 独立审查（REJECT）修正：超时只在“明确不选或客户端报告超时”时生效，等待期间不落默认值；只调查可派只读分析子 Agent（与“不建执行子 Agent”的矛盾消除）；联动问改为注册状态三态判断，明确要求审查时直接执行，同工作包/修订只审一次，迟到回复绑定问题与修订；设计文档 mermaid 补 Codex 审查分支。
-- 上下文瘦身（2026-10-28 记录，后续 1.2.1 再压缩）：当时 SKILL.md 为 8,476 字节；1.2.1 压到约 3.0 KB，`references/protocol.md` 保持按需加载、未压缩。
-- 设计记录 docs/单对话subagent-两级协作协议.md 与架构视图（HTML/GIF/PNG）同步重生：新增 codex-review 联动节点与“装了才追问”连线。
-
-### 1.1.0
-
-- 四选一不再有任何自动跳过：每个新用户任务都必须发起提问，不得按任务大小/类型（纯问答、小改、单文件、快速查询等）自行判断跳过。
-- 唯一例外是用户明确说“不用问，直接做”；此时按快速处理开始，若实际需要标准/长任务仍问验证范围。
-- 推荐项只决定默认勾选，不再被解释为“可以跳过提问”。
-- 同步用户级 10-22 增加的子 Agent 模型继承说明（默认继承主对话 provider/model，不写死）。
-
-### 1.0.2
-
-- 第一级协调由主对话直接承担：阶段记忆、拆分、创建和调度子 Agent、汇总都在主对话中进行，不再创建“协调子 Agent”。
-- 执行子 Agent 只负责分析/实现/测试，按任务命名，例如“支付模块分析子 Agent”“回归测试子 Agent”。
-- `AGENT_COORDINATION.md` 改由主对话维护；上下文压缩或重启后由主对话从该文件恢复。
-- 默认记忆文件改为 `<项目根>/docs/agent/AGENT_PROJECT.md`、`docs/agent/AGENT_COORDINATION.md`；证据目录改为 `docs/agent/evidence/`。
-- 任务类型选择恢复为每个新的用户任务一次；同一任务的追问不重复问，直接命令不能跳过。快速处理/只调查不启执行子 Agent，也不做验证范围多选。
-- 四选一增加推荐项/默认勾选：普通工程默认标准执行，拿不准也默认标准执行，用户直接确认即可。
-- 四选一未选择/超时默认标准执行，不按推荐项，不重复追问；当时以为倒计时由客户端实现（1.3.2 起改为默认普通文本提问 + `sleep 15`）。
-- 验证范围未选择/超时按唯一推荐路径（快速冒烟 + 收尾定向回归）继续，不重复追问。
-- 标准执行和长任务在同一对话内每个新任务开始前增加验证范围多选；只给一个推荐路径（快速冒烟 + 收尾定向回归），其他选项不标推荐；定向/全量回归和稳定性收尾执行，不每轮重复；增加“不做测试”和“不做测试，记录测试方法”两个互斥选项。
-- 增加设计初衷与上下文预算/补救措施：有界回传、阶段 handoff、阈值新会话、长测试后台化、子 Agent 膨胀处理。
-- 分发包和默认规则同步更新。
-
-### 1.0.1
-
-- 角色名统一为“协助 Agent”，由主对话按任务命名，不再固定使用模型名或其他固定称呼。
-- 移除所有厂商和实现名词，统一使用“主对话、协助 Agent、执行子 Agent、会话环境、原生 Agent 工具、桥接模式”。
-- 记忆文件改为 `AGENT_PROJECT.md` / `AGENT_COORDINATION.md`；证据目录改为 `.agent/evidence/`（1.0.2 起默认改为 `docs/agent/evidence/`）。
-- 安装器改用 `AGENT_HOME`（默认 `~/.agents`），并支持 `--instructions-file` 指定用户级指令文件。
-
-### 1.0.0
-
-- 首次打包：skill、完整协议、安装/卸载脚本、默认规则片段。
-
-## 包内容
-
-```text
-single-conversation-subagent-skill/
-├── README.md
-├── VERSION
-├── install.sh                  # 用户级安装/卸载脚本
-├── AGENTS.snippet.md           # 默认规则片段（带幂等标记）
-├── single-conversation-subagent/
-│   ├── SKILL.md                # skill 本体：触发描述、流程、边界、子 Agent 模板
-│   └── references/
-│       └── protocol.md         # 完整两级协作协议
-└── docs/
-    └── 单对话subagent-两级协作协议.md   # 设计记录
-```
-
-## 要求
-
-- 会话环境支持原生 `Agent` 工具和 `SendMessage`。
-- Linux/macOS 使用 bash 安装脚本；Windows 可按“手动安装”复制文件。
-- 脚本只写用户目录，不需要 `sudo`。
+“不做测试”和“只记录方法”各自与其他验证操作互斥，均 NOT_RUN；危险操作独立确认。仅用户明确“不用问，直接做”可跳过模式选择，不能因此授权删除、擦除或烧录。超时只认可宿主可观测结果和事先告知的策略；本版服务只记录超时，不自动确认。
 
 ## 安装
 
-### 从 GitHub 仓库安装
+纯 Skill 不依赖 Python，也不需要 MCP：
 
 ```bash
-git clone https://github.com/jinsc123654/single-conversation-subagent-skill.git
-cd single-conversation-subagent-skill
-bash install.sh --with-default-rule
+bash install.sh --mode skill --with-default-rule
+bash install.sh --check
 ```
 
-### 从发布包安装
-
-解压后进入包目录：
+默认目录 `$AGENT_HOME/skills/single-conversation-subagent/`，AGENT_HOME 默认 `~/.agents`。原有无参数、`--with-default-rule`、`--instructions-file PATH`、`--uninstall` 均保留。可指定宿主实际读取的用户指令文件：
 
 ```bash
-tar -xzf single-conversation-subagent-skill-1.3.4.tar.gz
-cd single-conversation-subagent-skill-1.3.4
+AGENT_HOME=/path/to/agent-home bash install.sh --instructions-file /path/to/AGENTS.md
 ```
 
-### 推荐：安装 skill 并设为默认规则
+混合安装需要 Python 3.11+，本地 POSIX 文件系统和 bash/tar。此版本安全路径实现已在 Linux 验证；Windows 原生 MCP 运行 **未支持/未移植**，可手动复制 Skill 使用纯文本回退。macOS 待实测。
 
 ```bash
-bash install.sh --with-default-rule
+bash install.sh --mode hybrid --with-default-rule --project-root /absolute/project
+bash install.sh --mode hybrid --check
 ```
 
-会把 skill 安装到 `$AGENT_HOME/skills/single-conversation-subagent/`，并把带标记的默认规则追加到 `$AGENT_HOME/AGENTS.md`。`AGENT_HOME` 默认是 `~/.agents`。
+如选定 Python 已有 mcp 2.3.0 则使用该解释器；否则在 `$AGENT_HOME/mcp/single-conversation-subagent/venv.<id>` 创建隔离环境并安装依赖。可用 `--python /absolute/venv/bin/python` 或 SCS_PYTHON 指定现有环境。Python 或依赖失败时输出 HYBRID_UNAVAILABLE，Skill 保持可用；`--mode hybrid --check` 会明确报告未就绪。
 
-### 指定用户级指令文件
+安装器在修改前备份，只替换本技能的标记块，保留其他技能/项目内容；重复安装不重复注入规则。拒绝目标及其父目录的符号链接、父目录跳转、畸形规则标记和源目录自覆盖。安装器不改写现有客户端 MCP 配置；生成可审查示例到 runtime 的 `client-examples.json`、`codex-example.toml`，由用户复制合并。未给 project-root 时须替换示例占位符。**重开对话**以加载 Skill 和规则变更。
 
-如果当前会话环境读取的指令文件不在 `$AGENT_HOME/AGENTS.md`，直接指定它：
+手动安装：复制 `single-conversation-subagent/` 到宿主实际的 skills 目录，再把 AGENTS.snippet.md 的标记块合入宿主读取的指令文件；无 bash/无 Python 也能使用纯 Skill。不要覆盖其他标记块或已有项目记忆。
+
+## 客户端配置
+
+开发安装与直接入口：
 
 ```bash
-bash install.sh --instructions-file /path/to/AGENTS.md
+python3 -m venv .venv
+.venv/bin/python -m pip install -e './mcp_server[test]'
+.venv/bin/python -m scs_mcp --project-root /absolute/project
 ```
 
-### 只安装 skill
+该入口只使用 stdio，不启动 HTTP。stdout 只传 MCP 协议，错误写 stderr；脱敏交互事件保存在项目 `.scs/state.sqlite3` 的 events 表。依赖固定 `mcp==2.3.0`，开发环境完整版本见 [requirements-dev.lock](mcp_server/requirements-dev.lock)；项目级约束见 pyproject.toml。重现测试环境可先安装锁文件再安装本包。
+
+Codex TOML 示例（复制前按实际路径修改，不需要放宽审批或信任）：
+
+```toml
+[mcp_servers.single-conversation-subagent]
+command = "/absolute/repository/.venv/bin/python"
+args = ["-m", "scs_mcp", "--project-root", "/absolute/project"]
+```
+
+JSON stdio 示例（适用于使用 mcpServers 格式的客户端；逐客户端核对导入位置）：
+
+```json
+{
+  "mcpServers": {
+    "single-conversation-subagent": {
+      "command": "/absolute/repository/.venv/bin/python",
+      "args": ["-m", "scs_mcp", "--project-root", "/absolute/project"]
+    }
+  }
+}
+```
+
+混合安装器生成的示例使用稳定的 runtime/launcher.py 入口，无需依赖仓库位置。Codex 配置格式参考 [官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 并与本机 CLI help 核对；Claude Code JSON/stdio 参考 [官方 MCP 文档](https://code.claude.com/docs/en/mcp)。ZCode 本机启动器目标不存在，未臆造配置键，按其实际 MCP 设置界面填写 command/args，待验证。
+
+## 能力矩阵与验收层次
+
+记录日期 2026-11-10。“待验证”包括没有实际执行的能力；官方文档支持不等于本项目集成通过。
+
+| 客户端 | Skill 注入 | stdio 连接本服务 | 原生提问 | 本服务 MCP elicitation / 真实 UI |
+| --- | --- | --- | --- | --- |
+| 官方 Python SDK 2.3.0 参考客户端 | 不适用 | 已验证：实际子进程与原始协议 | 不支持原生 UI | 已验证新旧协议回调；无 UI，渲染不适用 |
+| 官方 Python SDK 1.30.0 旧客户端 | 不适用 | 已验证：独立环境连接最终安装包 | 不支持原生 UI | 已验证三问、多选及无能力回退；无图形 UI |
+| 当前 Codex 桌面聊天；CLI 0.163.0-alpha.10.2 | 已加载现有 Skill；新版待重开验证 | 待验证；配置格式已核对 | 已验证工具调用并收到本聊天用户确认；未独立视觉观察 | NOT_TESTED；未安装新服务器进当前会话 |
+| Claude Code 2.1.1（本机版本） | 待验证 | 待验证；官方有 stdio 文档 | 待验证 | NOT_TESTED |
+| ZCode（本机启动器缺少目标 AppImage） | 待验证 | 待验证 | 待验证 | NOT_TESTED |
+
+当前宿主的原生提问链路已收集真实用户选择；本服务器的完整会话→提问→提交→工作包→证据→handoff 链路由 SDK 参考客户端实际运行。没有在 Codex/Claude/ZCode 的新会话内注册并视觉观察本服务 UI，不能宣称桌面客户端集成已通过或 100% 弹窗。
+
+## Obsidian 项目管理
+
+仍是 **1 个 MCP 服务，现在提供 16 个工具**。新增两个视图工具，不需要再安装另一套 MCP 或 Obsidian 社区插件。
+
+每个项目选中的 docs-root 就是独立的 Obsidian 库根。默认 `00_doc → 00_docs → docs → doc`，都没有时使用 docs；视图在 `<docs-root>/agent/acceptance/`，与项目资料、记忆和证据保持同一文档根。
+
+```json
+{"session_id":"S-...","initialize_vault":true,"auto_refresh":true}
+```
+
+调用 `project_view_refresh`：生成项目总览、状态分组、已完成子任务、工作包/历史修订页及来源链接。`initialize_vault=true` 只创建缺失库的 `.obsidian/app.json`（空配置），已有配置不改、不装插件。默认开启视图后的工作包自动刷新；以后 MCP 创建/更新工作包时更新页面。若视图冲突，原工作包仍保存成功，`view_update` 单独报告错误，不能因此重复提交工作包。
+
+调用 `project_view_info(session_id)`：只读检查过期/手改漂移/证据问题，返回 `vault_root` 和编码后的 `open_uri`；不创建文档目录、不启动软件。首次在 Obsidian 选择 **Open folder as vault（打开文件夹为仓库）**，选中 vault_root。注册后可点击 open_uri 直接打开项目总览；链接用文件绝对路径，避免多个项目都叫 docs 时混淆。此流程依据 [Obsidian 管理库](https://help.obsidian.md/Files+and+folders/Manage+vaults) 与 [URI 官方文档](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI)。
+
+每页 `manual:begin / manual:end` 标记之间可写手工批注，刷新原样保留。生成区域被修改、标记异常或目标文件不属于本生成器时拒绝覆盖。单文件原子替换和内容前置检查防止常见并发覆盖；服务进程之间串行，外部编辑器不受硬锁约束。中断后可重试刷新自身的部分生成结果。既有源记忆不被投影视图覆盖，旧目录记录只链接/标明库外位置，不迁移。
+
+“已完成子任务”表示已报告通过且本次核对证据未变；工作包仍需主对话最终验收。旧版只保留当前工作包的数据库升级时，仅回填实际当前修订；不虚构早期历史。迁移升级到 schema 2，原会话、工作包、证据保持不变；旧版 2.0 程序不能读取 schema 2，升级前应备份状态，回滚时恢复对应备份。
+
+完整用法、冲突恢复和数据边界见 [Obsidian 视图说明](single-conversation-subagent/references/obsidian.md)。当前实现不自动修改全局库注册列表，创建 .obsidian 不代表已注册或已打开；Obsidian GUI/URI 真正唤起仍需在本机手工验证。
+
+## 工具与状态
+
+| 工具 | 用途 |
+| --- | --- |
+| session_open / session_get | 宿主真实对话身份、已确认选择、未决问题 |
+| interaction_request / interaction_submit / interaction_reopen | 原生记账、兼容 MCP 提问、文本回退、幂等提交与显式重试 |
+| diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
+| work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告 |
+| evidence_verify | 文件、路径、非空、内容与测试结果结构验证；不替代验收 |
+| resource_acquire / release | 带 TTL/owner/token 的建议性文件/设备租约 |
+| handoff_export / resume | 带摘要哈希的本地审计交接，不复制会话确认 |
+| project_view_refresh / info | Obsidian 项目视图、批注保护、自动刷新、只读检查与打开链接 |
+
+只读资源 `scs://session/{id}`、`scs://work-package/{id}`。完整参数、错误码、使用与恢复示例见 [MCP 用法](single-conversation-subagent/references/mcp.md)。
+
+会话不以 cwd、PID、MCP 连接 ID 识别；不同宿主命名空间隔离，无可靠 ID 则显式临时会话。SQLite schema 2、WAL、事务、busy timeout；多进程使用相同项目 DB，工作包更新必须携带 expected_version。数据库路径及伴随文件不得为符号链接；证据读取通过目录描述符逐级拒绝符号链接和越界。状态目录不是进程级沙箱，不能防止同一用户的恶意外部进程替换整个目录；本服务不适合不互信多用户。
+
+Markdown 由主对话同步：docs-root 依次为 00_doc、00_docs、docs、doc，均无则创建 docs。保持 `<docs-root>/agent/AGENT_PROJECT.md`、`AGENT_COORDINATION.md`、`evidence/WP-<id>/R<rev>/<subtask-id>/` 及 `04_test/report/`。服务只初始化缺失记忆文件，绝不覆盖既有内容；所有工作包变更提示 record_sync_required。MCP 断开时纯 Skill 维护文件；恢复前显式核对，当前不提供自动导入器或自动覆盖。
+
+## 测试与故障排查
 
 ```bash
-bash install.sh
+.venv/bin/python -m pytest -q mcp_server/tests
+python3 /path/to/skill-creator/scripts/quick_validate.py single-conversation-subagent
+bash -n install.sh
 ```
 
-只复制 skill，不修改指令文件。此时 skill 会在相关任务中按描述触发，但不会强制所有对话默认加载。
+测试覆盖与实际结果见 [验收报告](docs/validation.md)。测试使用临时项目/安装目录，不修改用户配置，不启动任何付费模型会话。SDK 回调输入是模拟选择，与真实用户 UI 结果分开记录。
 
-### 自定义 agent 配置目录
+Inspector 可按 [SDK 官方文档](https://py.sdk.modelcontextprotocol.io/) 连接 stdio 入口；已安装 Node 时可运行：
 
 ```bash
-AGENT_HOME=/path/to/agent-home bash install.sh --with-default-rule
+npx @modelcontextprotocol/inspector /absolute/repository/.venv/bin/python -m scs_mcp --project-root /absolute/project
 ```
 
-`AGENT_HOME` 应指向包含 `skills/` 和 `AGENTS.md` 的用户级目录，默认是 `~/.agents`。
+Inspector 属于手工诊断工具，本次未安装/运行；不能用 Inspector 连接成功代替宿主 UI 验证。
 
-## 安装脚本行为
+旧版 SDK 的实际兼容探针为 `scripts/probe_legacy_sdk1.py`，用隔离的 `mcp==1.30.0` 解释器运行；`--server-python` 指向安装 SDK 2.3.0 与 scs_mcp 的解释器，必要时用 `--server-pythonpath` 指定源码/安装目录。示例：`legacy-venv/bin/python scripts/probe_legacy_sdk1.py --server-python /absolute/server-venv/bin/python`。它只使用临时项目和模拟回复，不启动模型，也不证明 UI 渲染。
 
-- 安装前如果目标 skill 目录已存在，会先复制备份到 `*.bak.<时间戳>.<pid>`，再替换。
-- `--with-default-rule` 修改 `$AGENT_HOME/AGENTS.md` 前会备份原文件；如果已有 `<!-- single-conversation-subagent begin -->` 标记，则不重复追加。
-- `--instructions-file <path>` 把规则写入指定文件，并隐含 `--with-default-rule`。
-- `--uninstall` 会备份并删除已安装的 skill 目录，并移除指令文件中带标记的整段规则。若当初用了自定义指令文件，卸载时也要传同一个 `--instructions-file`。
-- 拒绝 `AGENT_HOME=/` 和不符合 `<AGENT_HOME>/skills/single-conversation-subagent` 的删除目标，避免误删。
-- 不修改工作区文件、不写系统目录、不执行网络操作。
+| 现象/分类 | 可用证据与处理 |
+| --- | --- |
+| SKILL_NOT_LOADED | 安装检查只能证明文件；核对宿主技能列表/注入记录，重开聊天 |
+| TOOL_NOT_CALLED | 核对宿主调用日志；服务无法观察没有发生的调用 |
+| ELICITATION_UNSUPPORTED | 检查初始化声明/diagnostics；展示 TEXT_FALLBACK_REQUIRED 并等明确回复 |
+| RPC_ERROR | 与用户超时分开记录；读取未决题，文本回退或显式 reopen |
+| UI_NOT_OBSERVABLE | 请求发出不证明已显示；需要宿主日志或用户视觉确认 |
+| USER_CANCELLED / USER_DECLINED | 保持未确认，不按默认继续，用户要求后再重开 |
+| DB_BUSY / VERSION_CONFLICT | 读取最新状态再核对并重试，不能覆盖其他写入 |
+| 旧 requestState 重启后失效 | SDK 密封状态默认仅进程有效，核对未决题并显式重开 |
 
-## 验证
+模型可能不遵循 Skill、客户端可能不显示表单或自动生成回执、真实 conversation ID 可能不可用；这些属于宿主边界。租约只约束遵守工具的参与者，不阻止外部修改。VERIFIED 仅证据文件/内容检查，测试执行真实性和最终 PASS/ACCEPT 必须由主对话核对原始证据。
 
-1. 重开一个新的会话，让 skill 注册表和用户级指令文件重新加载。
-2. 检查文件存在：
+## 迁移、回滚与文件布局
 
-   ```bash
-   ls "$HOME/.agents/skills/single-conversation-subagent/SKILL.md"
-   grep -n 'single-conversation-subagent' "$HOME/.agents/AGENTS.md"
-   ```
+2.0 不兼容旧版等待后自动选推荐项的行为；取消与拒绝也不再隐式授权。迁移前备份指令文件，合并新的标记块，清理其他位置仍注入的旧规则，重开聊天；不迁移/删除项目记忆。完整执行协议见 [protocol.md](single-conversation-subagent/references/protocol.md)，版本记录见 [CHANGELOG.md](CHANGELOG.md)。原 docs/archify 图片保留为 1.x 历史参考，不表示 2.0 交互能力；HTML 文案已去除旧超时规则。
 
-   若使用了自定义 `AGENT_HOME` 或 `--instructions-file`，把路径换成实际位置。
-
-3. 在会话里给一个跨文件任务，例如“调查这个 bug 的根因并给出修复与测试”，模型应先完成四选一；选标准执行/长任务后继续问验证范围（本地装了 codex-review 时再追加收尾审查问），再由主对话定义工作包、维护阶段记忆、拆分并创建执行子 Agent。
-4. 如果客户端支持斜杠命令，也可显式调用 `/single-conversation-subagent <任务>`。
-
-## 手动安装（Windows / 无 bash）
-
-1. 把 `single-conversation-subagent/` 整个目录复制到：
-   `<AGENT_HOME>/skills/single-conversation-subagent/`
-2. 把 `AGENTS.snippet.md` 的内容追加到当前会话环境的用户级指令文件。
-3. 重开会话。
-
-`AGENT_HOME` 默认对应 `%USERPROFILE%\.agents`，也可使用环境实际读取的目录。
-
-## 卸载
-
-```bash
-bash install.sh --uninstall
+```text
+single-conversation-subagent/   Skill、执行协议、MCP 使用参考
+mcp_server/src/scs_mcp/        SDK 服务、交互、状态、SQLite、路径、证据、租约、交接
+mcp_server/tests/              自动协议/状态/并发/安装回归
+AGENTS.snippet.md / install.sh  轻量入口、兼容安装/检查/卸载
+VERSION / CHANGELOG.md         发布版本和迁移说明
+docs/                         设计与验收报告（运行记忆不打包）
 ```
 
-若当初用了自定义指令文件：
+卸载：`bash install.sh --uninstall`；若指定过 instructions-file，卸载时传同一路径。卸载会备份本技能/运行时并移除对应标记块，保留其他规则、客户端配置和项目 `.scs`/证据。手动从客户端删去本服务配置条目。回滚时恢复相应 `.bak.<时间>.<pid>` 的 Skill/规则/运行时，撤销本服务配置后重开聊天；不要用旧数据库版本覆盖较新状态。删除项目状态前自行备份，卸载器不会删除它。
 
-```bash
-bash install.sh --uninstall --instructions-file /path/to/AGENTS.md
-```
+## 可选桌面项目管理器
 
-或手动删除 `<AGENT_HOME>/skills/single-conversation-subagent/`，并从用户级指令文件删除带 `single-conversation-subagent` 标记的整段内容。
+`desktop_tool/` 提供独立 PyQt5 管理器：项目添加/发现、目录浏览、Obsidian 跳转、工作包与 MCP 记录、短期连接自检、视图刷新和可恢复归档。参照本机 PyQt 工具风格；不进入 MCP 的安装器和依赖，不强制安装，也不管理宿主进程。运行 `bash desktop_tool/run.sh`，详情见 [管理器说明](desktop_tool/README.md)。
 
-## 行为边界
-
-- 简单问答、单步查询、纯解释性对话也必须先四选一，不得自动跳过；选快速处理或只调查后，不强行起协调层，避免为小问题增加两层 Agent 开销；一旦选择标准执行/长任务，立即按两级流程执行。
-- 工作区自己的指令文件加载在用户级规则之后，可以覆盖或收窄这条默认规则。
-- 执行子 Agent 的名称统一用 `<任务>子 Agent`，不要固定使用模型名或其他固定称呼。
-- 同一项目仍使用桥接模式时先明确冲突处理与文件名；未经用户明确授权，不改默认 `<docs-root>/agent/AGENT_PROJECT.md` / `AGENT_COORDINATION.md`，也不手工修改桥接管理的受管文件。
-- 原生模式没有桥接式父子目录独立核验；需要严格进程级审计时，继续使用三层桥接模式。
-- skill 和协议不包含密钥、Cookie 或项目私有数据；不要把实际项目的 `<docs-root>/agent/AGENT_PROJECT.md` / `AGENT_COORDINATION.md` 打进分发包。
+2.2 的管理器项目栏支持项目展开/收起并记住状态，按最后 MCP 活动或显式打开时间自动排序（可见时每 8 秒更新）。点击工作包子项直达记录。Obsidian 按钮使用项目 `.scs-obsidian/<库ID>/` 独立启动配置，首次无需手工登记；MCP `initialize_vault=true` 也会准备这套配置，不写全局库列表。
