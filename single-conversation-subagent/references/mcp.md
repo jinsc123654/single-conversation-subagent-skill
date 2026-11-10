@@ -9,7 +9,7 @@
 1. `session_open(project_root=..., client_name="host", conversation_id="宿主真实对话ID", review_registration="registered|unregistered|unknown")`。ID 未知时省略并保留返回 ID，每次省略都会新建临时会话。不得伪造真实 ID、用项目路径当对话 ID。
 2. 原生工具可用时，直接用原生提问。若需要 MCP 记账，先 `interaction_request(session_id=...,kind="mode",recommendation=["long"],channel="native")`，然后真实调用原生工具，将用户明确答复以返回 question_id 提交。服务不越过宿主调用 UI。
 3. 原生不可用时 `interaction_request(...,channel="auto")`，由实际连接声明能力决定能否用 MCP。Resolver/Elicit 兼容现代多轮和 legacy 回调。服务端不按客户端名称猜测。
-4. 需要服务端 15 秒截止时用 `interaction_ask(session_id=...,kind="mode",recommendation=["standard"],timeout_seconds=15)`。它只在 legacy stdio 的 back-channel 上打开 MCP form；到点标记 `TIMED_OUT` 并返回 recommendation，不写 `CONFIRMED`。modern 协议返回 `TEXT_FALLBACK_REQUIRED`（`MODERN_NO_BACKCHANNEL`），改用原生/文本。ZCode 原生 AskUserQuestion 是 60 秒隐藏 + 5 分钟截止，不是 15 秒。
+4. 四选一/验证/审查提问默认用 `interaction_ask(session_id=...,kind="mode",recommendation=["standard"],timeout_seconds=15)`。它只在 legacy stdio 的 back-channel 上打开 MCP form；到点标记 `TIMED_OUT` 并返回 recommendation，不写 `CONFIRMED`。modern 协议返回 `TEXT_FALLBACK_REQUIRED`（`MODERN_NO_BACKCHANNEL`），改用原生/文本。ZCode 原生 AskUserQuestion 是 60 秒隐藏 + 5 分钟截止，不是 15 秒。
 5. TEXT_FALLBACK_REQUIRED：显示 display_text 中完整选项与唯一推荐，结束当轮等回复；再 `interaction_submit(session_id=...,question_id=...,action="accept",choices=["long"],source="text")`。不把文本当原生弹窗成功。
 6. `session_get` 读取已确认选择与未决问题。同题重复 request 不弹第二个 UI，已确认直接返回 ALREADY_CONFIRMED。
 

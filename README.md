@@ -103,7 +103,7 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
 }
 ```
 
-ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。需要 15 秒服务端截止时用 `interaction_ask(timeout_seconds=15)`（仅 legacy form）；ZCode 原生 AskUserQuestion 自动解析是 60 秒隐藏 + 5 分钟截止，不是 15 秒。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
+ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。15 秒路径默认用 `interaction_ask(timeout_seconds=15)`（仅 legacy form）；ZCode 原生 AskUserQuestion 自动解析是 60 秒隐藏 + 5 分钟截止，不是 15 秒。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
 
 混合安装器生成的示例使用稳定的 runtime/launcher.py 入口，无需依赖仓库位置。Codex 配置格式参考 [官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 并与本机 CLI help 核对；Claude Code JSON/stdio 参考 [官方 MCP 文档](https://code.claude.com/docs/en/mcp)。
 
