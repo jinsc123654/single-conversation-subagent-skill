@@ -13,8 +13,11 @@ flowchart TD
   O -->|auto| M
   M -->|是| E["interaction_ask(timeout=15s)"]
   M -->|否| T
+  E -->|accept| Q
   E -->|TIMED_OUT + 推荐项| C["按推荐项继续（不写 CONFIRMED）"]
-  E -->|其他失败| T
+  E -->|RPC_ERROR| F["FAILED；显式 reopen 后重试"]
+  E -->|无 form/modern| T
+  F --> W
   A --> R{"明确接受？"}
   T --> R
   R -->|是| Q["绑定 question_id 确认选择"]
@@ -181,7 +184,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 只读资源 `scs://session/{id}`、`scs://work-package/{id}`。完整参数、错误码、使用与恢复示例见 [MCP 用法](single-conversation-subagent/references/mcp.md)。
 
-会话不以 cwd、PID、MCP 连接 ID 识别；`session_open` 的 client_name 由配置 host 前缀命名空间（`host-client_name`，省略时为 `host-host`），不同宿主使用同一 conversation ID 也不会共用会话；无可靠 ID 则显式临时会话。SQLite schema 2、WAL、事务、busy timeout；多进程使用相同项目 DB，工作包更新必须携带 expected_version。数据库路径及伴随文件不得为符号链接；证据读取通过目录描述符逐级拒绝符号链接和越界。状态目录不是进程级沙箱，不能防止同一用户的恶意外部进程替换整个目录；本服务不适合不互信多用户。
+会话不以 cwd、PID、MCP 连接 ID 识别；`session_open` 把配置 host 与 client_name 一起做结构化 SHA-256 命名空间（存储为 `h<sha256>`，返回 `client_label` 供阅读），不同宿主使用同一 conversation ID 也不会共用会话；无可靠 ID 则显式临时会话。SQLite schema 2、WAL、事务、busy timeout；多进程使用相同项目 DB，工作包更新必须携带 expected_version。数据库路径及伴随文件不得为符号链接；证据读取通过目录描述符逐级拒绝符号链接和越界。状态目录不是进程级沙箱，不能防止同一用户的恶意外部进程替换整个目录；本服务不适合不互信多用户。
 
 Markdown 由主对话同步：docs-root 依次为 00_doc、00_docs、docs、doc，均无则创建 docs。保持 `<docs-root>/agent/AGENT_PROJECT.md`、`AGENT_COORDINATION.md`、`evidence/WP-<id>/R<rev>/<subtask-id>/` 及 `04_test/report/`。服务只初始化缺失记忆文件，绝不覆盖既有内容；所有工作包变更提示 record_sync_required。MCP 断开时纯 Skill 维护文件；恢复前显式核对，当前不提供自动导入器或自动覆盖。
 

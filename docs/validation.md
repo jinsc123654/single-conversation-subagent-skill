@@ -6,7 +6,7 @@
 
 修复：`SafeServer.run_stdio_async` 接入 `zcode_compat.zcode_compatible_stream`。ZCode 或未声明身份的探测在本地得到 `-32022`（`supported=["2025-11-25"]`），后续消息剥掉 2026 保留 `_meta` 键；明确标识的非 ZCode 客户端仍走 modern。
 
-验证：新增 3 项过滤层测试；全套 132 项 MCP pytest 通过；真实 stdio 子进程序列 discover→initialize→tools/list 返回 `-32022`、`2025-11-25`、17 工具，stdout 无额外帧、退出码 0。`interaction_ask`/host-channel 8 项测试覆盖 legacy 超时、正常答复、modern fallback submit、legacy 无 form submit、native/text channel submit、跨宿主同 ID 隔离、RPC 异常 FAILED；ZCode 原生自动解析在 `zcode.cjs` 中为 hiddenGrace 60s + autoResolution 300s，不是 15s。未在 ZCode 会话内视觉确认 elicitation 弹窗，不宣称 UI 已通过。
+验证：新增 3 项过滤层测试；全套 133 项 MCP pytest 通过；真实 stdio 子进程序列 discover→initialize→tools/list 返回 `-32022`、`2025-11-25`、17 工具，stdout 无额外帧、退出码 0。`interaction_ask`/host-channel 9 项测试覆盖 legacy 超时、正常答复、modern fallback submit、legacy 无 form submit、native/text channel submit、跨宿主同 ID 隔离、host/client 歧义隔离、RPC 异常 FAILED 持久化；ZCode 原生自动解析在 `zcode.cjs` 中为 hiddenGrace 60s + autoResolution 300s，不是 15s。未在 ZCode 会话内视觉确认 elicitation 弹窗，不宣称 UI 已通过。
 
 ## 宿主通道与 Codex 审查补充（2026-11-11）
 
@@ -14,7 +14,7 @@ Codex 只读审查（`gpt-6.1-sol`，本机二进制 `0.167.0-alpha.3.2`，会�
 
 修复：`session_open` 的 `project_root` 可省略并返回 `question_channel`/`host`；安装器新增 `--host`/`--question-channel`（codex→native、zcode→mcp、其他→auto），示例带 `SCS_HOST`/`SCS_QUESTION_CHANNEL` 和 `host-profile.json`；`prepare` 按 channel 路由（native/text/mcp/auto），fallback 保持 `WAITING_USER` + `question_id`，用户明确回复后直接 `interaction_submit`；modern 无回通道同样保留 `question_id`；`interaction_ask` 与 `interaction_request` 共享 `FAILED/RPC_ERROR` 记账；Skill 四选一前只允许一次 `session_open`，worker 不重新 intake。
 
-验证：132 项 pytest（8 项 host-channel，含跨宿主同 ID 隔离与 RPC 异常）、PyQt live 17 工具、真实 stdio 超时探针；临时安装器 codex→native、zcode→mcp，示例 env 正确。第二轮 Codex 复审再次 REJECT：默认 client_name 未使用配置 host、README Codex 示例漏 env、README/流程图仍写原生优先；已分别改为 host 前缀命名空间、补 env、按 channel 重画流程。第三轮复审在修复提交后重跑；未在 Codex 内注册 SCS MCP，form/back-channel 为 NOT_RUN。
+验证：133 项 pytest（9 项 host-channel，含跨宿主同 ID 隔离、host/client 歧义隔离、RPC 异常 FAILED 持久化）、PyQt live 17 工具、真实 stdio 超时探针；临时安装器 codex→native、zcode→mcp，示例 env 正确。第二轮 Codex 复审 REJECT：默认 client_name 未使用配置 host、README Codex 示例漏 env、README/流程图仍写原生优先；已分别改为 host 前缀命名空间、补 env、按 channel 重画流程。第三轮 Codex REJECT：host+client 拼接可碰撞、流程图缺 form accept/RPC 出口、RPC 测试未断言 FAILED；已改为结构化 SHA-256 命名空间、补图、断言持久化 FAILED。第四轮复审在修复提交后重跑；未在 Codex 内注册 SCS MCP，form/back-channel 为 NOT_RUN。
 
 2026-11-11，基线 a1ca6dd，分支 feat/mcp-hybrid。本记录生成于提交前；用户现已授权将 MCP 与可选 PyQt 管理器同仓库提交推送，最终提交与远端分支以 Git 记录为准。用户沿用长任务、主对话直接、不委派、不追加独立审查，并授权更新已安装管理器。
 

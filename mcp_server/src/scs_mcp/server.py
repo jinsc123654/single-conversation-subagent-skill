@@ -1,5 +1,6 @@
 """Official SDK v2 stdio server. No agent creation, process execution, or HTTP."""
 
+import hashlib
 import json
 import re
 from contextvars import ContextVar
@@ -89,7 +90,8 @@ class SafeServer(MCPServer):
 def create_server(project_root: str | Path, question_channel: str = "auto", host: str = "generic") -> SafeServer:
     if question_channel not in {"auto", "native", "mcp", "text"}:
         question_channel = "auto"
-    host = re.sub(r"[^\w .-]", "_", (host or "generic").strip())[:32] or "generic"
+    raw_host = (host or "generic").strip() or "generic"
+    display_host = re.sub(r"[^\w .-]", "_", raw_host)[:32] or "generic"
     store = Store(project_root)
     mcp = SafeServer(store)
     state = mcp.state
@@ -100,17 +102,21 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
                      explicit_skip: bool = False) -> dict[str, Any]:
         """Bind a host conversation to the configured root and report the host question channel.
 
-        project_root defaults to the server's configured root. client_name is
-        namespaced by the configured host (host-client_name) so two hosts with
-        the same conversation ID cannot reuse one session; omitting it uses
-        host-host. review_registration is host registry evidence, not a guess.
-        explicit_skip attests that the user explicitly said no questions; it
-        authorizes no destructive operation.
+        project_root defaults to the server's configured root. The session
+        namespace is an unambiguous hash of (configured host, client_name), so
+        two hosts with the same conversation ID cannot reuse one session; the
+        stored client label is h<sha256 prefix>. review_registration is host
+        registry evidence, not a guess. explicit_skip attests that the user
+        explicitly said no questions; it authorizes no destructive operation.
         """
-        resolved_client = f"{host}-{client_name or host}"
+        namespace = hashlib.sha256(
+            json.dumps([raw_host, client_name or ""], ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest()[:32]
+        resolved_client = "h" + namespace
         result = state.open(project_root or str(store.root), resolved_client, conversation_id, review_registration, explicit_skip)
         result["question_channel"] = question_channel
-        result["host"] = host
+        result["host"] = display_host
+        result["client_label"] = client_name or display_host
         return result
 
     @mcp.tool(structured_output=True)

@@ -191,6 +191,20 @@ async def test_host_namespaces_do_not_collide(tmp_path):
         assert second["host"] == "zcode"
 
 
+async def test_host_client_pair_hash_is_unambiguous(tmp_path):
+    async with (
+        Client(server_params(tmp_path, "native", "codex"), mode="legacy", read_timeout_seconds=10) as first_client,
+        Client(server_params(tmp_path, "native", "codex-dev"), mode="legacy", read_timeout_seconds=10) as second_client,
+    ):
+        first = (await first_client.call_tool(
+            "session_open", {"client_name": "dev-ui", "conversation_id": "same"}
+        )).structured_content
+        second = (await second_client.call_tool(
+            "session_open", {"client_name": "ui", "conversation_id": "same"}
+        )).structured_content
+        assert first["id"] != second["id"]
+
+
 async def test_rpc_error_marks_question_failed(tmp_path):
     async def broken(_context, _params):
         raise RuntimeError("broken form")
@@ -215,3 +229,6 @@ async def test_rpc_error_marks_question_failed(tmp_path):
         assert data["status"] == "TEXT_FALLBACK_REQUIRED"
         assert data["fallback_reason"] == "RPC_ERROR"
         assert data["question_id"]
+        snapshot = (await client.call_tool("session_get", {"session_id": opened["id"]})).structured_content
+        failed = [q for q in snapshot["questions"] if q["id"] == data["question_id"]]
+        assert failed and failed[0]["state"] == "FAILED"
