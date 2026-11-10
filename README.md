@@ -86,11 +86,30 @@ JSON stdio 示例（适用于使用 mcpServers 格式的客户端；逐客户端
 }
 ```
 
-混合安装器生成的示例使用稳定的 runtime/launcher.py 入口，无需依赖仓库位置。Codex 配置格式参考 [官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 并与本机 CLI help 核对；Claude Code JSON/stdio 参考 [官方 MCP 文档](https://code.claude.com/docs/en/mcp)。ZCode 本机启动器目标不存在，未臆造配置键，按其实际 MCP 设置界面填写 command/args，待验证。
+ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.servers`（不是顶层 `mcpServers`；schema 严格，未知键会丢弃该服务）：
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "single-conversation-subagent": {
+        "type": "stdio",
+        "command": "/absolute/repository/.venv/bin/python",
+        "args": ["-m", "scs_mcp", "--project-root", "/absolute/project"],
+        "timeoutMs": 60000
+      }
+    }
+  }
+}
+```
+
+ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
+
+混合安装器生成的示例使用稳定的 runtime/launcher.py 入口，无需依赖仓库位置。Codex 配置格式参考 [官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 并与本机 CLI help 核对；Claude Code JSON/stdio 参考 [官方 MCP 文档](https://code.claude.com/docs/en/mcp)。
 
 ## 能力矩阵与验收层次
 
-记录日期 2026-11-10。“待验证”包括没有实际执行的能力；官方文档支持不等于本项目集成通过。
+记录日期 2026-11-11（ZCode 行更新）。“待验证”包括没有实际执行的能力；官方文档支持不等于本项目集成通过。
 
 | 客户端 | Skill 注入 | stdio 连接本服务 | 原生提问 | 本服务 MCP elicitation / 真实 UI |
 | --- | --- | --- | --- | --- |
@@ -98,9 +117,9 @@ JSON stdio 示例（适用于使用 mcpServers 格式的客户端；逐客户端
 | 官方 Python SDK 1.30.0 旧客户端 | 不适用 | 已验证：独立环境连接最终安装包 | 不支持原生 UI | 已验证三问、多选及无能力回退；无图形 UI |
 | 当前 Codex 桌面聊天；CLI 0.163.0-alpha.10.2 | 已加载现有 Skill；新版待重开验证 | 待验证；配置格式已核对 | 已验证工具调用并收到本聊天用户确认；未独立视觉观察 | NOT_TESTED；未安装新服务器进当前会话 |
 | Claude Code 2.1.1（本机版本） | 待验证 | 待验证；官方有 stdio 文档 | 待验证 | NOT_TESTED |
-| ZCode（本机启动器缺少目标 AppImage） | 待验证 | 待验证 | 待验证 | NOT_TESTED |
+| ZCode 3.15（用户级 `mcp.servers`） | 已加载现有 Skill；新会话待重开 | 已验证：stdio 兼容层（ZCode 2026-07-28 探测回落 2025-11-25），16 工具 | 待宿主确认 | NOT_TESTED |
 
-当前宿主的原生提问链路已收集真实用户选择；本服务器的完整会话→提问→提交→工作包→证据→handoff 链路由 SDK 参考客户端实际运行。没有在 Codex/Claude/ZCode 的新会话内注册并视觉观察本服务 UI，不能宣称桌面客户端集成已通过或 100% 弹窗。
+当前宿主的原生提问链路已收集真实用户选择；本服务器的完整会话→提问→提交→工作包→证据→handoff 链路由 SDK 参考客户端实际运行。ZCode 已完成用户级 stdio 注册与原始握手验证；尚未在 Codex/Claude/ZCode 的新会话内视觉观察本服务的 elicitation UI，不能宣称桌面客户端 UI 已通过或 100% 弹窗。
 
 ## Obsidian 项目管理
 

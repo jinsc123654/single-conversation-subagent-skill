@@ -29,6 +29,24 @@ class SafeServer(MCPServer):
         self.state = State(store)
         super().__init__("single-conversation-subagent", version=__version__, log_level="CRITICAL")
 
+    async def run_stdio_async(self) -> None:
+        """Serve stdio with the ZCode mixed-era compatibility filter.
+
+        Identified non-ZCode clients keep the SDK's modern era. ZCode and
+        anonymous ``server/discover`` probes are served as a normal
+        2025-11-25 handshake connection, which both sides already speak.
+        """
+        from mcp.server.stdio import stdio_server
+
+        from .zcode_compat import zcode_compatible_stream
+
+        async with stdio_server() as (read_stream, write_stream):
+            await self._lowlevel_server.run(
+                zcode_compatible_stream(read_stream, write_stream),
+                write_stream,
+                self._lowlevel_server.create_initialization_options(),
+            )
+
     async def call_tool(self, name, arguments, context=None):
         token = _asked_question.set(None)
         try:

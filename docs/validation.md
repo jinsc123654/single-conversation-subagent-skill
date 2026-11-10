@@ -1,5 +1,13 @@
 # 2.2.0 验收记录
 
+## ZCode stdio 兼容补充（2026-11-11）
+
+问题：ZCode 的 stdio 客户端先以 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状发 `initialize`/`tools/list`。SDK 双协议循环以首个请求锁定连接 era；探测带来的 modern 锁定会使后续带信封的 legacy 请求被 `INVALID_REQUEST` 拒绝。
+
+修复：`SafeServer.run_stdio_async` 接入 `zcode_compat.zcode_compatible_stream`。ZCode 或未声明身份的探测在本地得到 `-32022`（`supported=["2025-11-25"]`），后续消息剥掉 2026 保留 `_meta` 键；明确标识的非 ZCode 客户端仍走 modern。
+
+验证：新增 3 项过滤层测试；全套 124 项 MCP pytest 通过；真实 stdio 子进程序列 discover→initialize→tools/list 返回 `-32022`、`2025-11-25`、16 工具，stdout 无额外帧、退出码 0。未在 ZCode 会话内视觉确认 elicitation 弹窗，不宣称 UI 已通过。
+
 2026-11-11，基线 a1ca6dd，分支 feat/mcp-hybrid。本记录生成于提交前；用户现已授权将 MCP 与可选 PyQt 管理器同仓库提交推送，最终提交与远端分支以 Git 记录为准。用户沿用长任务、主对话直接、不委派、不追加独立审查，并授权更新已安装管理器。
 
 本轮完成：项目栏可折叠并持久记忆、显示真实工作包子项、按最后 MCP 事件/修订或显式打开时间自动排序；读取不制造活动。每8秒可见时更新，排序保留选择、滚动与折叠状态。
