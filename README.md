@@ -17,7 +17,9 @@ flowchart TD
   E -->|TIMED_OUT + 推荐项| C["按推荐项继续（不写 CONFIRMED）"]
   E -->|RPC_ERROR| F["FAILED；显式 reopen 后重试"]
   E -->|无 form/modern| T
+  E -->|cancel/decline| W
   F --> W
+  A -->|不可用| T
   A --> R{"明确接受？"}
   T --> R
   R -->|是| Q["绑定 question_id 确认选择"]

@@ -14,7 +14,7 @@ Codex 只读审查（`gpt-6.1-sol`，本机二进制 `0.167.0-alpha.3.2`，会�
 
 修复：`session_open` 的 `project_root` 可省略并返回 `question_channel`/`host`；安装器新增 `--host`/`--question-channel`（codex→native、zcode→mcp、其他→auto），示例带 `SCS_HOST`/`SCS_QUESTION_CHANNEL` 和 `host-profile.json`；`prepare` 按 channel 路由（native/text/mcp/auto），fallback 保持 `WAITING_USER` + `question_id`，用户明确回复后直接 `interaction_submit`；modern 无回通道同样保留 `question_id`；`interaction_ask` 与 `interaction_request` 共享 `FAILED/RPC_ERROR` 记账；Skill 四选一前只允许一次 `session_open`，worker 不重新 intake。
 
-验证：133 项 pytest（9 项 host-channel，含跨宿主同 ID 隔离、host/client 歧义隔离、RPC 异常 FAILED 持久化）、PyQt live 17 工具、真实 stdio 超时探针；临时安装器 codex→native、zcode→mcp，示例 env 正确。第二轮 Codex 复审 REJECT：默认 client_name 未使用配置 host、README Codex 示例漏 env、README/流程图仍写原生优先；已分别改为 host 前缀命名空间、补 env、按 channel 重画流程。第三轮 Codex REJECT：host+client 拼接可碰撞、流程图缺 form accept/RPC 出口、RPC 测试未断言 FAILED；已改为结构化 SHA-256 命名空间、补图、断言持久化 FAILED。第四轮复审在修复提交后重跑；未在 Codex 内注册 SCS MCP，form/back-channel 为 NOT_RUN。
+验证：133 项 pytest（9 项 host-channel，含跨宿主同 ID 隔离、host/client 歧义隔离、RPC 异常 FAILED 持久化）、PyQt live 17 工具、真实 stdio 超时探针；临时安装器 codex→native、zcode→mcp，示例 env 正确。第二轮 Codex 复审 REJECT：默认 client_name 未使用配置 host、README Codex 示例漏 env、README/流程图仍写原生优先；已分别改为 host 前缀命名空间、补 env、按 channel 重画流程。第三轮 Codex REJECT：host+client 拼接可碰撞、流程图缺 form accept/RPC 出口、RPC 测试未断言 FAILED；已改为结构化 SHA-256 命名空间、补图、断言持久化 FAILED。第四轮 Codex REJECT：仅流程图缺 interaction_ask cancel/decline 与 native 不可用→文本；已补图。第五轮复审在修复提交后重跑；未在 Codex 内注册 SCS MCP，form/back-channel 为 NOT_RUN。
 
 2026-11-11，基线 a1ca6dd，分支 feat/mcp-hybrid。本记录生成于提交前；用户现已授权将 MCP 与可选 PyQt 管理器同仓库提交推送，最终提交与远端分支以 Git 记录为准。用户沿用长任务、主对话直接、不委派、不追加独立审查，并授权更新已安装管理器。
 
