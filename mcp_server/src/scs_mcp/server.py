@@ -68,7 +68,7 @@ class SafeServer(MCPServer):
                 chain = chain.__cause__
             # Never echo errors, validation input, credentials or private URLs.
             result = {"status": "ERROR", "error_code": "TOOL_ERROR", "message": "Tool failed; inspect local diagnostics."}
-            if name == "interaction_request":
+            if name in {"interaction_request", "interaction_ask"}:
                 sid = arguments.get("session_id")
                 try:
                     qid = _asked_question.get()
@@ -78,27 +78,35 @@ class SafeServer(MCPServer):
                     if q["state"] not in {"CONFIRMED", "CANCELLED", "DECLINED", "TIMED_OUT"}:
                         q = self.state.mark(sid, q["id"], "FAILED", "RPC_ERROR")
                         result = describe(q, "RPC_ERROR")
+                        result["next"] = "Explicitly interaction_reopen before retrying; the question is FAILED."
                 except (ScsError, StopIteration, TypeError):
                     pass
         return CallToolResult(content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
                               structured_content=result)
 
 
-def create_server(project_root: str | Path) -> SafeServer:
+def create_server(project_root: str | Path, question_channel: str = "auto", host: str = "generic") -> SafeServer:
+    if question_channel not in {"auto", "native", "mcp", "text"}:
+        question_channel = "auto"
     store = Store(project_root)
     mcp = SafeServer(store)
     state = mcp.state
 
     @mcp.tool(structured_output=True)
-    async def session_open(project_root: str, client_name: str, conversation_id: str | None = None,
+    async def session_open(project_root: str | None = None, client_name: str = "host", conversation_id: str | None = None,
                      review_registration: Literal["registered", "unregistered", "unknown"] = "unknown",
                      explicit_skip: bool = False) -> dict[str, Any]:
-        """Bind a real host conversation ID to this configured root. Unknown IDs create isolated temporary sessions.
+        """Bind a host conversation to the configured root and report the host question channel.
 
-        review_registration is host registry evidence, not a guess. explicit_skip
-        attests that the user explicitly said no questions; it authorizes no destructive operation.
+        project_root defaults to the server's configured root; omitting it is the
+        intended first-question path. review_registration is host registry
+        evidence, not a guess. explicit_skip attests that the user explicitly
+        said no questions; it authorizes no destructive operation.
         """
-        return state.open(project_root, client_name, conversation_id, review_registration, explicit_skip)
+        result = state.open(project_root or str(store.root), client_name, conversation_id, review_registration, explicit_skip)
+        result["question_channel"] = question_channel
+        result["host"] = host
+        return result
 
     @mcp.tool(structured_output=True)
     async def session_get(session_id: str) -> dict[str, Any]:
@@ -124,22 +132,29 @@ def create_server(project_root: str | Path) -> SafeServer:
         if q["state"] == "WAITING_USER" and not ctx.request_state:
             return describe(q)
         if q["state"] in {"UNSUPPORTED", "FAILED"}:
-            return describe(q, "ELICITATION_UNSUPPORTED" if q["state"] == "UNSUPPORTED" else "RPC_ERROR")
+            result = describe(q, "ELICITATION_UNSUPPORTED" if q["state"] == "UNSUPPORTED" else "RPC_ERROR")
+            result["next"] = "Explicitly interaction_reopen before retrying; the question ended."
+            return result
         if q["state"] == "REQUESTED":
             claimed, q = state.claim(session_id, q["id"])
             if not claimed:
                 if q["state"] == "CONFIRMED":
                     return {"status": "ALREADY_CONFIRMED", "question_id": q["id"], "choices": json.loads(q["answer"])}
-                return describe(q, "ELICITATION_UNSUPPORTED" if q["state"] == "UNSUPPORTED" else "RPC_ERROR" if q["state"] == "FAILED" else None)
-        if q["channel"] == "native":
+                result = describe(q, "ELICITATION_UNSUPPORTED" if q["state"] == "UNSUPPORTED" else "RPC_ERROR" if q["state"] == "FAILED" else None)
+                if q["state"] in {"UNSUPPORTED", "FAILED"}:
+                    result["next"] = "Explicitly interaction_reopen before retrying; the question ended."
+                return result
+        effective = channel
+        if effective == "auto" and question_channel in {"native", "text"}:
+            effective = question_channel
+        if effective == "native":
             result = describe(q)
             result["status"] = "NATIVE_QUESTION_REQUIRED"
             result["next"] = "Use the host native question tool once; submit the explicit reply with this question_id."
             return result
-        if q["channel"] == "text":
+        if effective == "text":
             return describe(q, "TEXT_REQUESTED")
         if not supports_form(ctx.client_capabilities):
-            q = state.mark(session_id, q["id"], "UNSUPPORTED", "ELICITATION_UNSUPPORTED")
             return describe(q, "ELICITATION_UNSUPPORTED")
         # SDK handles legacy server callbacks and 2026-07-28 InputRequiredResult.
         # The unique question ID pins the rendered question across multi-round retries.
@@ -196,22 +211,15 @@ def create_server(project_root: str | Path) -> SafeServer:
         import anyio
         from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
-        if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
-            return {
-                "status": "TEXT_FALLBACK_REQUIRED",
-                "fallback_reason": "MODERN_NO_BACKCHANNEL",
-                "kind": kind,
-                "recommendation": recommendation,
-                "display_text": MESSAGES[kind] + "\n唯一推荐：" + ", ".join(recommendation),
-                "next": "Use interaction_request on this protocol or a native question.",
-                "destructive_operations_authorized": False,
-            }
         outcome = await prepare(session_id, kind, recommendation, "auto", None, ctx)
         if not isinstance(outcome, Elicit):
             return outcome
         qid = _asked_question.get()
         if not qid:
             raise ScsError("QUESTION_NOT_FOUND", "No question was prepared for the form.")
+        if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
+            q = state.question(session_id, qid)
+            return describe(q, "MODERN_NO_BACKCHANNEL")
         message = outcome.message
         if timeout_seconds is not None and timeout_seconds > 0:
             message += f"；{timeout_seconds:g} 秒后按推荐项继续。"

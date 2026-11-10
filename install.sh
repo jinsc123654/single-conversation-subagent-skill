@@ -12,6 +12,8 @@ CHECK=0
 INSTRUCTIONS_FILE=""
 PYTHON_BIN="${SCS_PYTHON:-python3}"
 PROJECT_ROOT=""
+HOST=generic
+QUESTION_CHANNEL=""
 BEGIN='<!-- single-conversation-subagent begin -->'
 END='<!-- single-conversation-subagent end -->'
 
@@ -23,6 +25,8 @@ Usage: bash install.sh [options]
   --instructions-file PATH  Update the marked block in this file; implies default rule.
   --python PATH             Python 3.11+ for hybrid (or SCS_PYTHON).
   --project-root PATH       Explicit allowed project root in generated MCP examples.
+  --host NAME               Host label for examples: codex|zcode|claude|generic.
+  --question-channel MODE   auto|native|mcp|text; defaults per host.
   --check                   Read-only installation/dependency check; never installs.
   --uninstall               Back up/remove this skill, runtime and its marked rule only.
   -h, --help                Show help.
@@ -33,13 +37,15 @@ HELP
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --mode|--instructions-file|--python|--project-root)
+    --mode|--instructions-file|--python|--project-root|--host|--question-channel)
       [ "$#" -ge 2 ] || { echo "Missing option value" >&2; exit 2; }
       case "$1" in
         --mode) MODE="$2" ;;
         --instructions-file) INSTRUCTIONS_FILE="$2"; WITH_RULE=1 ;;
         --python) PYTHON_BIN="$2" ;;
         --project-root) PROJECT_ROOT="$2" ;;
+        --host) HOST="$2" ;;
+        --question-channel) QUESTION_CHANNEL="$2" ;;
       esac
       shift ;;
     --with-default-rule) WITH_RULE=1 ;;
@@ -51,6 +57,15 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 case "$MODE" in skill|hybrid) ;; *) echo 'Mode must be skill or hybrid' >&2; exit 2 ;; esac
+case "$HOST" in codex|zcode|claude|generic) ;; *) echo 'Host must be codex, zcode, claude or generic' >&2; exit 2 ;; esac
+if [ -z "$QUESTION_CHANNEL" ]; then
+  case "$HOST" in
+    codex) QUESTION_CHANNEL=native ;;
+    zcode) QUESTION_CHANNEL=mcp ;;
+    *) QUESTION_CHANNEL=auto ;;
+  esac
+fi
+case "$QUESTION_CHANNEL" in auto|native|mcp|text) ;; *) echo 'Question channel must be auto, native, mcp or text' >&2; exit 2 ;; esac
 [ -n "$AGENT_HOME" ] && [ "$AGENT_HOME" != / ] || { echo 'Refusing empty/root AGENT_HOME' >&2; exit 1; }
 case "$AGENT_HOME" in /*) ;; *) AGENT_HOME="$PWD/$AGENT_HOME" ;; esac
 DEST_DIR="$AGENT_HOME/skills/$SKILL_NAME"
@@ -175,7 +190,7 @@ if [ "$MODE" = hybrid ]; then
     tar -C "$SCRIPT_DIR/mcp_server/src" --exclude=__pycache__ --exclude='*.pyc' -cf - . | tar -C "$RUNTIME/src" -xf -
   fi
   # Never change arbitrary client configs. Back up our own generated files too.
-  for file in launcher.py python-path client-examples.json codex-example.toml; do safe_path "$RUNTIME/$file"; backup "$RUNTIME/$file"; done
+  for file in launcher.py python-path client-examples.json codex-example.toml host-profile.json; do safe_path "$RUNTIME/$file"; backup "$RUNTIME/$file"; done
   cat > "$RUNTIME/launcher.py" <<'PY'
 from pathlib import Path
 import sys
@@ -184,16 +199,19 @@ from scs_mcp.__main__ import main
 main()
 PY
   printf '%s\n' "$PYTHON_BIN" > "$RUNTIME/python-path"
-  "$PYTHON_BIN" - "$RUNTIME" "$PYTHON_BIN" "$PROJECT_ROOT" <<'PY'
+  "$PYTHON_BIN" - "$RUNTIME" "$PYTHON_BIN" "$PROJECT_ROOT" "$HOST" "$QUESTION_CHANNEL" <<'PY'
 import json, sys
 from pathlib import Path
-runtime, python, root = sys.argv[1:]
+runtime, python, root, host, channel = sys.argv[1:]
 root = str(Path(root).resolve()) if root else "<ABSOLUTE_PROJECT_ROOT>"
-entry = {"command": python, "args": [str(Path(runtime)/"launcher.py"), "--project-root", root]}
+env = {"SCS_HOST": host, "SCS_QUESTION_CHANNEL": channel}
+entry = {"command": python, "args": [str(Path(runtime)/"launcher.py"), "--project-root", root], "env": env}
 (Path(runtime)/"client-examples.json").write_text(json.dumps({"mcpServers": {"single-conversation-subagent": entry}}, indent=2)+"\n")
-(Path(runtime)/"codex-example.toml").write_text('[mcp_servers.single-conversation-subagent]\ncommand = '+json.dumps(python)+'\nargs = '+json.dumps(entry["args"])+"\n")
+(Path(runtime)/"codex-example.toml").write_text('[mcp_servers.single-conversation-subagent]\ncommand = '+json.dumps(python)+'\nargs = '+json.dumps(entry["args"])+'\n[mcp_servers.single-conversation-subagent.env]\nSCS_HOST = '+json.dumps(host)+'\nSCS_QUESTION_CHANNEL = '+json.dumps(channel)+"\n")
+(Path(runtime)/"host-profile.json").write_text(json.dumps({"host": host, "question_channel": channel}, indent=2)+"\n")
 PY
   echo "Hybrid runtime ready: $RUNTIME/launcher.py"
+  echo "Question channel: $HOST / $QUESTION_CHANNEL"
   echo "Copy/review the generated examples; replace project-root placeholder: $RUNTIME/client-examples.json"
   echo "Codex example: $RUNTIME/codex-example.toml"
 fi

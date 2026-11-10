@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -18,7 +19,9 @@ def main():
     logging.basicConfig(stream=sys.stderr, level=logging.CRITICAL)
     try:
         from .server import create_server
-        create_server(args.project_root).run(transport="stdio")
+        channel = os.environ.get("SCS_QUESTION_CHANNEL", "auto").strip().lower()
+        host = os.environ.get("SCS_HOST", "generic").strip() or "generic"
+        create_server(args.project_root, channel, host).run(transport="stdio")
     except Exception:
         print("scs_mcp startup failed; check project path, dependencies and local state permissions.", file=sys.stderr)
         raise SystemExit(1) from None
