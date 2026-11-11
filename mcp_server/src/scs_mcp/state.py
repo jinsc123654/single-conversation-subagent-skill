@@ -48,7 +48,16 @@ def identifier(prefix: str) -> str:
     return prefix + uuid.uuid4().hex
 
 
+def _code(kind: str, value: str) -> str:
+    """Accept either the stored code or the display label shown to users."""
+    for option in OPTIONS[kind]:
+        if value == option["value"] or value == option["label"] or value.startswith(option["value"] + " — "):
+            return option["value"]
+    return value
+
+
 def check_selection(kind: str, selected: list[str]) -> list[str]:
+    selected = [_code(kind, value) for value in selected]
     allowed = {x["value"] for x in OPTIONS[kind]}
     if not selected or len(selected) != len(set(selected)) or any(v not in allowed for v in selected):
         raise ScsError("CHOICE_INVALID", "Choose only listed options, without duplicates.")

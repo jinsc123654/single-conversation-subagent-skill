@@ -50,7 +50,7 @@ def choice_code(kind: str, value):
     if isinstance(value, list):
         return [choice_code(kind, item) for item in value]
     for option in OPTIONS[kind]:
-        if value == option["value"] or (isinstance(value, str) and value.startswith(option["value"] + " — ")):
+        if value == option["value"] or value == option["label"] or (isinstance(value, str) and value.startswith(option["value"] + " — ")):
             return option["value"]
     return value
 

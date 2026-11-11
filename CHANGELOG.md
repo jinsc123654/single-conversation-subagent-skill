@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.3 — 2026-11-11
+
+- `recommendation` 和提交 choices 同时接受代码值（`none`）与中文显示标签（`不做测试`/`本轮冒烟`/`不使用`）；避免模型按界面文案传参时 `CHOICE_INVALID`。
+- 新增 `test_state_accepts_display_labels_as_codes`；140 项 pytest。
+
 ## 2.4.2 — 2026-11-11
 
 - Codex 联动提问时机改为任务开始时：快速/标准/长任务、检测到已注册 codex-review 时询问是否收尾执行；标准/长任务在 verification 后，快速在 mode 后；只调查/未注册跳过。

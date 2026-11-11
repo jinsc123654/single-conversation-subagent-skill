@@ -1,4 +1,4 @@
-# single-conversation-subagent 2.4.2
+# single-conversation-subagent 2.4.3
 
 单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。
 

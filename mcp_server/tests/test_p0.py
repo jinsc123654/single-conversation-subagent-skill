@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,19 @@ def test_quick_mode_still_asks_registered_codex_review(state):
     assert q["kind"] == "codex_review"
     state.submit(sid, q["id"], "accept", ["no"])
     assert state.get(sid)["codex_review"] is False
+
+
+def test_state_accepts_display_labels_as_codes(state):
+    sid = open_session(state, review_registration="registered")
+    q = state.request(sid, "mode", ["标准执行"], "text")
+    assert json.loads(q["recommendation"]) == ["standard"]
+    state.submit(sid, q["id"], "accept", ["标准执行"])
+    q = state.request(sid, "verification", ["本轮冒烟"], "text")
+    assert json.loads(q["recommendation"]) == ["smoke"]
+    state.submit(sid, q["id"], "accept", ["本轮冒烟"])
+    q = state.request(sid, "codex_review", ["不使用"], "text")
+    assert json.loads(q["recommendation"]) == ["no"]
+    state.submit(sid, q["id"], "accept", ["不使用"])
 
 
 def test_question_order_and_exclusion(state):

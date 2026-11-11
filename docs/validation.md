@@ -1,4 +1,14 @@
-# 2.4.2 验收记录
+# 2.4.3 验收记录
+
+## recommendation 兼容显示标签（2026-11-11）
+
+问题：模型把 `recommendation` 传成中文显示标签（如 `不做测试`），服务端只接受代码值（`none`），返回 `CHOICE_INVALID` 并浪费一轮；问题未创建、状态未改。
+
+修复：`check_selection` 与 `choice_code` 同时接受代码、显示标签和 `code — label` 形式；推荐/提交统一归一化为代码。新增 `test_state_accepts_display_labels_as_codes`。
+
+验证：140 项 pytest 通过。
+
+# 2.4.2 验收记录（历史）
 
 ## Codex 任务开始询问、收尾执行（2026-11-11）
 
