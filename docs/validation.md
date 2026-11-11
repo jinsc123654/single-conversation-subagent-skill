@@ -1,4 +1,16 @@
-# 2.3.0 验收记录
+# 2.4.0 验收记录
+
+## Skill 主问、MCP 收集（2026-11-11）
+
+问题：MCP form 15 秒超时只把问题标 `TIMED_OUT`，不写会话状态，后续 verification 认为 mode 未确认；用户打字超过 15 秒被自动推进；弹窗不消失。
+
+决定：Skill 主问，MCP 只收集工作流/状态/证据。ZCode 默认 native AskUserQuestion；MCP form 只作为无原生工具宿主的兜底。
+
+变更：安装器 `zcode→native`；README/Skill/AGENTS 明确 native 主路径；MCP 代码不改；137 项 pytest。
+
+验证：137 项 MCP pytest 通过；真实 ZCode 原生问题流程待新会话；MCP form 15s 不再是 ZCode 主路径。
+
+# 2.3.0 验收记录（历史）
 
 ## 多项目根与首轮硬门（2026-11-11）
 

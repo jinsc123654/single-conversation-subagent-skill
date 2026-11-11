@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.0 — 2026-11-11
+
+- 架构收口：Skill 主问；ZCode 默认 native AskUserQuestion；MCP 只做 `session_open`/选择记录/`interaction_submit`/工作包/证据/视图/handoff，不默认驱动 MCP form。
+- MCP form/15s `interaction_ask` 保留给没有原生提问工具的宿主；ZCode 不再使用。原生 60s 隐藏 + 5min；打字超过 15 秒不会被 MCP 截断；首问超时也不影响后续（由 Skill 继续）。
+- 安装器 ZCode 默认 native；README/Skill/AGENTS 同步。
+- 137 项 pytest（MCP 代码不变；默认通道/文档更新）。
+
 ## 2.3.0 — 2026-11-11
 
 - MCP 多项目根：配置根是允许的工作区边界；`session_open(project_root=<项目>)` 为项目建独立 `<项目>/.scs`，`session_get`/interaction/work/lease/view 都按会话的项目 state。修复直接新建任务在别的项目时 `PROJECT_MISMATCH`、空参临时会话扫描错项目的问题。
