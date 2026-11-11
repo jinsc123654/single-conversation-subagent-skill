@@ -91,7 +91,7 @@ class Work:
                 if original != data or old["revision"] != 1:
                     raise ScsError("IDEMPOTENCY_CONFLICT", "request_key was already used for another definition or revision.")
                 return self._snapshot(old)
-            docs = self.store.paths.docs_root()
+            docs = self.store.docs_root(con)
             self._records(docs)
             for task in tasks:
                 self.store.paths.mkdir(f"{docs}/agent/evidence/{pid}/R1/{task['id']}")

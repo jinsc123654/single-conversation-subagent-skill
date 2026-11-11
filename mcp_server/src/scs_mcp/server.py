@@ -17,6 +17,7 @@ from .errors import ScsError
 from .models import SubtaskDefinition, SubtaskResult
 from .interaction import MESSAGES, choice_code, describe, schema_for, supports_form
 from .roots import Roots
+from .project_index import publish
 from .state import OPTIONS
 from .workspace import scan_workspace
 
@@ -98,18 +99,18 @@ class SafeServer(MCPServer):
                               structured_content=result)
 
 
-def create_server(project_root: str | Path, question_channel: str = "auto", host: str = "generic") -> SafeServer:
+def create_server(project_root: str | Path, question_channel: str = "auto", host: str = "generic", *, allowed_roots=()) -> SafeServer:
     if question_channel not in {"auto", "native", "mcp", "text"}:
         question_channel = "auto"
     raw_host = (host or "generic").strip() or "generic"
     display_host = re.sub(r"[^\w .-]", "_", raw_host)[:32] or "generic"
-    roots = Roots(project_root)
+    roots = Roots(project_root, allowed_roots)
     mcp = SafeServer(roots)
 
     @mcp.tool(structured_output=True)
     async def session_open(project_root: str | None = None, client_name: str | None = None, conversation_id: str | None = None,
                      review_registration: Literal["registered", "unregistered", "unknown"] = "unknown",
-                     explicit_skip: bool = False) -> dict[str, Any]:
+                     explicit_skip: bool = False, register_obsidian: bool = False) -> dict[str, Any]:
         """Bind a host conversation to its project root and report the host question channel.
 
         project_root defaults to the server's configured workspace root; pass the
@@ -119,8 +120,14 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         with the same conversation ID cannot reuse one session; the stored client
         label is h<sha256 prefix>. review_registration is host registry evidence,
         not a guess. explicit_skip attests that the user explicitly said no
-        questions; it authorizes no destructive operation.
+        questions; it authorizes no destructive operation. register_obsidian
+        initializes this project's docs vault and publishes it to the desktop
+        manager before intake. Supply project_root explicitly (user-named project
+        or current conversation working directory) and use this only when the
+        project metadata and local index writes are authorized.
         """
+        if register_obsidian and (not project_root or not Path(project_root).is_absolute()):
+            raise ScsError("PROJECT_ROOT_REQUIRED", "Pass the absolute project or conversation working directory.")
         namespace = hashlib.sha256(
             json.dumps([raw_host, client_name or ""], ensure_ascii=False, separators=(",", ":")).encode()
         ).hexdigest()[:32]
@@ -132,6 +139,16 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         result["project_root"] = str(root)
         result["workspace_scan"] = scan_workspace(root)
         result["mode_options"] = OPTIONS["mode"]
+        if register_obsidian:
+            try:
+                view = roots.views(result["id"]).refresh(result["id"], register=True)
+                result["obsidian"] = publish(root, view["vault_root"], view["overview_path"])
+            except ScsError as error:
+                result["obsidian"] = error.result()
+            except OSError:
+                result["obsidian"] = ScsError(
+                    "PROJECT_INDEX_FAILED", "The session was saved. Check the local project index and retry registration."
+                ).result()
         return result
 
     @mcp.tool(structured_output=True)
@@ -408,8 +425,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         # it into an ambiguous failed mutation or encourage a duplicate retry.
         try:
             views = roots.views(session_id)
-            docs, _, path = views._layout()
-            manifest, _ = views._manifest(path, docs)
+            with views.store.transaction() as con:
+                docs, _, path = views._layout(con)
+                manifest, _ = views._manifest(path, docs)
             if manifest and manifest.get("auto_refresh"):
                 updated = views.refresh(session_id)
                 result["view_update"] = {"status": "OK", "updated_files": updated["updated_files"], "open_uri": updated["open_uri"]}

@@ -12,6 +12,7 @@ CHECK=0
 INSTRUCTIONS_FILE=""
 PYTHON_BIN="${SCS_PYTHON:-python3}"
 PROJECT_ROOT=""
+ALLOW_ROOTS=()
 HOST=generic
 QUESTION_CHANNEL=""
 BEGIN='<!-- single-conversation-subagent begin -->'
@@ -24,7 +25,8 @@ Usage: bash install.sh [options]
   --with-default-rule       Update only this skill's marked block in AGENT_HOME/AGENTS.md.
   --instructions-file PATH  Update the marked block in this file; implies default rule.
   --python PATH             Python 3.11+ for hybrid (or SCS_PYTHON).
-  --project-root PATH       Explicit allowed project root in generated MCP examples.
+  --project-root PATH       Default allowed workspace in generated MCP examples.
+  --allow-root PATH         Additional allowed workspace; repeatable.
   --host NAME               Host label for examples: codex|zcode|claude|generic.
   --question-channel MODE   auto|native|mcp|text; defaults per host.
   --check                   Read-only installation/dependency check; never installs.
@@ -37,13 +39,14 @@ HELP
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --mode|--instructions-file|--python|--project-root|--host|--question-channel)
+    --mode|--instructions-file|--python|--project-root|--allow-root|--host|--question-channel)
       [ "$#" -ge 2 ] || { echo "Missing option value" >&2; exit 2; }
       case "$1" in
         --mode) MODE="$2" ;;
         --instructions-file) INSTRUCTIONS_FILE="$2"; WITH_RULE=1 ;;
         --python) PYTHON_BIN="$2" ;;
         --project-root) PROJECT_ROOT="$2" ;;
+        --allow-root) ALLOW_ROOTS+=("$2") ;;
         --host) HOST="$2" ;;
         --question-channel) QUESTION_CHANNEL="$2" ;;
       esac
@@ -199,13 +202,16 @@ from scs_mcp.__main__ import main
 main()
 PY
   printf '%s\n' "$PYTHON_BIN" > "$RUNTIME/python-path"
-  "$PYTHON_BIN" - "$RUNTIME" "$PYTHON_BIN" "$PROJECT_ROOT" "$HOST" "$QUESTION_CHANNEL" <<'PY'
+  "$PYTHON_BIN" - "$RUNTIME" "$PYTHON_BIN" "$PROJECT_ROOT" "$HOST" "$QUESTION_CHANNEL" "${ALLOW_ROOTS[@]}" <<'PY'
 import json, sys
 from pathlib import Path
-runtime, python, root, host, channel = sys.argv[1:]
+runtime, python, root, host, channel, *extra_roots = sys.argv[1:]
 root = str(Path(root).resolve()) if root else "<ABSOLUTE_PROJECT_ROOT>"
 env = {"SCS_HOST": host, "SCS_QUESTION_CHANNEL": channel}
-entry = {"command": python, "args": [str(Path(runtime)/"launcher.py"), "--project-root", root], "env": env}
+args = [str(Path(runtime)/"launcher.py"), "--project-root", root]
+for extra in extra_roots:
+    args.extend(["--allow-root", str(Path(extra).resolve())])
+entry = {"command": python, "args": args, "env": env}
 (Path(runtime)/"client-examples.json").write_text(json.dumps({"mcpServers": {"single-conversation-subagent": entry}}, indent=2)+"\n")
 (Path(runtime)/"codex-example.toml").write_text('[mcp_servers.single-conversation-subagent]\ncommand = '+json.dumps(python)+'\nargs = '+json.dumps(entry["args"])+'\n[mcp_servers.single-conversation-subagent.env]\nSCS_HOST = '+json.dumps(host)+'\nSCS_QUESTION_CHANNEL = '+json.dumps(channel)+"\n")
 (Path(runtime)/"host-profile.json").write_text(json.dumps({"host": host, "question_channel": channel}, indent=2)+"\n")

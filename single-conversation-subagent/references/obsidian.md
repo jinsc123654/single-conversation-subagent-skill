@@ -4,7 +4,9 @@
 
 ## 启用与打开
 
-先 session_open，按本对话已确认的模式/验证范围记录交互。用户要求 Obsidian 管理时调用：
+首次绑定对话时，`session_open(project_root=<绝对项目根>, register_obsidian=true)` 初始化库与总览，并发布到 PyQt 的本地项目索引。项目根使用用户明确指定的目录，或宿主提供的当前对话工作目录。选定的 docs-root 固定在项目数据库中，后续对话复用。登记先于执行模式和验证，需有项目元数据与本地索引的写入权限。
+
+如需手动刷新已有视图，可在确认本对话模式和验证范围后调用：
 
 ```json
 {"session_id":"S-...","initialize_vault":true,"auto_refresh":true}

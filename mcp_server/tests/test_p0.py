@@ -131,6 +131,44 @@ async def test_session_open_uses_project_under_workspace(tmp_path):
         assert asked["question_id"]
 
 
+async def test_session_open_registers_project_vault_before_intake(tmp_path, monkeypatch):
+    index = tmp_path / "local-state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(index))
+    default = tmp_path / "default"
+    default.mkdir()
+    allowed = tmp_path / "workspace"
+    project = allowed / "nested" / "project"
+    (project / "doc").mkdir(parents=True)
+    server = create_server(default, allowed_roots=[allowed])
+    async with Client(server, mode="legacy") as client:
+        async def open_project(**args):
+            return (await client.call_tool("session_open", args)).structured_content
+
+        assert (await open_project(register_obsidian=True))["error_code"] == "PROJECT_ROOT_REQUIRED"
+        refused = await open_project(project_root=str(tmp_path), register_obsidian=True)
+        assert refused["error_code"] == "PROJECT_MISMATCH"
+        first = await open_project(project_root=str(project), register_obsidian=True, conversation_id="first")
+        assert first["mode"] is None and first["verification"] is None
+        registered = first["obsidian"]
+        assert registered["status"] == "REGISTERED"
+        assert registered["vault_root"] == str(project / "doc")
+        assert (project / "doc/.obsidian/app.json").is_file()
+        assert Path(registered["overview_path"]).is_file()
+
+        (project / "00_doc").mkdir()
+        second = await open_project(project_root=str(project), register_obsidian=True, conversation_id="second")
+        assert second["id"] != first["id"]
+        assert second["obsidian"] == registered
+        assert not (project / "00_doc/.obsidian").exists()
+        assert len(list((index / "scs-manager/projects").glob("*.json"))) == 1
+
+        empty_project = allowed / "empty"
+        empty_project.mkdir()
+        empty = await open_project(project_root=str(empty_project), register_obsidian=True)
+        assert empty["obsidian"]["vault_root"] == str(empty_project / "docs")
+        assert (empty_project / "docs/.obsidian/app.json").is_file()
+
+
 async def test_session_open_rejects_project_outside_workspace(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

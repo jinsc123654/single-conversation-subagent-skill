@@ -32,6 +32,8 @@ class MainWindow(QMainWindow):
             value = str(canonical(root))
             if value not in self.settings["projects"]:
                 self.settings["projects"].append(value)
+            if value in self.settings.get("hidden_projects", []):
+                self.settings["hidden_projects"].remove(value)
         self.catalog = {}
         self.current_root = None
         self.current_snapshot = None
@@ -225,8 +227,10 @@ class MainWindow(QMainWindow):
         self.registry.save(self.settings)
 
     def rebuild_projects(self):
-        entries=[self.catalog.get(root, {"root":root,"name":Path(root).name,"last_activity":0,"packages":[]})
-                 for root in self.settings["projects"]]
+        hidden = set(self.settings.get("hidden_projects", []))
+        roots = dict.fromkeys([*self.settings["projects"], *self.catalog])
+        entries = [self.catalog.get(root, {"root": root, "name": Path(root).name, "last_activity": 0, "packages": []})
+                   for root in roots if root not in hidden]
         self.projects.update_projects(entries,self.settings.get("collapsed_projects",{}),self.settings.get("last_opened",{}))
         self.filter_projects()
 
@@ -245,14 +249,15 @@ class MainWindow(QMainWindow):
         self.rebuild_projects()
 
     def refresh_catalog(self):
-        if self.closing or self.catalog_job.state()!=QProcess.NotRunning or not self.settings["projects"]:
+        if self.closing or self.catalog_job.state() != QProcess.NotRunning:
             return
         self.catalog_output=bytearray()
         env=QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONPATH",str(Path(__file__).resolve().parents[1]))
         self.catalog_job.setProcessEnvironment(env)
-        self.catalog_job.start(sys.executable,["-m","scs_manager.worker","catalog","--root",self.settings["projects"][0]])
-        self.catalog_job.write(json.dumps(self.settings["projects"],ensure_ascii=False).encode())
+        self.catalog_job.start(sys.executable, ["-m", "scs_manager.worker", "catalog", "--root", "."])
+        request = {"projects": self.settings["projects"], "hidden_projects": self.settings.get("hidden_projects", [])}
+        self.catalog_job.write(json.dumps(request, ensure_ascii=False).encode())
         self.catalog_job.closeWriteChannel()
         self.catalog_timeout.start(20000)
 
@@ -285,6 +290,8 @@ class MainWindow(QMainWindow):
     def add_paths(self, paths):
         for path in paths:
             root = str(canonical(path))
+            if root in self.settings.get("hidden_projects", []):
+                self.settings["hidden_projects"].remove(root)
             if root not in self.settings["projects"]:
                 self.settings["projects"].append(root)
         self.persist()
@@ -313,7 +320,12 @@ class MainWindow(QMainWindow):
     def remove_project(self):
         item = self.projects.currentItem()
         if item and not self.busy:
-            self.settings["projects"].remove(item.data(0,Qt.UserRole))
+            root = item.data(0, Qt.UserRole)
+            if root in self.settings["projects"]:
+                self.settings["projects"].remove(root)
+            hidden = self.settings.setdefault("hidden_projects", [])
+            hidden.append(root)
+            del hidden[:-500]
             self.safe(self.persist)
             self.current_root = None
             self.current_snapshot = None

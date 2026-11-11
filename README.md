@@ -148,6 +148,10 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 ## Obsidian 项目管理
 
+对话明确指定项目目录时使用该目录；没有指定时使用当前对话工作目录。Skill 传入绝对路径调用 `session_open(project_root=..., register_obsidian=true)`。服务依次选择 `00_doc / 00_docs / docs / doc`，均无则新建 `docs`，随后固定库路径、生成首页和独立启动配置，并登记到本地 PyQt 项目索引。登记无需创建工作包或先选择验证范围。多个对话可复用同一项目库。
+
+授权多个工作区时，可在 MCP 启动参数或安装命令中重复添加 `--allow-root /absolute/workspace`。现有 `--project-root` 保留为默认工作区。服务只在已配置的目录范围内处理项目，无法用对话参数扩大范围。
+
 仍是 **1 个 MCP 服务，现在提供 17 个工具**。新增两个视图工具，不需要再安装另一套 MCP 或 Obsidian 社区插件。
 
 每个项目选中的 docs-root 就是独立的 Obsidian 库根。默认 `00_doc → 00_docs → docs → doc`，都没有时使用 docs；视图在 `<docs-root>/agent/acceptance/`，与项目资料、记忆和证据保持同一文档根。
@@ -158,7 +162,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 调用 `project_view_refresh`：生成项目总览、状态分组、已完成子任务、工作包/历史修订页及来源链接。`initialize_vault=true` 只创建缺失库的 `.obsidian/app.json`（空配置），已有配置不改、不装插件。默认开启视图后的工作包自动刷新；以后 MCP 创建/更新工作包时更新页面。若视图冲突，原工作包仍保存成功，`view_update` 单独报告错误，不能因此重复提交工作包。
 
-调用 `project_view_info(session_id)`：只读检查过期/手改漂移/证据问题，返回 `vault_root` 和编码后的 `open_uri`；不创建文档目录、不启动软件。首次在 Obsidian 选择 **Open folder as vault（打开文件夹为仓库）**，选中 vault_root。注册后可点击 open_uri 直接打开项目总览；链接用文件绝对路径，避免多个项目都叫 docs 时混淆。此流程依据 [Obsidian 管理库](https://help.obsidian.md/Files+and+folders/Manage+vaults) 与 [URI 官方文档](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI)。
+调用 `project_view_info(session_id)`：只读检查过期/手改漂移/证据问题，返回 `vault_root` 和编码后的 `open_uri`；不创建文档目录、不启动软件。PyQt 可用独立启动配置直接打开项目总览。直接使用通用 open_uri 时，先在 Obsidian 选择 **Open folder as vault（打开文件夹为仓库）** 并选中 vault_root；链接用文件绝对路径，避免多个项目都叫 docs 时混淆。此流程依据 [Obsidian 管理库](https://help.obsidian.md/Files+and+folders/Manage+vaults) 与 [URI 官方文档](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI)。
 
 每页 `manual:begin / manual:end` 标记之间可写手工批注，刷新原样保留。生成区域被修改、标记异常或目标文件不属于本生成器时拒绝覆盖。单文件原子替换和内容前置检查防止常见并发覆盖；服务进程之间串行，外部编辑器不受硬锁约束。中断后可重试刷新自身的部分生成结果。既有源记忆不被投影视图覆盖，旧目录记录只链接/标明库外位置，不迁移。
 

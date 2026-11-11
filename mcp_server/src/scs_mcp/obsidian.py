@@ -72,8 +72,8 @@ class ProjectView:
         self.state = State(store)
         self.work = Work(store)
 
-    def _layout(self):
-        docs = self.paths.docs_root()
+    def _layout(self, con):
+        docs = self.store.docs_root(con)
         view = docs + "/agent/acceptance"
         return docs, view, view + "/.scs-view.json"
 
@@ -265,21 +265,28 @@ class ProjectView:
     def info(self, session_id: str) -> dict:
         with self.store.transaction() as con:
             self.state._session(con, session_id)
-            docs, view, path = self._layout()
+            docs, view, path = self._layout(con)
             manifest, _ = self._manifest(path, docs)
             _, _, snapshot = self._snapshot(con)
             return self._info(con, docs, view, manifest, snapshot)
 
-    def refresh(self, session_id: str, initialize_vault: bool = False, auto_refresh: bool = True) -> dict:
+    def refresh(self, session_id: str, initialize_vault: bool = False, auto_refresh: bool = True,
+                *, register: bool = False) -> dict:
         with self.store.transaction(True) as con:
             session = self.state._session(con, session_id)
-            if not session["mode"] or (session["mode"] in {"standard", "long"} and
-                    (not session["verification"] or (session["review_registration"] == "registered" and session["codex_review"] is None))):
-                raise ScsError("INTAKE_REQUIRED", "Confirm this conversation's intake before creating project view files.")
-            if session["mode"] == "investigate":
-                raise ScsError("READ_ONLY_MODE", "Investigation mode can inspect project_view_info but cannot write a view.")
-            docs, view, manifest_path = self._layout()
+            if not register:
+                if not session["mode"] or (session["mode"] in {"standard", "long"} and
+                        (not session["verification"] or (session["review_registration"] == "registered" and session["codex_review"] is None))):
+                    raise ScsError("INTAKE_REQUIRED", "Confirm this conversation's intake before creating project view files.")
+                if session["mode"] == "investigate":
+                    raise ScsError("READ_ONLY_MODE", "Investigation mode can inspect project_view_info but cannot write a view.")
+            docs, view, manifest_path = self._layout(con)
             manifest, old_manifest = self._manifest(manifest_path, docs)
+            if register:
+                initialize_vault = True
+                if manifest:
+                    auto_refresh = manifest["auto_refresh"]
+                con.execute("INSERT OR IGNORE INTO metadata VALUES('docs_root', ?)", (docs,))
             configured = self._vault_config(docs)  # preflight symlinks before any writes
             packages, revisions, snapshot = self._snapshot(con)
             pages, summary = self._render(docs, view, packages, revisions)

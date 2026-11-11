@@ -96,6 +96,12 @@ PRAGMA user_version=2; COMMIT;
         finally:
             con.close()
 
+    def docs_root(self, con) -> str:
+        row = con.execute("SELECT value FROM metadata WHERE key='docs_root'").fetchone()
+        if row is None:
+            return self.paths.docs_root()
+        return self.paths.validate(row[0])
+
     def _safe_db(self):
         if (self.root / ".scs").is_symlink():
             raise ScsError("PATH_UNSAFE", "State directory cannot be a symlink.")

@@ -1,6 +1,8 @@
+import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -11,7 +13,7 @@ from PyQt5.QtCore import QProcess, Qt
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from scs_manager import theme
-from scs_manager.backend import Registry
+from scs_manager.backend import Registry, obsidian_target
 from scs_manager.window import MainWindow
 from helpers import project
 
@@ -191,6 +193,28 @@ class WindowTests(unittest.TestCase):
             QTest.qWait(20)
         self.assertEqual(self.window.projects.item(0).childCount(),1)
         self.assertFalse(self.window.last_error,self.window.last_error)
+
+    def test_chat_registered_project_appears_without_manual_add(self):
+        root = project(Path(self.temp.name) / "registered")
+        with sqlite3.connect(root / ".scs/state.sqlite3") as con:
+            con.execute("INSERT INTO metadata VALUES ('docs_root', 'docs')")
+        (root / "00_doc/.obsidian").mkdir(parents=True)
+        state = Path(self.temp.name) / "state"
+        directory = state / "scs-manager/projects"
+        directory.mkdir(parents=True)
+        entry = directory / (hashlib.sha256(os.fsencode(root)).hexdigest() + ".json")
+        entry.write_text(json.dumps({"project_root": str(root), "vault_root": str(root / "docs"),
+                                     "overview_path": str(root / "docs/agent/acceptance/00_项目总览.md")}))
+        self.window.settings["projects"].clear()
+        with patch.dict(os.environ, {"XDG_STATE_HOME": str(state)}):
+            self.window.refresh_catalog()
+            deadline = time.monotonic() + 5
+            while self.window.catalog_job.state() != QProcess.NotRunning and time.monotonic() < deadline:
+                QTest.qWait(20)
+        self.assertEqual(self.window.projects.count(), 1)
+        self.assertEqual(self.window.projects.item(0).data(0, Qt.UserRole), str(root))
+        self.assertEqual(obsidian_target(root)["vault_root"], str(root / "docs"))
+        self.assertFalse(self.config.exists())
 
     def test_failed_detached_launch_reports_error(self):
         self.load()

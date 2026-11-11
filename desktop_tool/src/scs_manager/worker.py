@@ -7,7 +7,7 @@ import subprocess
 import sqlite3
 import sys
 
-from .backend import archive_view, database, discover, snapshot, project_catalog, prepare_obsidian
+from .backend import archive_view, database, discover, snapshot, project_catalog, prepare_obsidian, registered_projects
 
 
 def main():
@@ -25,7 +25,12 @@ def main():
             raw=sys.stdin.buffer.read(2_000_001)
             if len(raw)>2_000_000:
                 raise ValueError("项目列表过大")
-            data=project_catalog(json.loads(raw))
+            request = json.loads(raw)
+            manual = request["projects"]
+            hidden = set(request["hidden_projects"])
+            automatic = [root for root in registered_projects() if root not in hidden]
+            roots = list(dict.fromkeys([*manual, *automatic]))[:500]
+            data = project_catalog(roots)
         elif args.action == "prepare-obsidian":
             data=prepare_obsidian(args.root,args.selection or None)
         elif args.action == "snapshot":

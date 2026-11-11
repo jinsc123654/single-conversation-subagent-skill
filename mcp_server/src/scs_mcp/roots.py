@@ -17,9 +17,9 @@ from .work import Work
 
 
 class Roots:
-    def __init__(self, default_root):
+    def __init__(self, default_root, allowed_roots=()):
         self.default_root = Path(default_root).resolve()
-        self.allowed_root = self.default_root
+        self.allowed_roots = (self.default_root, *(Path(root).resolve() for root in allowed_roots))
         self.states = {}
         self.sessions = {}
         self.works = {}
@@ -28,7 +28,7 @@ class Roots:
 
     def resolve(self, project_root):
         root = Path(project_root or self.default_root).resolve()
-        if root != self.allowed_root and self.allowed_root not in root.parents:
+        if not any(root.is_relative_to(allowed) for allowed in self.allowed_roots):
             raise ScsError("PROJECT_MISMATCH", "Project must be inside the configured workspace root.")
         return root
 

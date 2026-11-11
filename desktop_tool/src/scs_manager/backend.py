@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -44,8 +45,20 @@ def inside(root, path):
     return resolved
 
 
+def registered_docs_root(root):
+    if inside(root, ".scs/state.sqlite3").is_file():
+        with database(root) as con:
+            row = con.execute("SELECT value FROM metadata WHERE key='docs_root'").fetchone()
+        if row:
+            return inside(root, row[0])
+    return None
+
+
 def docs_root(root):
     root = canonical(root)
+    registered = registered_docs_root(root)
+    if registered is not None:
+        return registered
     for name in DOCS:
         p = inside(root, name)
         if p.is_dir():
@@ -176,6 +189,9 @@ class Registry:
             raise ValueError("项目列表格式错误")
         if not all(isinstance(v, str) for v in data["projects"]):
             raise ValueError("项目路径必须为文本")
+        hidden = data.get("hidden_projects", [])
+        if not isinstance(hidden, list) or len(hidden) > 500 or not all(isinstance(v, str) for v in hidden):
+            raise ValueError("隐藏项目列表格式错误")
         for key in ('collapsed_projects','last_opened'):
             values=data.get(key,{})
             if not isinstance(values,dict) or len(values)>500:
@@ -210,8 +226,10 @@ def obsidian_target(root, selection=None):
     base = selected if selected.is_dir() else selected.parent
     # Prefer the nearest real vault, including nested projects' docs folders.
     vault = None
+    if selected == root:
+        vault = registered_docs_root(root)
     for parent in (base, *base.parents):
-        if not parent.is_relative_to(root):
+        if vault or not parent.is_relative_to(root):
             break
         if inside(root, parent / ".obsidian").is_dir():
             vault = parent
@@ -271,6 +289,14 @@ def timestamp(value):
         return datetime.fromisoformat(str(value).replace('Z','+00:00')).timestamp()
     except (ValueError,TypeError,OverflowError):
         return 0.0
+
+
+def registered_projects():
+    source = Path(__file__).resolve().parents[3] / "mcp_server/src"
+    if source.is_dir() and str(source) not in sys.path:
+        sys.path.insert(0, str(source))
+    from scs_mcp.project_index import registered_projects as read_index
+    return read_index()
 
 
 def project_catalog(roots):
