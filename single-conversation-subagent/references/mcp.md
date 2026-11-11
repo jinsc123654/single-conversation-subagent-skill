@@ -15,7 +15,7 @@
 
 模式值 `quick/standard/long/investigate`。推荐是单元素列表。仅首次进入 standard/long 后请求 verification，值为 `smoke/targeted/full/stability/none/method-only`，支持多选；推荐只有一个列表组合。`none` 和 `method-only` 各自排除所有其他项。冒烟本轮，定向/全量/稳定性收尾；用户指定预算、资源、方法写入协调记录。危险操作不在此表单授权范围。
 
-verification 仅标准/长任务请求；快速/只调查跳过。codex_review 在快速/标准/长任务、只有宿主确证注册 codex-review 时才请求，值 `no/yes`，唯一推荐 `["no"]`；只调查/未知/未装返回 SKIPPED；标准/长任务要求先确认 verification，快速不要求。`explicit_skip=true` 仅用于用户明确“不用问，直接做”，记录 quick；需要改变模式时显式 reopen，不把自动检测当用户跳过。
+verification 仅标准/长任务请求；快速/只调查跳过。codex_review 在任务开始时、快速/标准/长任务、只有宿主确证注册 codex-review 时才请求，值 `no/yes`，唯一推荐 `["no"]`；只调查/未知/未装返回 SKIPPED；标准/长任务要求先确认 verification，快速不要求。任务开始只记录选择，收尾再实际执行，不重复问。`explicit_skip=true` 仅用于用户明确“不用问，直接做”，记录 quick；需要改变模式时显式 reopen，不把自动检测当用户跳过。
 
 ## 问题与故障
 
