@@ -1,32 +1,25 @@
 # single-conversation-subagent 2.4.2
 
-单对话两级 Subagent 协作，采用 **Skill 策略 + 可选本地 MCP 状态/交互 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不是独立 Agent 桥接器。
+单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。
 
-首次四选一的通道由安装期 `SCS_QUESTION_CHANNEL` 决定：`native` 用宿主原生（MCP 先返回 `workspace_scan`/`mode_options`，推荐项置顶并带扫描理由），`text` 用完整文本，`mcp` 用 legacy MCP form/15s 服务端截止，`auto` 按声明能力回落；`session_open` 返回实际 channel。**安装 MCP 不保证弹窗出现。** 推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认。
+ZCode 默认 `SCS_QUESTION_CHANNEL=native`：Skill 用宿主原生 AskUserQuestion 问四选一/验证/Codex 联动；MCP 的 `session_open(project_root=<任务项目根>)` 返回 `workspace_scan`/`mode_options`/`project_root`，为任务项目建设独立 `<项目>/.scs` 并记录选择。MCP form/15 秒只作为没有原生提问工具宿主的兜底，不默认使用。推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认；原生/文本路径不声称 15 秒。
 
 ```mermaid
 flowchart TD
-  S["真实对话首次任务"] --> O["session_open → question_channel"]
-  O -->|native| A["调用宿主原生提问"]
-  O -->|text| T["完整文本选项，结束当轮等待"]
-  O -->|mcp| M{"legacy form 可用？"}
-  O -->|auto| M
-  M -->|是| E["interaction_ask(timeout=15s)"]
-  M -->|否| T
-  E -->|accept| Q
-  E -->|TIMED_OUT + 推荐项| C["按推荐项继续（不写 CONFIRMED）"]
-  E -->|RPC_ERROR| F["FAILED；显式 reopen 后重试"]
-  E -->|无 form/modern| T
-  E -->|cancel/decline| W
-  F --> W
-  A -->|不可用| T
-  A --> R{"明确接受？"}
-  T --> R
-  R -->|是| Q["绑定 question_id 确认选择"]
-  R -->|取消/拒绝/超时| W["保持未确认，等用户决定"]
-  C --> P["按需工作包 → 原生执行子 Agent"]
-  Q --> P
-  P --> V["证据与修订 → 主对话最终验收"]
+  S["真实对话首个任务"] --> I["任务相关只读调查"]
+  I --> O["session_open(project_root=任务项目根) → workspace_scan/mode_options"]
+  O --> A["Skill 原生 AskUserQuestion：任务长度"]
+  A --> M{"模式"}
+  M -->|标准/长| V["Skill 原生问验证范围"]
+  M -->|快速| K["Skill 原生问 Codex 联动（已注册时）"]
+  M -->|只调查| P
+  V --> K
+  K --> R["interaction_request(native) + interaction_submit 记录选择"]
+  R --> P["按需工作包 → 原生执行子 Agent"]
+  P --> E["证据/修订 → 主对话验收"]
+  E -->|任务开始选择收尾审查| X["收尾执行只读 codex-review"]
+  O -.->|无原生工具| F["MCP form/15s 或文本兜底"]
+  F -.-> R
 ```
 
 本对话模式：快速处理 / 标准执行 / 长任务 / 只调查，只给一个按风险、范围、成本动态决定的推荐。后续沿用本对话结果；新对话重新开始。标准/长任务首次确认验证范围，快速/只调查跳过。Codex 联动在任务开始时、快速/标准/长任务、检测到已注册 codex-review 时询问是否收尾执行（标准/长任务在验证范围后，快速在 mode 后）；只调查/未注册跳过，唯一推荐不使用；任务开始只记录，收尾执行不重复问。已有明确用户授权可直接记录沿用。快速与只调查不强制初始化工作包。
@@ -51,7 +44,7 @@ AGENT_HOME=/path/to/agent-home bash install.sh --instructions-file /path/to/AGEN
 混合安装需要 Python 3.11+，本地 POSIX 文件系统和 bash/tar。此版本安全路径实现已在 Linux 验证；Windows 原生 MCP 运行 **未支持/未移植**，可手动复制 Skill 使用纯文本回退。macOS 待实测。
 
 ```bash
-bash install.sh --mode hybrid --with-default-rule --project-root /absolute/project
+bash install.sh --mode hybrid --with-default-rule --project-root /absolute/workspace
 bash install.sh --mode hybrid --check
 ```
 
@@ -68,17 +61,17 @@ bash install.sh --mode hybrid --check
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e './mcp_server[test]'
-.venv/bin/python -m scs_mcp --project-root /absolute/project
+.venv/bin/python -m scs_mcp --project-root /absolute/workspace
 ```
 
-该入口只使用 stdio，不启动 HTTP。stdout 只传 MCP 协议，错误写 stderr；脱敏交互事件保存在项目 `.scs/state.sqlite3` 的 events 表。依赖固定 `mcp==2.3.0`，开发环境完整版本见 [requirements-dev.lock](mcp_server/requirements-dev.lock)；项目级约束见 pyproject.toml。重现测试环境可先安装锁文件再安装本包。
+该入口只使用 stdio，不启动 HTTP。stdout 只传 MCP 协议，错误写 stderr；脱敏交互事件保存在任务项目 `<项目>/.scs/state.sqlite3` 的 events 表（每个项目独立；配置根只是工作区边界）。依赖固定 `mcp==2.3.0`，开发环境完整版本见 [requirements-dev.lock](mcp_server/requirements-dev.lock)；项目级约束见 pyproject.toml。重现测试环境可先安装锁文件再安装本包。
 
 Codex TOML 示例（复制前按实际路径修改，不需要放宽审批或信任）：
 
 ```toml
 [mcp_servers.single-conversation-subagent]
 command = "/absolute/repository/.venv/bin/python"
-args = ["-m", "scs_mcp", "--project-root", "/absolute/project"]
+args = ["-m", "scs_mcp", "--project-root", "/absolute/workspace"]
 
 [mcp_servers.single-conversation-subagent.env]
 SCS_HOST = "codex"
@@ -92,7 +85,7 @@ JSON stdio 示例（适用于使用 mcpServers 格式的客户端；逐客户端
   "mcpServers": {
     "single-conversation-subagent": {
       "command": "/absolute/repository/.venv/bin/python",
-      "args": ["-m", "scs_mcp", "--project-root", "/absolute/project"]
+      "args": ["-m", "scs_mcp", "--project-root", "/absolute/workspace"]
     }
   }
 }
@@ -107,7 +100,7 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
       "single-conversation-subagent": {
         "type": "stdio",
         "command": "/absolute/repository/.venv/bin/python",
-        "args": ["-m", "scs_mcp", "--project-root", "/absolute/project"],
+        "args": ["-m", "scs_mcp", "--project-root", "/absolute/workspace"],
         "env": {"SCS_HOST": "zcode", "SCS_QUESTION_CHANNEL": "native"},
         "timeoutMs": 60000
       }
@@ -127,9 +120,9 @@ ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，�
 一份工程、同一套 Skill/MCP，可被多个宿主使用；提问通道在安装期选择，不做两套主对话/子 Agent 流程：
 
 ```bash
-bash install.sh --mode hybrid --host codex --project-root /absolute/project
-bash install.sh --mode hybrid --host zcode --project-root /absolute/project
-bash install.sh --mode hybrid --host claude --question-channel auto --project-root /absolute/project
+bash install.sh --mode hybrid --host codex --project-root /absolute/workspace
+bash install.sh --mode hybrid --host zcode --project-root /absolute/workspace
+bash install.sh --mode hybrid --host claude --question-channel auto --project-root /absolute/workspace
 ```
 
 - `--host`：`codex|zcode|claude|generic`，写入示例的 `SCS_HOST`。
@@ -147,11 +140,11 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 | --- | --- | --- | --- | --- |
 | 官方 Python SDK 2.3.0 参考客户端 | 不适用 | 已验证：实际子进程与原始协议 | 不支持原生 UI | 已验证新旧协议回调；无 UI，渲染不适用 |
 | 官方 Python SDK 1.30.0 旧客户端 | 不适用 | 已验证：独立环境连接最终安装包 | 不支持原生 UI | 已验证三问、多选及无能力回退；无图形 UI |
-| 当前 Codex 桌面聊天；CLI 0.167.0-alpha.3.2（本机二进制） | 已加载现有 Skill；新版待重开验证 | NOT_RUN：本机未注册 SCS MCP；原生/文本回落可用 | 当前会话有 `request_user_input_async`；不假设所有 Codex 都有 Ask/Question | NOT_TESTED；form/back-channel 未在本版本握手验证 |
+| 当前 Codex 桌面聊天；CLI 0.167.0-alpha.3.2（本机二进制） | 已加载现有 Skill；新版待重开验证 | 已验证：SCS MCP 注册、diagnostics 17 工具、协议 2025-06-18；原生/文本回落可用 | 当前会话有 `request_user_input_async`；原生 question UI headless NOT_RUN | MCP form/back-channel 未验证；本轮 ZCode 原生已验证 |
 | Claude Code 2.1.1（本机版本） | 待验证 | 待验证；官方有 stdio 文档 | 待验证 | NOT_TESTED |
 | ZCode 3.15（用户级 `mcp.servers`，`--host zcode`） | 已加载现有 Skill；新会话待重开 | 已验证：stdio 兼容层（ZCode 2026-07-28 探测回落 2025-11-25），17 工具；`question_channel=native`，Skill 主问；`workspace_scan`/`mode_options` 返回；MCP 收集状态/工作包 | 待宿主确认 | 原生 60s 隐藏+5min；MCP form 仅兜底 |
 
-当前宿主的原生提问链路已收集真实用户选择；本服务器的完整会话→提问→提交→工作包→证据→handoff 链路由 SDK 参考客户端实际运行。ZCode 已完成用户级 stdio 注册与原始握手验证；Codex 未注册 SCS MCP，原生/文本回落可用，form/back-channel 未验证。尚未在 Codex/Claude/ZCode 的新会话内视觉观察本服务的 elicitation UI，不能宣称桌面客户端 UI 已通过或 100% 弹窗。
+当前宿主的原生提问链路已收集真实用户选择；本服务器的完整会话→提问→提交→工作包→证据→handoff 链路由 SDK 参考客户端实际运行。ZCode 已完成用户级 stdio 注册与原始握手验证；Codex 已验证 SCS MCP 注册和 diagnostics（17 工具、协议 2025-06-18），原生 question UI headless NOT_RUN。尚未在 Codex/Claude/ZCode 的新会话内视觉观察本服务的 elicitation UI，不能宣称桌面客户端 UI 已通过或 100% 弹窗。
 
 ## Obsidian 项目管理
 
@@ -177,9 +170,9 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 | 工具 | 用途 |
 | --- | --- |
-| session_open / session_get | 绑定宿主真实对话、返回 `question_channel`/`host`、已确认选择与未决问题；`project_root` 可省略 |
-| interaction_request / interaction_submit / interaction_reopen | 原生记账、兼容 MCP 提问、文本回退、幂等提交与显式重试；按 host channel 路由；`analysis` 显示在文本/原生提问 |
-| interaction_ask | `mcp` channel 的 legacy form 服务端 `timeout_seconds`（默认 15s）；`analysis`/中文 title/选项注释/推荐标记/15s/question_id 显示在 form；超时返回 `TIMED_OUT` + 推荐项；modern/无 form 保持 `WAITING_USER`，同一 `question_id` 直接 submit |
+| session_open / session_get | 绑定任务项目根（配置工作区边界内），为项目建立独立 `<项目>/.scs`；返回 `question_channel`/`host`/`project_root`/`workspace_scan`/`mode_options`、已确认选择与未决问题 |
+| interaction_request / interaction_submit / interaction_reopen | Skill 原生提问的记录/提交/显式重试；不是默认 UI；支持文本回退与幂等提交；`analysis` 显示在 display_text/原生记账 |
+| interaction_ask | 仅 `mcp` 兜底 channel 的 legacy form 服务端 `timeout_seconds`（默认 15s）；`analysis`/中文 title/选项注释/推荐标记/15s/question_id 显示在 form；超时返回 `TIMED_OUT` + 推荐项；modern/无 form 保持 `WAITING_USER`，同一 `question_id` 直接 submit；ZCode 不默认使用 |
 | diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
 | work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告 |
 | evidence_verify | 文件、路径、非空、内容与测试结果结构验证；不替代验收 |
@@ -189,7 +182,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 只读资源 `scs://session/{id}`、`scs://work-package/{id}`。完整参数、错误码、使用与恢复示例见 [MCP 用法](single-conversation-subagent/references/mcp.md)。
 
-会话不以 cwd、PID、MCP 连接 ID 识别；`session_open` 把配置 host 与 client_name 一起做结构化 SHA-256 命名空间（存储为 `h<sha256>`，返回 `client_label` 供阅读），不同宿主使用同一 conversation ID 也不会共用会话；无可靠 ID 则显式临时会话。SQLite schema 2、WAL、事务、busy timeout；多进程使用相同项目 DB，工作包更新必须携带 expected_version。数据库路径及伴随文件不得为符号链接；证据读取通过目录描述符逐级拒绝符号链接和越界。状态目录不是进程级沙箱，不能防止同一用户的恶意外部进程替换整个目录；本服务不适合不互信多用户。
+会话不以 cwd、PID、MCP 连接 ID 识别；`session_open` 把配置 host 与 client_name 一起做结构化 SHA-256 命名空间（存储为 `h<sha256>`，返回 `client_label` 供阅读），不同宿主使用同一 conversation ID 也不会共用会话；`project_root` 是任务项目根，必须在配置工作区内，每个项目独立 `<项目>/.scs`；无可靠 ID 则显式临时会话。SQLite schema 2、WAL、事务、busy timeout；多进程使用相同项目 DB，工作包更新必须携带 expected_version。数据库路径及伴随文件不得为符号链接；证据读取通过目录描述符逐级拒绝符号链接和越界。状态目录不是进程级沙箱，不能防止同一用户的恶意外部进程替换整个目录；本服务不适合不互信多用户。
 
 Markdown 由主对话同步：docs-root 依次为 00_doc、00_docs、docs、doc，均无则创建 docs。保持 `<docs-root>/agent/AGENT_PROJECT.md`、`AGENT_COORDINATION.md`、`evidence/WP-<id>/R<rev>/<subtask-id>/` 及 `04_test/report/`。服务只初始化缺失记忆文件，绝不覆盖既有内容；所有工作包变更提示 record_sync_required。MCP 断开时纯 Skill 维护文件；恢复前显式核对，当前不提供自动导入器或自动覆盖。
 
@@ -206,7 +199,7 @@ bash -n install.sh
 Inspector 可按 [SDK 官方文档](https://py.sdk.modelcontextprotocol.io/) 连接 stdio 入口；已安装 Node 时可运行：
 
 ```bash
-npx @modelcontextprotocol/inspector /absolute/repository/.venv/bin/python -m scs_mcp --project-root /absolute/project
+npx @modelcontextprotocol/inspector /absolute/repository/.venv/bin/python -m scs_mcp --project-root /absolute/workspace
 ```
 
 Inspector 属于手工诊断工具，本次未安装/运行；不能用 Inspector 连接成功代替宿主 UI 验证。
@@ -244,5 +237,7 @@ docs/                         设计与验收报告（运行记忆不打包）
 ## 可选桌面项目管理器
 
 `desktop_tool/` 提供独立 PyQt5 管理器：项目添加/发现、目录浏览、Obsidian 跳转、工作包与 MCP 记录、短期连接自检、视图刷新和可恢复归档。参照本机 PyQt 工具风格；不进入 MCP 的安装器和依赖，不强制安装，也不管理宿主进程。运行 `bash desktop_tool/run.sh`，详情见 [管理器说明](desktop_tool/README.md)。
+
+多项目根：管理器添加项目时选任务项目根（配置工作区边界内），每个项目独立 `<项目>/.scs`；当前四选一只是 session/question，不是工作包，工作包树要等标准/长任务创建 WP 才出现。
 
 2.2 的管理器项目栏支持项目展开/收起并记住状态，按最后 MCP 活动或显式打开时间自动排序（可见时每 8 秒更新）。点击工作包子项直达记录。Obsidian 按钮使用项目 `.scs-obsidian/<库ID>/` 独立启动配置，首次无需手工登记；MCP `initialize_vault=true` 也会准备这套配置，不写全局库列表。
