@@ -84,7 +84,9 @@ def test_hybrid_real_runtime_and_examples(tmp_path):
     entry = examples["mcpServers"]["single-conversation-subagent"]
     assert entry["command"] == sys.executable
     assert entry["args"][-1] == str(root)
-    assert subprocess.run([entry["command"], entry["args"][0], "--version"], capture_output=True, timeout=5).stdout.strip() == b"2.2.0"
+    version = subprocess.run([sys.executable, "launcher.py", "--version"], cwd=str(runtime),
+                             capture_output=True, timeout=5, shell=False)
+    assert version.stdout.strip() == b"2.2.1"
     assert install(tmp_path, *args).returncode == 0
     assert install(tmp_path, "--mode", "hybrid", "--check").returncode == 0
     assert not (root / ".scs").exists()  # --version/check never creates project state
