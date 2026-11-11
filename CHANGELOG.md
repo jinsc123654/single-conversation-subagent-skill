@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.2 — 2026-11-11
+
+- 同会话沿用已确认的 `mode`/`verification`/`codex_review`，不再重复提问；后续验证/审查问题的 `recommendation` 使用上次确认值，MCP form 15 秒超时后自动继续选中上次选项。
+- 只有用户显式说“使用长任务/只调查/快速处理/标准执行”才重开 mode；显式切换走 `interaction_reopen` → `interaction_request(channel="text")` → `interaction_submit`，不弹表单；普通讨论不推断切换。
+- `mcp` 15 秒超时后模型继续，ZCode 的 MCP form 弹窗可能仍留在屏幕上；Skill 要求提示用户稍后忽略，不重复提交。弹窗自动关闭只能 native（60s 隐藏 + 5min），二者不能兼得。ZCode 安装默认改为 `mcp`（自动继续），`--question-channel native` 保留可见倒计时。
+- 135 项 pytest 通过（MCP 代码未改动，Skill/AGENTS 同步安装）。
+
 ## 2.2.1 — 2026-11-11
 
 - `session_open` 新增 `workspace_scan`（只读项目扫描：README/PRODUCT_CLI/关键目录/build/dist/顶层结构）与 `mode_options`（模式标签/说明）；`interaction_request`/`interaction_ask` 的 `analysis` 自动前置扫描结果。

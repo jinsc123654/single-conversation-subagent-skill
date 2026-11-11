@@ -11,7 +11,7 @@
 3. `MODERN_NO_BACKCHANNEL`/`ELICITATION_UNSUPPORTED`/`TEXT_FALLBACK_REQUIRED`：问题保持 `WAITING_USER` 并带 `question_id`；显示完整选项与唯一推荐，用户明确回复后直接 `interaction_submit(...,action="accept",choices=[...],source="text"|"native")`。modern 无回通道只表示不能做服务端限时 form，不等于客户端完全不支持 elicitation。原生/文本路径不声称 15 秒；15 秒只用于 mcp form 路径。ZCode 原生 AskUserQuestion 是 60 秒隐藏 + 5 分钟截止。
 4. 需要显式 MCP 记账时，`interaction_request(...,channel="native")` 只登记，然后真实调用原生工具，再将用户明确答复以返回 `question_id` 提交；服务不越过宿主调用 UI。
 5. TEXT_FALLBACK_REQUIRED：显示 display_text 中完整选项与唯一推荐，结束当轮等回复；再 `interaction_submit(session_id=...,question_id=...,action="accept",choices=["long"],source="text")`。不把文本当原生弹窗成功。
-6. `session_get` 读取已确认选择与未决问题。同题重复 request 不弹第二个 UI，已确认直接返回 ALREADY_CONFIRMED。
+6. `session_get` 读取已确认选择与未决问题。同题重复 request 不弹第二个 UI，已确认直接返回 ALREADY_CONFIRMED。同一对话沿用已确认的 `mode`/`verification`/`codex_review`，不重复提问；后续验证/审查问题的 `recommendation` 用上次确认值，15 秒超时自动继续上次选项。只有用户显式说“使用长任务/只调查/快速处理/标准执行”才 `interaction_reopen(kind="mode", explicit_user_change=true)`，随后 `interaction_request(channel="text", recommendation=[新模式])` → `interaction_submit(accept)`，不弹表单。`mcp` 15s 超时后模型继续，表单仍由宿主持有，提示用户稍后忽略，不重复提交。
 
 模式值 `quick/standard/long/investigate`。推荐是单元素列表。仅首次进入 standard/long 后请求 verification，值为 `smoke/targeted/full/stability/none/method-only`，支持多选；推荐只有一个列表组合。`none` 和 `method-only` 各自排除所有其他项。冒烟本轮，定向/全量/稳定性收尾；用户指定预算、资源、方法写入协调记录。危险操作不在此表单授权范围。
 

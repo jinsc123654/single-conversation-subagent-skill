@@ -5,12 +5,12 @@ description: 单对话两级 Subagent 协作；每个真实对话首个任务选
 
 主对话是唯一协调者，维护阶段记忆、直接派发宿主原生执行子 Agent 并最终验收。子 Agent 只分析/实现/测试，不继续委派。MCP 只处理交互、状态和证据，不创建或调度 Agent。
 
-每个真实对话首次任务选四项：快速处理 / 标准执行 / 长任务 / 只调查；必要只读调查后按范围、风险、成本只给一个动态推荐。默认勾选不是用户确认。后续沿用本对话选择，不按 cwd、PID、MCP 连接或旧工作包复用其他对话的选择。用户明确改变方式时按新要求调整；仅明确“不用问，直接做”可跳过→快速，危险操作仍另确认。**四选一前先做一次任务相关的只读调查**（目标目录/README/git status/少量文件，足够判断范围即可；不要只列目录就提问），**不检查 MCP 注册/配置/项目根，不读无关记忆，不做长搜索**；调查在提问前完成，调查后只调用一次 `session_open`（不带 project_root，服务端用配置根）取得 `workspace_scan`（服务端项目扫描：README/顶层结构/关键目录/build/dist）与 `mode_options`（模式标签/说明）；把 `workspace_scan` 与调查发现作为 `analysis`，带唯一推荐；**提问后等待答复，不再继续调查**。MCP 不可用时用本地只读调查，按 native/text 继续。
+每个真实对话首次任务选四项：快速处理 / 标准执行 / 长任务 / 只调查；必要只读调查后按范围、风险、成本只给一个动态推荐。默认勾选不是用户确认。后续沿用本对话选择，不按 cwd、PID、MCP 连接或旧工作包复用其他对话的选择。同一对话先读 `session_open`/`session_get` 的 `mode`/`verification`/`codex_review`：已确认的直接沿用，不再提问；后续验证/审查问题把上次确认值作为 `recommendation`，让 15 秒自动继续选中上次选项。只有用户明确说“使用长任务/只调查/快速处理/标准执行”这类切换命令时，才 `interaction_reopen(kind="mode", explicit_user_change=True)` 并更新 mode；显式切换用 `interaction_reopen` → `interaction_request(channel="text", recommendation=[新模式])` → `interaction_submit(action="accept", choices=[新模式])`，不要弹表单；普通讨论不推断切换。仅明确“不用问，直接做”可跳过→快速，危险操作仍另确认。**四选一前先做一次任务相关的只读调查**（目标目录/README/git status/少量文件，足够判断范围即可；不要只列目录就提问），**不检查 MCP 注册/配置/项目根，不读无关记忆，不做长搜索**；调查在提问前完成，调查后只调用一次 `session_open`（不带 project_root，服务端用配置根）取得 `workspace_scan`（服务端项目扫描：README/顶层结构/关键目录/build/dist）与 `mode_options`（模式标签/说明）；把 `workspace_scan` 与调查发现作为 `analysis`，带唯一推荐；**提问后等待答复，不再继续调查**。MCP 不可用时用本地只读调查，按 native/text 继续。
 
 交互按 `session_open` 返回的 `question_channel` 路由：
 1. `native`：先 `interaction_request(channel="native", analysis=...)` 登记并拿到 `question_id`/`display_text`；调用宿主原生 Ask/Question：**推荐项放第一位并标（推荐）**，推荐项 description = `mode_options.desc` + `｜扫描：<workspace_scan 摘要>`，其他选项 description 用 `mode_options.desc`；问题文本带 `display_text` 里的推荐与扫描理由；用户答复后 `interaction_submit`。没有原生工具时按 `text`。
 2. `text`：完整展示 `display_text`（推荐项第一位、扫描理由、选项说明、question_id），结束当轮，明确回复后 `interaction_submit`。
-3. `mcp`：先 `interaction_ask(timeout_seconds=15)`；表单已把推荐项置顶并在推荐项后附服务端扫描理由，选项带说明。15 秒是服务端截止，不是可见倒计时；到点返回 `TIMED_OUT`+推荐项，表单可能仍留在屏幕上，迟交按 `LATE_REPLY` 忽略。返回 `MODERN_NO_BACKCHANNEL`/`ELICITATION_UNSUPPORTED`/`TEXT_FALLBACK_REQUIRED` 时，用同一 `question_id` 改走原生/文本，明确回复后直接 `interaction_submit`。
+3. `mcp`：先 `interaction_ask(timeout_seconds=15)`；表单已把推荐项置顶并在推荐项后附服务端扫描理由，选项带说明。15 秒是服务端截止，不是可见倒计时；到点返回 `TIMED_OUT`+推荐项，模型已继续，表单可能仍留在屏幕上，迟交按 `LATE_REPLY` 忽略。回复用户时提醒“已按推荐项继续，表单可稍后点忽略/关闭，不要重复提交”。返回 `MODERN_NO_BACKCHANNEL`/`ELICITATION_UNSUPPORTED`/`TEXT_FALLBACK_REQUIRED` 时，用同一 `question_id` 改走原生/文本，明确回复后直接 `interaction_submit`。
 4. `auto`：MCP form 可用则按 `mcp`，否则按 `native`/`text`。
 原生/文本路径不声称 15 秒；15 秒只属于 `mcp` form 的服务端截止。所有路径先 `session_open` 绑定宿主真实 conversation ID（可省略 project_root/client_name，服务端按 host 命名空间）并取 `workspace_scan`/`mode_options`；MCP 不可用时跳过。
 
@@ -18,7 +18,7 @@ description: 单对话两级 Subagent 协作；每个真实对话首个任务选
 
 同一时刻只用一路提问。原生已提问时，不再打开 MCP 表单；若用 MCP 记账，interaction_request(channel="native") 只登记，再将真实回复 interaction_submit。原生失败后先记录失败，显式重开问题再换下一路。确认过的选择不重复问；取消/拒绝保持未确认，只有用户要求重试或改变时显式重开。超时仅认可宿主真实可观测结果且事先告知的配置策略；`interaction_ask` 的服务端截止时间是可观测结果，到点标记 `TIMED_OUT` 并返回推荐项；命令等待、RPC 超时、UI 不出现均不是用户超时。fallback（native/text、无 form、modern 无回通道）保持问题 `WAITING_USER`，可直接 `interaction_submit`；RPC 异常才标 `FAILED`，需显式 reopen 后重试。`TIMED_OUT` 不写 `CONFIRMED`，主对话可按本对话策略采用返回的推荐项继续。ZCode 原生 AskUserQuestion 自动解析为 **60 秒隐藏 + 5 分钟截止（空答案）**，这是原生唯一可见倒计时，不是 15 秒；15 秒只能走 `interaction_ask` 的服务端截止（表单无动画倒计时）。两者不能兼得：要可见倒计时用 native，要 15 秒用 mcp。工具已调用不能证明用户看见 UI。
 
-仅本对话首次进入标准/长任务再依次确认：
+仅本对话首次进入标准/长任务再依次确认；后续进入标准/长任务沿用已确认的 verification/codex，不再问；显式切换 mode 后已确认的 verification/codex 保持，除非用户明确要求重选：
 - 验证范围：一个动态推荐组合；本轮冒烟、收尾定向/全量/稳定性按实际风险与预算选择。未选项不执行。“不做测试”与“只记录方法”互斥且排除测试，均 NOT_RUN；后者只记录方法，不标 PASS。已有明确授权的测试范围可记录并沿用，不重复请求同一授权。破坏性操作独立确认。
 - 收尾独立审查：明确检测到注册的 codex-review 才询问使用/不使用，唯一推荐不使用。未知/未装跳过；用户已明确要求时直接沿用，单工作包/修订只审一次。主对话启动外部只读审查，子 Agent 不启动。
 

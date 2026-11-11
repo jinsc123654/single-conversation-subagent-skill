@@ -1,4 +1,14 @@
-# 2.2.1 验收记录
+# 2.2.2 验收记录
+
+## 同会话沿用与显式切换（2026-11-11）
+
+问题：同一会话重复询问 mode/verification/codex；用户不在电脑前时，MCP form 15 秒自动继续后 ZCode 客户端表单仍留在屏幕上；用户要求同会话默认自动沿用上次选择，只有显式“使用长任务/只调查/快速处理/标准执行”这类切换命令才改变。
+
+修复：Skill/AGENTS 要求 `session_open`/`session_get` 读取已确认的 `mode`/`verification`/`codex_review`，已确认的直接沿用，不再提问；后续验证/审查问题的 `recommendation` 用上次确认值，使 15 秒超时自动继续上次选项。显式切换走 `interaction_reopen(kind="mode", explicit_user_change=true)` → `interaction_request(channel="text", recommendation=[新模式])` → `interaction_submit(action="accept", choices=[新模式])`，不弹表单；普通讨论不推断切换。MCP form 15 秒超时后模型已继续，表单由 ZCode 客户端持有，服务端无法强制关闭；Skill 要求回复时提示用户稍后忽略，不重复提交。native 60s 隐藏 + 5min 可自动关弹窗，但不自动选推荐项。
+
+验证：135 项 MCP pytest 通过；Skill/AGENTS 安装同步；真实 ZCode 会话已观察 MCP form 15 秒后模型按推荐项继续、表单仍显示；未宣称服务端可关闭客户端表单。同会话沿用/显式切换为 Skill 策略，宿主 UI 行为待新会话确认。
+
+# 2.2.1 验收记录（历史）
 
 ## 项目扫描与推荐项（2026-11-11）
 
