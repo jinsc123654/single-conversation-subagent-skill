@@ -131,12 +131,14 @@ class State:
                 return {"created": False, **dict(q)}
             if kind != "mode" and not s["mode"]:
                 raise ScsError("QUESTION_ORDER", "Confirm mode first.")
-            if kind != "mode" and s["mode"] not in {"standard", "long"}:
+            if kind == "verification" and s["mode"] not in {"standard", "long"}:
+                return {"status": "SKIPPED", "reason": "MODE_DOES_NOT_REQUIRE_QUESTION"}
+            if kind == "codex_review" and s["mode"] not in {"quick", "standard", "long"}:
                 return {"status": "SKIPPED", "reason": "MODE_DOES_NOT_REQUIRE_QUESTION"}
             if kind == "mode" and s["mode"]:
                 return {"status": "ALREADY_CONFIRMED", "choice": [s["mode"]]}
             if kind == "codex_review":
-                if not s["verification"]:
+                if s["mode"] in {"standard", "long"} and not s["verification"]:
                     raise ScsError("QUESTION_ORDER", "Confirm verification scope first.")
                 if s["review_registration"] != "registered":
                     return {"status": "SKIPPED", "reason": "CODEX_REVIEW_NOT_REGISTERED"}

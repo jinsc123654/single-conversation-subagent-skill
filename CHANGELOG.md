@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.1 — 2026-11-11
+
+- 回归范围：仅标准/长任务询问；快速/只调查跳过。
+- Codex 联动：快速/标准/长任务都询问（检测到已注册 codex-review；只调查/未注册跳过），唯一推荐不使用；快速不要求验证范围。
+- 同会话沿用/显式切换不变；138 项 pytest。
+
 ## 2.4.0 — 2026-11-11
 
 - 架构收口：Skill 主问；ZCode 默认 native AskUserQuestion；MCP 只做 `session_open`/选择记录/`interaction_submit`/工作包/证据/视图/handoff，不默认驱动 MCP form。

@@ -1,4 +1,4 @@
-# single-conversation-subagent 2.4.0
+# single-conversation-subagent 2.4.1
 
 单对话两级 Subagent 协作，采用 **Skill 策略 + 可选本地 MCP 状态/交互 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不是独立 Agent 桥接器。
 
@@ -29,7 +29,7 @@ flowchart TD
   P --> V["证据与修订 → 主对话最终验收"]
 ```
 
-本对话模式：快速处理 / 标准执行 / 长任务 / 只调查，只给一个按风险、范围、成本动态决定的推荐。后续沿用本对话结果；新对话重新开始。标准/长任务首次确认验证范围；只有明确注册 codex-review 才追加收尾使用/不使用，唯一推荐不使用。已有明确用户授权可直接记录沿用。快速与只调查不强制初始化工作包。
+本对话模式：快速处理 / 标准执行 / 长任务 / 只调查，只给一个按风险、范围、成本动态决定的推荐。后续沿用本对话结果；新对话重新开始。标准/长任务首次确认验证范围，快速/只调查跳过。Codex 联动在快速/标准/长任务、检测到已注册 codex-review 时询问，只调查/未注册跳过，唯一推荐不使用；快速不要求验证范围。已有明确用户授权可直接记录沿用。快速与只调查不强制初始化工作包。
 
 “不做测试”和“只记录方法”各自与其他验证操作互斥，均 NOT_RUN；危险操作独立确认。仅用户明确“不用问，直接做”可跳过模式选择，不能因此授权删除、擦除或烧录。超时只认可宿主可观测结果和事先告知的策略；本版服务只记录超时，不自动确认。
 
@@ -116,7 +116,7 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
 }
 ```
 
-同一对话的 `mode`/`verification`/`codex_review` 已确认后直接沿用，不再提问；后续验证/审查问题以已确认值作为 recommendation，MCP form 15 秒超时后自动继续上次选项。只有用户显式说“使用长任务/只调查/快速处理/标准执行”才通过 `interaction_reopen(explicit_user_change=true)` 切换，显式切换走 text 提交、不弹表单；普通讨论不推断切换。MCP form 超时后表单可能仍留在 ZCode 屏幕上，模型已继续，提示用户稍后忽略即可。
+同一对话的 `mode`/`verification`/`codex_review` 已确认后直接沿用，不再提问；后续验证/审查问题以已确认值作为 recommendation。只有用户显式说“使用长任务/只调查/快速处理/标准执行”才通过 `interaction_reopen(explicit_user_change=true)` 切换，显式切换走 text 提交、不弹表单；普通讨论不推断切换。ZCode 主路径是 Skill 原生提问；MCP form 仅在没有原生工具的宿主兜底。
 
 ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。`--host zcode` 默认 `SCS_QUESTION_CHANNEL=native`：Skill 用宿主原生 AskUserQuestion 主问，`session_open` 先返回 `workspace_scan` 与 `mode_options`，推荐项第一位并带扫描理由；ZCode 原生倒计时为 60 秒隐藏 + 5 分钟截止。MCP 只做 `session_open`/选择记录/`interaction_submit`/工作包/证据/视图，不默认驱动 form；要 MCP form 才显式 `--question-channel mcp`，`interaction_ask(timeout_seconds=15)` 是服务端截止、无动画倒计时、表单可能残留，仅作为没有原生工具的宿主兜底。无 form 或 modern 无回通道时问题保持 `WAITING_USER`，用同一 `question_id` 直接 `interaction_submit`。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
 

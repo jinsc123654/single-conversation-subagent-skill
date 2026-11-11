@@ -62,6 +62,17 @@ def test_idempotent_replies_and_conflicts(state):
     assert state.get(sid)["mode"] is None
 
 
+def test_quick_mode_still_asks_registered_codex_review(state):
+    sid = open_session(state, review_registration="registered")
+    q = state.request(sid, "mode", ["quick"], "text")
+    state.submit(sid, q["id"], "accept", ["quick"])
+    assert state.request(sid, "verification", ["smoke"], "text")["status"] == "SKIPPED"
+    q = state.request(sid, "codex_review", ["no"], "text")
+    assert q["kind"] == "codex_review"
+    state.submit(sid, q["id"], "accept", ["no"])
+    assert state.get(sid)["codex_review"] is False
+
+
 def test_question_order_and_exclusion(state):
     sid = open_session(state)
     with pytest.raises(ScsError):

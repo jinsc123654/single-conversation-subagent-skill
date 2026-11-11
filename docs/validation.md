@@ -1,4 +1,12 @@
-# 2.4.0 验收记录
+# 2.4.1 验收记录
+
+## 回归与 Codex 联动范围（2026-11-11）
+
+变更：`verification` 仅标准/长任务询问，快速/只调查跳过；`codex_review` 在快速/标准/长任务、只有检测到已注册 codex-review 时询问，只调查/未注册跳过；快速不要求 verification，标准/长任务仍要求先确认 verification。唯一推荐仍为不使用；同会话沿用/显式切换不变。
+
+验证：新增 `test_quick_mode_still_asks_registered_codex_review`；138 项 pytest 通过。
+
+# 2.4.0 验收记录（历史）
 
 ## Skill 主问、MCP 收集（2026-11-11）
 
