@@ -3,7 +3,7 @@
 import json
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
 
 from .state import OPTIONS
 
@@ -24,11 +24,18 @@ def supports_form(capabilities) -> bool:
     return elicitation is not None and (elicitation.form is not None or elicitation.url is None)
 
 
-def _labels(kind: str, recommendation: list[str], sep: str) -> str:
-    return sep.join(
-        f"{x['value']}{'=' if sep == '；' else ': '}{x['label']}" + ("（推荐）" if x["value"] in recommendation else "")
-        for x in OPTIONS[kind]
-    )
+def _display(option: dict, recommendation: list[str]) -> str:
+    return f"{option['value']} — {option['label']}" + ("（推荐）" if option["value"] in recommendation else "")
+
+
+def choice_code(kind: str, value):
+    """Map a form label or code back to option codes."""
+    if isinstance(value, list):
+        return [choice_code(kind, item) for item in value]
+    for option in OPTIONS[kind]:
+        if value == option["value"] or (isinstance(value, str) and value.startswith(option["value"] + " — ")):
+            return option["value"]
+    return value
 
 
 def _prompt(question: dict, analysis: str | None, timeout_seconds: float | None) -> str:
@@ -37,7 +44,9 @@ def _prompt(question: dict, analysis: str | None, timeout_seconds: float | None)
     prompt = MESSAGES[kind]
     if analysis and analysis.strip():
         prompt += "\n分析：" + analysis.strip()[:600]
-    prompt += "\n" + _labels(kind, recommendation, "；")
+    recommended = [x for x in OPTIONS[kind] if x["value"] in recommendation]
+    if recommended:
+        prompt += "\n推荐：" + "、".join(f"{x['label']}（{x['value']}）" for x in recommended)
     if len(recommendation) > 1:
         prompt += "\n唯一推荐组合：" + ", ".join(recommendation)
     if timeout_seconds and timeout_seconds > 0:
@@ -49,14 +58,30 @@ def _prompt(question: dict, analysis: str | None, timeout_seconds: float | None)
 def schema_for(question: dict, analysis: str | None = None, timeout_seconds: float | None = None) -> type[BaseModel]:
     kind = question["kind"]
     recommended = json.loads(question["recommendation"])
-    enum = Literal.__getitem__(tuple(x["value"] for x in OPTIONS[kind]))
     is_multi = kind == "verification"
+    enum = Literal.__getitem__(tuple(_display(x, recommended) for x in OPTIONS[kind]))
+    default = (
+        [_display(x, recommended) for x in OPTIONS[kind] if x["value"] in recommended]
+        if is_multi
+        else _display(next(x for x in OPTIONS[kind] if x["value"] == recommended[0]), recommended)
+    )
+
+    def alias_codes(value):
+        def one(item):
+            if isinstance(item, str):
+                for option in OPTIONS[kind]:
+                    if item == option["value"]:
+                        return _display(option, recommended)
+            return item
+        return [one(item) for item in value] if isinstance(value, list) else one(value)
+
     # Keep the answer REQUIRED even though the UI receives a default. An accepted
     # empty object cannot silently confirm a recommendation through Pydantic defaults.
     field = Field(..., title=TITLES[kind], description=_prompt(question, analysis, timeout_seconds),
-                  json_schema_extra={"default": recommended if is_multi else recommended[0]})
+                  json_schema_extra={"default": default})
     return create_model("Choice_" + question["id"].replace("-", "_"),
                         __config__=ConfigDict(extra="forbid", strict=True, title=TITLES[kind]),
+                        __validators__={"alias_codes": field_validator("choice", mode="before")(alias_codes)},
                         choice=(list[enum] if is_multi else enum, field))
 
 

@@ -270,6 +270,7 @@ async def test_analysis_and_title_reach_the_form(tmp_path):
         text = json.dumps(schema, ensure_ascii=False)
         assert "请选择本对话执行模式" in text
         assert "分析：推荐 standard" in text
-        assert "standard=标准执行（推荐）" in text
+        assert "推荐：标准执行（standard）" in text
+        assert "standard — 标准执行（推荐）" in text
         assert "15 秒未选择按推荐项继续" in text
         assert "question_id=" in text

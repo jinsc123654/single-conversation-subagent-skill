@@ -103,7 +103,12 @@ async def test_sdk_elicitation_both_protocol_eras(tmp_path, mode):
         again = await client.call_tool("interaction_request", {"session_id": sid, "kind": "mode", "recommendation": ["standard"]})
         assert again.structured_content["status"] == "ALREADY_CONFIRMED"
         assert len(seen) == 1
-        assert seen[0].requested_schema["properties"]["choice"]["enum"] == ["quick", "standard", "long", "investigate"]
+        assert seen[0].requested_schema["properties"]["choice"]["enum"] == [
+            "quick — 快速处理",
+            "standard — 标准执行（推荐）",
+            "long — 长任务",
+            "investigate — 只调查",
+        ]
         assert seen[0].requested_schema["required"] == ["choice"]
         diagnostics = (await client.call_tool("diagnostics_check", {"session_id": sid})).structured_content
         assert diagnostics["protocol_version"] == ("2025-11-25" if mode == "legacy" else "2026-07-28")

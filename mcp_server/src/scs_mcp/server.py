@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from . import __version__
 from .errors import ScsError
 from .models import SubtaskDefinition, SubtaskResult
-from .interaction import MESSAGES, describe, schema_for, supports_form
+from .interaction import MESSAGES, choice_code, describe, schema_for, supports_form
 from .state import State
 from .storage import Store
 
@@ -211,7 +211,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             if type(answer.data).__name__ != "Choice_" + q["id"].replace("-", "_"):
                 raise ScsError("LATE_REPLY", "The accepted response belongs to a replaced question.")
             value = answer.data.choice
-            choices = value if isinstance(value, list) else [value]
+            choices = choice_code(q["kind"], value)
+            if not isinstance(choices, list):
+                choices = [choices]
         else:
             choices = None
         return state.submit(session_id, q["id"], answer.action, choices, source="mcp")
@@ -267,7 +269,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             value = data.choice if hasattr(data, "choice") else (data or {}).get("choice")
             if value is None:
                 raise ScsError("CHOICE_INVALID", "The form answer did not contain a choice.")
-            choices = value if isinstance(value, list) else [value]
+            choices = choice_code(kind, value)
+            if not isinstance(choices, list):
+                choices = [choices]
             return state.submit(session_id, qid, "accept", choices, "mcp")
         return state.submit(session_id, qid, answer.action, None, "mcp")
 
