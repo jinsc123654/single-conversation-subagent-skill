@@ -99,6 +99,41 @@ async def test_session_open_exposes_scan_and_mode_options(tmp_path):
         assert all(x["desc"] for x in opened["mode_options"])
 
 
+async def test_session_open_uses_project_under_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    project = workspace / "project"
+    project.mkdir(parents=True)
+    (project / "README.md").write_text("# project\n", encoding="utf-8")
+    async with Client(create_server(workspace), mode="legacy") as client:
+        opened = (await client.call_tool(
+            "session_open", {"project_root": str(project), "client_name": "multi"}
+        )).structured_content
+        assert opened["project_root"] == str(project.resolve())
+        assert "README.md: # project" in opened["workspace_scan"]
+        assert (project / ".scs" / "state.sqlite3").exists()
+        assert not (workspace / ".scs").exists()
+        snapshot = (await client.call_tool("session_get", {"session_id": opened["id"]})).structured_content
+        assert snapshot["id"] == opened["id"]
+        asked = (await client.call_tool("interaction_request", {
+            "session_id": opened["id"], "kind": "mode", "recommendation": ["quick"], "channel": "text"
+        })).structured_content
+        assert asked["question_id"]
+
+
+async def test_session_open_rejects_project_outside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    async with Client(create_server(workspace), mode="legacy") as client:
+        result = (await client.call_tool(
+            "session_open", {"project_root": str(outside), "client_name": "outside"}
+        )).structured_content
+        assert result["status"] == "ERROR"
+        assert result["error_code"] == "PROJECT_MISMATCH"
+        assert not (outside / ".scs").exists()
+
+
 @pytest.mark.parametrize("mode", ["auto", "legacy"])
 async def test_sdk_elicitation_both_protocol_eras(tmp_path, mode):
     seen = []

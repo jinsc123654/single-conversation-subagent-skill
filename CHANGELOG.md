@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.0 — 2026-11-11
+
+- MCP 多项目根：配置根是允许的工作区边界；`session_open(project_root=<项目>)` 为项目建独立 `<项目>/.scs`，`session_get`/interaction/work/lease/view 都按会话的项目 state。修复直接新建任务在别的项目时 `PROJECT_MISMATCH`、空参临时会话扫描错项目的问题。
+- Skill 首条任务硬门：任何首条任务（含转换/脚本执行）必须先四选一；只有明确“不用问/直接做”才跳过；不得因“转换下”直接实现。`session_open` 必须传任务项目根；native 的 `NATIVE_QUESTION_REQUIRED` 后必须真正调用 AskUserQuestion，不能只登记。
+- 137 项 pytest；新增工作区内项目 `.scs`/`workspace_scan`/`session_get`/interaction 和越界 `PROJECT_MISMATCH` 测试。
+
 ## 2.2.2 — 2026-11-11
 
 - 同会话沿用已确认的 `mode`/`verification`/`codex_review`，不再重复提问；后续验证/审查问题的 `recommendation` 使用上次确认值，MCP form 15 秒超时后自动继续选中上次选项。

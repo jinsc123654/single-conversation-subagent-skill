@@ -1,4 +1,14 @@
-# 2.2.2 验收记录
+# 2.3.0 验收记录
+
+## 多项目根与首轮硬门（2026-11-11）
+
+问题：用户直接新建任务在转换工作台，MCP 固定根是 hc32f460_base，`session_open(project_root=转换工作台)` 报 `PROJECT_MISMATCH`；空参 `session_open` 只能建临时会话，扫描/状态都是别的项目；首轮模型没调用 `session_open` 直接实现；native 的 `interaction_request` 只登记，没真正调用宿主 AskUserQuestion。
+
+修复：`Roots` 把配置根当作允许的工作区边界，`session_open(project_root=<项目>)` 为项目建独立 `<项目>/.scs`；`session_get`/interaction/work/lease/view 都按会话的项目 state；越界返回 `PROJECT_MISMATCH`。Skill/AGENTS：任何首条任务（含转换/脚本执行）必须先四选一，只有明确“不用问/直接做”才跳过；`session_open` 必须传任务项目根；native 的 `NATIVE_QUESTION_REQUIRED` 后必须真正调用 AskUserQuestion，不能只登记。
+
+验证：137 项 pytest 通过；新增 `test_session_open_uses_project_under_workspace`（项目 `.scs`、项目 README 扫描、`session_get`、interaction）与 `test_session_open_rejects_project_outside_workspace`（`PROJECT_MISMATCH`、越界不建 `.scs`）；真实多项目宿主场景待新会话验证。
+
+# 2.2.2 验收记录（历史）
 
 ## 同会话沿用与显式切换（2026-11-11）
 

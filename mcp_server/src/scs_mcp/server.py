@@ -16,8 +16,8 @@ from . import __version__
 from .errors import ScsError
 from .models import SubtaskDefinition, SubtaskResult
 from .interaction import MESSAGES, choice_code, describe, schema_for, supports_form
-from .state import OPTIONS, State
-from .storage import Store
+from .roots import Roots
+from .state import OPTIONS
 from .workspace import scan_workspace
 
 
@@ -28,10 +28,18 @@ _ask_timeout = ContextVar("scs_ask_timeout", default=None)
 class SafeServer(MCPServer):
     """Catch resolver failures too: a tool body cannot catch its dependency's RPC."""
 
-    def __init__(self, store: Store):
-        self.store = store
-        self.state = State(store)
+    def __init__(self, roots: Roots):
+        self.roots = roots
         super().__init__("single-conversation-subagent", version=__version__, log_level="CRITICAL")
+
+    @property
+    def state(self):
+        """Default-root state for diagnostics/tests; sessions use roots.for_session."""
+        return self.roots.default_state()
+
+    @property
+    def store(self):
+        return self.state.store
 
     async def run_stdio_async(self) -> None:
         """Serve stdio with the ZCode mixed-era compatibility filter.
@@ -78,9 +86,10 @@ class SafeServer(MCPServer):
                     qid = _asked_question.get()
                     if not qid:
                         raise ScsError("QUESTION_NOT_FOUND", "No question was requested.")
-                    q = self.state.question(sid, qid)
+                    state = self.roots.for_session(sid)
+                    q = state.question(sid, qid)
                     if q["state"] not in {"CONFIRMED", "CANCELLED", "DECLINED", "TIMED_OUT"}:
-                        q = self.state.mark(sid, q["id"], "FAILED", "RPC_ERROR")
+                        q = state.mark(sid, q["id"], "FAILED", "RPC_ERROR")
                         result = describe(q, "RPC_ERROR")
                         result["next"] = "Explicitly interaction_reopen before retrying; the question is FAILED."
                 except (ScsError, StopIteration, TypeError):
@@ -94,44 +103,47 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         question_channel = "auto"
     raw_host = (host or "generic").strip() or "generic"
     display_host = re.sub(r"[^\w .-]", "_", raw_host)[:32] or "generic"
-    store = Store(project_root)
-    mcp = SafeServer(store)
-    state = mcp.state
+    roots = Roots(project_root)
+    mcp = SafeServer(roots)
 
     @mcp.tool(structured_output=True)
     async def session_open(project_root: str | None = None, client_name: str | None = None, conversation_id: str | None = None,
                      review_registration: Literal["registered", "unregistered", "unknown"] = "unknown",
                      explicit_skip: bool = False) -> dict[str, Any]:
-        """Bind a host conversation to the configured root and report the host question channel.
+        """Bind a host conversation to its project root and report the host question channel.
 
-        project_root defaults to the server's configured root. The session
-        namespace is an unambiguous hash of (configured host, client_name), so
-        two hosts with the same conversation ID cannot reuse one session; the
-        stored client label is h<sha256 prefix>. review_registration is host
-        registry evidence, not a guess. explicit_skip attests that the user
-        explicitly said no questions; it authorizes no destructive operation.
+        project_root defaults to the server's configured workspace root; pass the
+        task's project root (the project must be inside the configured workspace).
+        Each project gets its own ``<project>/.scs`` state. The session namespace
+        is an unambiguous hash of (configured host, client_name), so two hosts
+        with the same conversation ID cannot reuse one session; the stored client
+        label is h<sha256 prefix>. review_registration is host registry evidence,
+        not a guess. explicit_skip attests that the user explicitly said no
+        questions; it authorizes no destructive operation.
         """
         namespace = hashlib.sha256(
             json.dumps([raw_host, client_name or ""], ensure_ascii=False, separators=(",", ":")).encode()
         ).hexdigest()[:32]
         resolved_client = "h" + namespace
-        result = state.open(project_root or str(store.root), resolved_client, conversation_id, review_registration, explicit_skip)
+        root, _, result = roots.open(project_root, resolved_client, conversation_id, review_registration, explicit_skip)
         result["question_channel"] = question_channel
         result["host"] = display_host
         result["client_label"] = client_name or display_host
-        result["workspace_scan"] = scan_workspace(store.root)
+        result["project_root"] = str(root)
+        result["workspace_scan"] = scan_workspace(root)
         result["mode_options"] = OPTIONS["mode"]
         return result
 
     @mcp.tool(structured_output=True)
     async def session_get(session_id: str) -> dict[str, Any]:
         """Read confirmed choices and pending questions; does not ask or alter preferences."""
-        return state.get(session_id)
+        return roots.for_session(session_id).get(session_id)
 
     async def prepare(session_id: str, kind: str, recommendation: list[str], channel: str,
                       question_id: str | None, ctx: Context,
                       analysis: str | None = None) -> dict | Elicit:
-        scan = scan_workspace(store.root)[:400]
+        state = roots.for_session(session_id)
+        scan = scan_workspace(state.store.root)[:400]
         analysis = (f"扫描：{scan}\n分析：{analysis.strip()}" if analysis and analysis.strip()
                     else f"扫描：{scan}")
         if question_id:
@@ -208,6 +220,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         """
         if answer.action == "accept" and isinstance(answer.data, dict):
             return answer.data
+        state = roots.for_session(session_id)
         qid = _asked_question.get()
         q = state.question(session_id, qid)
         if not q["current"]:
@@ -244,6 +257,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         import anyio
         from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
+        state = roots.for_session(session_id)
         token = _ask_timeout.set(timeout_seconds)
         try:
             outcome = await prepare(session_id, kind, recommendation, "auto", None, ctx, analysis)
@@ -291,7 +305,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         timeout requires observable host UI timeout evidence; it still confirms no
         choice. cancel/decline require an explicit reopen before another choice.
         """
-        return state.submit(session_id, question_id, action, choices, source, observed_timeout)
+        return roots.for_session(session_id).submit(session_id, question_id, action, choices, source, observed_timeout)
 
     @mcp.tool(structured_output=True)
     async def interaction_reopen(session_id: str, kind: Literal["mode", "verification", "codex_review"],
@@ -300,24 +314,20 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
 
         Creates no UI. The next interaction_request gets a fresh, nonreusable question_id.
         """
-        return state.reopen(session_id, kind, explicit_user_change)
+        return roots.for_session(session_id).reopen(session_id, kind, explicit_user_change)
 
     @mcp.tool(structured_output=True)
     async def diagnostics_check(ctx: Context, session_id: str | None = None) -> dict[str, Any]:
         """Check DB, SDK, registered tools and declared capabilities. Connection is not evidence that UI was displayed."""
         from .diagnostics import check
-        return check(store, ctx.client_capabilities, ctx.protocol_version,
+        state = roots.for_session(session_id) if session_id else roots.default_state()
+        return check(state.store, ctx.client_capabilities, ctx.protocol_version,
                      [tool.name for tool in await mcp.list_tools()], session_id)
 
     @mcp.resource("scs://session/{session_id}")
     async def session_resource(session_id: str) -> str:
         """Read-only session snapshot. No inferred conversation identity."""
-        return json.dumps(state.get(session_id), ensure_ascii=False)
-
-    from .work import Work
-    from .locks import Leases
-    work = Work(store)
-    leases = Leases(store)
+        return json.dumps(roots.for_session(session_id).get(session_id), ensure_ascii=False)
 
     @mcp.tool(structured_output=True)
     async def work_package_create(session_id: str, goal: str, allowed_files: list[str],
@@ -328,13 +338,13 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         Scope is project-relative; no scheduling occurs. Missing Markdown records are
         initialized only; main conversation must explicitly sync reviewed records.
         """
-        result = work.create(session_id, goal, allowed_files, acceptance, [t.model_dump() for t in subtasks], request_key)
+        result = roots.work(session_id).create(session_id, goal, allowed_files, acceptance, [t.model_dump() for t in subtasks], request_key)
         return refresh_enabled_view(session_id, result)
 
     @mcp.tool(structured_output=True)
     async def work_package_get(session_id: str, package_id: str) -> dict[str, Any]:
         """Read version and revision before an optimistic update."""
-        return work.get(session_id, package_id)
+        return roots.work(session_id).get(session_id, package_id)
 
     @mcp.tool(structured_output=True)
     async def work_package_update(session_id: str, package_id: str, expected_version: int,
@@ -347,7 +357,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         unchanged evidence. new_revision resets results and allocates fresh evidence
         directories; it preserves every earlier file.
         """
-        result = work.update(session_id, package_id, expected_version, state,
+        result = roots.work(session_id).update(session_id, package_id, expected_version, state,
                              [r.model_dump() for r in results] if results is not None else None, new_revision)
         return refresh_enabled_view(session_id, result)
 
@@ -359,7 +369,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         Test evidence is JSON with command, exit_code=0, and passed>0. VERIFIED is
         file/content validation, not proof of execution or final main-agent acceptance.
         """
-        return work.evidence(session_id, package_id, revision, subtask_id, path, required_content)
+        return roots.work(session_id).evidence(session_id, package_id, revision, subtask_id, path, required_content)
 
     @mcp.tool(structured_output=True)
     async def resource_acquire(session_id: str, resource: str, ttl_seconds: float = 120,
@@ -370,36 +380,34 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         External processes are not blocked. TTL is 1..3600 seconds; expired leases
         get a fresh token so a stale owner cannot release a successor's lease.
         """
-        return leases.acquire(session_id, resource, ttl_seconds, lease_token)
+        return roots.leases(session_id).acquire(session_id, resource, ttl_seconds, lease_token)
 
     @mcp.tool(structured_output=True)
     async def resource_release(session_id: str, resource: str, lease_token: str) -> dict[str, Any]:
         """Release only the matching owner and token; repeated release is safe."""
-        return leases.release(session_id, resource, lease_token)
+        return roots.leases(session_id).release(session_id, resource, lease_token)
 
     @mcp.tool(structured_output=True)
     async def handoff_export(session_id: str, package_id: str, expected_version: int) -> dict[str, Any]:
         """Export a digest-bound snapshot into this project's local audit DB. No session preferences are exported."""
-        return work.export(session_id, package_id, expected_version)
+        return roots.work(session_id).export(session_id, package_id, expected_version)
 
     @mcp.tool(structured_output=True)
     async def handoff_resume(session_id: str, handoff_id: str, sha256: str) -> dict[str, Any]:
         """Explicitly attach a current audited handoff to this conversation. Its own first-task choices remain unconfirmed."""
-        return work.resume(session_id, handoff_id, sha256)
+        return roots.work(session_id).resume(session_id, handoff_id, sha256)
 
     @mcp.resource("scs://work-package/{package_id}")
     async def package_resource(package_id: str) -> str:
         """Read-only project-local work package. A resource grants no mutation or execution permissions."""
-        with store.transaction() as con:
-            return json.dumps(work._snapshot(work._get(con, package_id)), ensure_ascii=False)
-
-    from .obsidian import ProjectView
-    views = ProjectView(store)
+        _, _, snapshot = roots.package(package_id)
+        return json.dumps(snapshot, ensure_ascii=False)
 
     def refresh_enabled_view(session_id, result):
         # The work mutation already committed. A projection conflict must not turn
         # it into an ambiguous failed mutation or encourage a duplicate retry.
         try:
+            views = roots.views(session_id)
             docs, _, path = views._layout()
             manifest, _ = views._manifest(path, docs)
             if manifest and manifest.get("auto_refresh"):
@@ -426,7 +434,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         auto_refresh enables view refresh after MCP work package writes, with
         conflicts reported separately from the saved work. Call at stage boundaries.
         """
-        return views.refresh(session_id, initialize_vault, auto_refresh)
+        return roots.views(session_id).refresh(session_id, initialize_vault, auto_refresh)
 
     @mcp.tool(structured_output=True)
     async def project_view_info(session_id: str) -> dict[str, Any]:
@@ -435,6 +443,6 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         Does not create docs or vault files, launch applications, or claim the vault
         is registered. First use Open folder as vault in Obsidian, selecting vault_root.
         """
-        return views.info(session_id)
+        return roots.views(session_id).info(session_id)
 
     return mcp

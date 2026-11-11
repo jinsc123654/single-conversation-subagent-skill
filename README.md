@@ -1,4 +1,4 @@
-# single-conversation-subagent 2.2.2
+# single-conversation-subagent 2.3.0
 
 单对话两级 Subagent 协作，采用 **Skill 策略 + 可选本地 MCP 状态/交互 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不是独立 Agent 桥接器。
 
@@ -133,6 +133,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 ```
 
 - `--host`：`codex|zcode|claude|generic`，写入示例的 `SCS_HOST`。
+- `--project-root`：允许的工作区边界，不是单个项目根。Skill 的 `session_open(project_root=<任务项目根>)` 会为每个项目建独立 `<项目>/.scs`，所以同一个 MCP 服务可直接用于多个项目；项目必须在工作区内，越界返回 `PROJECT_MISMATCH`。
 - `--question-channel`：`auto|native|mcp|text`，写入 `SCS_QUESTION_CHANNEL`；未指定时 `codex→native`、`zcode→mcp`、其他→`auto`。
 - 服务器启动时读取 env；`session_open` 返回 `question_channel`、`host`、`workspace_scan` 与 `mode_options`。Skill 按它路由：`native`→原生（推荐项第一位、扫描理由、选项说明；ZCode 60s 隐藏+5min），`text`→完整文本，`mcp`→`interaction_ask`（15s 服务端截止，无动画倒计时），`auto`→form 可用则 mcp，否则 native/text。
 - `interaction_ask` 只在 legacy stdio 的 back-channel 上开 form；modern/无 form 回落会保留 `question_id`，用户明确回复后直接 `interaction_submit`。原生/文本路径不声称 15s；MCP form 的 15s 是服务端截止，不是可见倒计时。
