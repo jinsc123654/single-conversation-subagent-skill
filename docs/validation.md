@@ -1,4 +1,14 @@
-# 2.2.0 验收记录
+# 2.2.1 验收记录
+
+## 项目扫描与推荐项（2026-11-11）
+
+问题：四选一表单/原生问题只有四个裸选项；模型未扫描工作区、推荐项不在前面、推荐项后没有项目理由；MCP form 的 15 秒只是静态文字，没有可见倒计时。
+
+修复：MCP `session_open` 返回 `workspace_scan`（README/PRODUCT_CLI/applications/components/board/build/dist/顶层结构，只读、无网络、无子进程）与 `mode_options`（模式标签/说明）；`prepare` 自动把扫描放在 `analysis` 前。表单/`display_text` 按推荐项置顶，推荐项标签后附扫描理由，所有选项带模式说明。Skill 原生路径先 `session_open` 取扫描与选项，再 `interaction_request(channel="native")` 取 `display_text`/`question_id`，原生提问推荐项第一位且推荐项 description 带扫描摘要，答复后 `interaction_submit`。ZCode 安装默认从 mcp 改为 native；原生 60s 隐藏 + 5min 是唯一可见倒计时，MCP form 的 15s 是服务端截止、无动画，两者不能兼得。
+
+验证：135 项 MCP pytest 通过；`session_open` 的 `workspace_scan`/`mode_options` 断言通过；真实 RT-Thread 固件项目根扫描输出 README/PRODUCT_CLI/applications（main.c、bang_v2.c）/build/dist；推荐项枚举第一项为 `investigate — 只调查（推荐）：只读梳理/评估，不改代码｜扫描：README…`；`test_p0` 断言推荐项置顶和扫描理由。临时安装器 codex→native、zcode→native、其他→auto。宿主内扫描/推荐项的视觉确认仍需新会话，未宣称桌面 UI 已通过。
+
+# 2.2.0 验收记录（历史）
 
 ## ZCode stdio 兼容补充（2026-11-11）
 

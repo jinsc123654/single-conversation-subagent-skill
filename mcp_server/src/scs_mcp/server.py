@@ -16,8 +16,9 @@ from . import __version__
 from .errors import ScsError
 from .models import SubtaskDefinition, SubtaskResult
 from .interaction import MESSAGES, choice_code, describe, schema_for, supports_form
-from .state import State
+from .state import OPTIONS, State
 from .storage import Store
+from .workspace import scan_workspace
 
 
 _asked_question = ContextVar("scs_question", default=None)
@@ -118,6 +119,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         result["question_channel"] = question_channel
         result["host"] = display_host
         result["client_label"] = client_name or display_host
+        result["workspace_scan"] = scan_workspace(store.root)
+        result["mode_options"] = OPTIONS["mode"]
         return result
 
     @mcp.tool(structured_output=True)
@@ -128,6 +131,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
     async def prepare(session_id: str, kind: str, recommendation: list[str], channel: str,
                       question_id: str | None, ctx: Context,
                       analysis: str | None = None) -> dict | Elicit:
+        scan = scan_workspace(store.root)[:400]
+        analysis = (f"扫描：{scan}\n分析：{analysis.strip()}" if analysis and analysis.strip()
+                    else f"扫描：{scan}")
         if question_id:
             q = state.question(session_id, question_id)
             if q["kind"] != kind or not q["current"]:

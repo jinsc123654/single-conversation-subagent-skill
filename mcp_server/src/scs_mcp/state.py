@@ -13,11 +13,34 @@ VERIFICATION = ("smoke", "targeted", "full", "stability", "none", "method-only")
 KINDS = ("mode", "verification", "codex_review")
 PENDING = ("REQUESTED", "WAITING_USER", "UNSUPPORTED", "FAILED")
 TERMINAL = ("CONFIRMED", "DECLINED", "CANCELLED", "TIMED_OUT")
+DESCRIPTIONS = {
+    "mode": {
+        "quick": "小改动/单文件/直接回答，不建子 Agent",
+        "standard": "先确认验证范围，计划后实现与验证",
+        "long": "分阶段执行，使用执行子 Agent 与证据",
+        "investigate": "只读梳理/评估，不改代码",
+    },
+    "verification": {
+        "smoke": "本轮快速冒烟",
+        "targeted": "收尾定向回归",
+        "full": "收尾全量回归",
+        "stability": "收尾稳定性（长时）",
+        "none": "不做测试，结果标 NOT_RUN",
+        "method-only": "不执行测试，只记录命令/环境/预期，标 NOT_RUN",
+    },
+    "codex_review": {
+        "no": "收尾不追加 Codex 审查",
+        "yes": "收尾用 codex-review 做只读独立审查",
+    },
+}
 OPTIONS = {
-    "mode": [{"value": v, "label": label} for v, label in zip(MODES, ("快速处理", "标准执行", "长任务", "只调查"))],
-    "verification": [{"value": v, "label": label} for v, label in zip(VERIFICATION,
+    "mode": [{"value": v, "label": label, "desc": DESCRIPTIONS["mode"][v]}
+             for v, label in zip(MODES, ("快速处理", "标准执行", "长任务", "只调查"))],
+    "verification": [{"value": v, "label": label, "desc": DESCRIPTIONS["verification"][v]}
+                     for v, label in zip(VERIFICATION,
         ("本轮冒烟", "收尾定向回归", "收尾全量回归", "收尾稳定性", "不做测试", "不做测试，记录方法"))],
-    "codex_review": [{"value": "no", "label": "不使用"}, {"value": "yes", "label": "使用：收尾只读独立审查"}],
+    "codex_review": [{"value": "no", "label": "不使用", "desc": DESCRIPTIONS["codex_review"]["no"]},
+                     {"value": "yes", "label": "使用：收尾只读独立审查", "desc": DESCRIPTIONS["codex_review"]["yes"]}],
 }
 
 

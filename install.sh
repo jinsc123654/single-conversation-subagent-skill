@@ -61,7 +61,7 @@ case "$HOST" in codex|zcode|claude|generic) ;; *) echo 'Host must be codex, zcod
 if [ -z "$QUESTION_CHANNEL" ]; then
   case "$HOST" in
     codex) QUESTION_CHANNEL=native ;;
-    zcode) QUESTION_CHANNEL=mcp ;;
+    zcode) QUESTION_CHANNEL=native ;;
     *) QUESTION_CHANNEL=auto ;;
   esac
 fi

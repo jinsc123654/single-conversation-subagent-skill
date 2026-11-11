@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.1 — 2026-11-11
+
+- `session_open` 新增 `workspace_scan`（只读项目扫描：README/PRODUCT_CLI/关键目录/build/dist/顶层结构）与 `mode_options`（模式标签/说明）；`interaction_request`/`interaction_ask` 的 `analysis` 自动前置扫描结果。
+- MCP form 推荐项置顶；推荐项标签后直接附扫描理由；所有选项带模式说明；`describe`/`display_text` 同步。选项值仍兼容代码值/短标签。
+- Skill 原生路径：`session_open` 取扫描/选项 → `interaction_request(channel="native")` → 原生 AskUserQuestion（推荐项第一位，推荐项 description 带扫描摘要，其他选项带模式说明）→ `interaction_submit`。ZCode 安装默认改为 native；原生 60s 隐藏 + 5min 是唯一可见倒计时。`--question-channel mcp` 保留 15s 服务端截止表单，但无动画倒计时；两种目标不能兼得。
+- 全套 135 项 pytest；真实 RT-Thread 固件根扫描、推荐项枚举顺序与扫描理由断言通过。
+
 ## 2.2.0 — 2026-11-11
 
 - PyQt 项目栏改为可展开/收起的项目与工作包树，记住折叠状态，按最后 MCP 活动或显式打开时间自动排序。

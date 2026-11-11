@@ -89,6 +89,16 @@ def test_sleep_is_not_timeout(state):
     assert state.get(sid)["mode"] is None
 
 
+async def test_session_open_exposes_scan_and_mode_options(tmp_path):
+    async with Client(create_server(tmp_path), mode="legacy") as client:
+        opened = (await client.call_tool(
+            "session_open", {"project_root": str(tmp_path), "client_name": "scan"}
+        )).structured_content
+        assert opened["workspace_scan"]
+        assert [x["value"] for x in opened["mode_options"]] == ["quick", "standard", "long", "investigate"]
+        assert all(x["desc"] for x in opened["mode_options"])
+
+
 @pytest.mark.parametrize("mode", ["auto", "legacy"])
 async def test_sdk_elicitation_both_protocol_eras(tmp_path, mode):
     seen = []
@@ -103,12 +113,10 @@ async def test_sdk_elicitation_both_protocol_eras(tmp_path, mode):
         again = await client.call_tool("interaction_request", {"session_id": sid, "kind": "mode", "recommendation": ["standard"]})
         assert again.structured_content["status"] == "ALREADY_CONFIRMED"
         assert len(seen) == 1
-        assert seen[0].requested_schema["properties"]["choice"]["enum"] == [
-            "quick — 快速处理",
-            "standard — 标准执行（推荐）",
-            "long — 长任务",
-            "investigate — 只调查",
-        ]
+        enum = seen[0].requested_schema["properties"]["choice"]["enum"]
+        assert [x.split(" — ")[0] for x in enum] == ["standard", "quick", "long", "investigate"]
+        assert enum[0].startswith("standard — 标准执行（推荐）：先确认验证范围")
+        assert "扫描：" in enum[0]
         assert seen[0].requested_schema["required"] == ["choice"]
         diagnostics = (await client.call_tool("diagnostics_check", {"session_id": sid})).structured_content
         assert diagnostics["protocol_version"] == ("2025-11-25" if mode == "legacy" else "2026-07-28")

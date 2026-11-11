@@ -1,8 +1,8 @@
-# single-conversation-subagent 2.2.0
+# single-conversation-subagent 2.2.1
 
 单对话两级 Subagent 协作，采用 **Skill 策略 + 可选本地 MCP 状态/交互 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不是独立 Agent 桥接器。
 
-首次四选一的通道由安装期 `SCS_QUESTION_CHANNEL` 决定：`native` 用宿主原生，`text` 用完整文本，`mcp` 用 legacy MCP form/15s，`auto` 按声明能力回落；`session_open` 返回实际 channel。**安装 MCP 不保证弹窗出现。** 推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认。
+首次四选一的通道由安装期 `SCS_QUESTION_CHANNEL` 决定：`native` 用宿主原生（MCP 先返回 `workspace_scan`/`mode_options`，推荐项置顶并带扫描理由），`text` 用完整文本，`mcp` 用 legacy MCP form/15s 服务端截止，`auto` 按声明能力回落；`session_open` 返回实际 channel。**安装 MCP 不保证弹窗出现。** 推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认。
 
 ```mermaid
 flowchart TD
@@ -108,7 +108,7 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
         "type": "stdio",
         "command": "/absolute/repository/.venv/bin/python",
         "args": ["-m", "scs_mcp", "--project-root", "/absolute/project"],
-        "env": {"SCS_HOST": "zcode", "SCS_QUESTION_CHANNEL": "mcp"},
+        "env": {"SCS_HOST": "zcode", "SCS_QUESTION_CHANNEL": "native"},
         "timeoutMs": 60000
       }
     }
@@ -116,7 +116,7 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
 }
 ```
 
-ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。`--host zcode` 默认 `SCS_QUESTION_CHANNEL=mcp`，四选一/验证/审查用 `interaction_ask(timeout_seconds=15)`（仅 legacy form）；MCP form 显示中文 title、`analysis` 推荐理由、选项注释（如 `quick — 快速处理`）、推荐项标记、15 秒截止和 question_id。无 form 或 modern 无回通道时问题保持 `WAITING_USER`，用同一 `question_id` 直接 `interaction_submit`。ZCode 原生 AskUserQuestion 自动解析是 60 秒隐藏 + 5 分钟截止，不是 15 秒。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
+ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。`--host zcode` 默认 `SCS_QUESTION_CHANNEL=native`：`session_open` 先返回 `workspace_scan`（README/PRODUCT_CLI/关键目录/build/dist/顶层结构）与 `mode_options`（模式标签/说明），四选一/验证/审查用原生 AskUserQuestion，推荐项第一位并带扫描理由，ZCode 原生倒计时为 60 秒隐藏 + 5 分钟截止。要 15 秒可显式 `--question-channel mcp`：`interaction_ask(timeout_seconds=15)` 是服务端截止，表单显示推荐项置顶/扫描理由/选项说明/question_id，但没有动画倒计时；15 秒与可见倒计时不能兼得。无 form 或 modern 无回通道时问题保持 `WAITING_USER`，用同一 `question_id` 直接 `interaction_submit`。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
 
 混合安装器生成的示例使用稳定的 runtime/launcher.py 入口，无需依赖仓库位置。Codex 配置格式参考 [官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 并与本机 CLI help 核对；Claude Code JSON/stdio 参考 [官方 MCP 文档](https://code.claude.com/docs/en/mcp)。
 
@@ -131,9 +131,9 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 ```
 
 - `--host`：`codex|zcode|claude|generic`，写入示例的 `SCS_HOST`。
-- `--question-channel`：`auto|native|mcp|text`，写入 `SCS_QUESTION_CHANNEL`；未指定时 `codex→native`、`zcode→mcp`、其他→`auto`。
-- 服务器启动时读取 env；`session_open` 返回 `question_channel` 与 `host`。Skill 按它路由：`native`→原生，`text`→文本，`mcp`→`interaction_ask`（15s），`auto`→form 可用则 mcp，否则 native/text。
-- `interaction_ask` 只在 legacy stdio 的 back-channel 上开 form；modern/无 form 回落会保留 `question_id`，用户明确回复后直接 `interaction_submit`。原生/文本路径不声称 15s。
+- `--question-channel`：`auto|native|mcp|text`，写入 `SCS_QUESTION_CHANNEL`；未指定时 `codex→native`、`zcode→native`、其他→`auto`。
+- 服务器启动时读取 env；`session_open` 返回 `question_channel`、`host`、`workspace_scan` 与 `mode_options`。Skill 按它路由：`native`→原生（推荐项第一位、扫描理由、选项说明；ZCode 60s 隐藏+5min），`text`→完整文本，`mcp`→`interaction_ask`（15s 服务端截止，无动画倒计时），`auto`→form 可用则 mcp，否则 native/text。
+- `interaction_ask` 只在 legacy stdio 的 back-channel 上开 form；modern/无 form 回落会保留 `question_id`，用户明确回复后直接 `interaction_submit`。原生/文本路径不声称 15s；MCP form 的 15s 是服务端截止，不是可见倒计时。
 - 安装器生成 `client-examples.json`、`codex-example.toml`、`host-profile.json`；不改写现有客户端配置，复制时按宿主保留 `env`。
 
 ## 能力矩阵与验收层次
@@ -146,7 +146,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 | 官方 Python SDK 1.30.0 旧客户端 | 不适用 | 已验证：独立环境连接最终安装包 | 不支持原生 UI | 已验证三问、多选及无能力回退；无图形 UI |
 | 当前 Codex 桌面聊天；CLI 0.167.0-alpha.3.2（本机二进制） | 已加载现有 Skill；新版待重开验证 | NOT_RUN：本机未注册 SCS MCP；原生/文本回落可用 | 当前会话有 `request_user_input_async`；不假设所有 Codex 都有 Ask/Question | NOT_TESTED；form/back-channel 未在本版本握手验证 |
 | Claude Code 2.1.1（本机版本） | 待验证 | 待验证；官方有 stdio 文档 | 待验证 | NOT_TESTED |
-| ZCode 3.15（用户级 `mcp.servers`，`--host zcode`） | 已加载现有 Skill；新会话待重开 | 已验证：stdio 兼容层（ZCode 2026-07-28 探测回落 2025-11-25），17 工具；`question_channel=mcp`，15s 走 `interaction_ask`（legacy form） | 待宿主确认 | NOT_TESTED |
+| ZCode 3.15（用户级 `mcp.servers`，`--host zcode`） | 已加载现有 Skill；新会话待重开 | 已验证：stdio 兼容层（ZCode 2026-07-28 探测回落 2025-11-25），17 工具；`question_channel=native`，`workspace_scan`/`mode_options` 返回，原生 60s 隐藏+5min；MCP form 15s 可选（无动画） | 待宿主确认 | 待新会话视觉确认 |
 
 当前宿主的原生提问链路已收集真实用户选择；本服务器的完整会话→提问→提交→工作包→证据→handoff 链路由 SDK 参考客户端实际运行。ZCode 已完成用户级 stdio 注册与原始握手验证；Codex 未注册 SCS MCP，原生/文本回落可用，form/back-channel 未验证。尚未在 Codex/Claude/ZCode 的新会话内视觉观察本服务的 elicitation UI，不能宣称桌面客户端 UI 已通过或 100% 弹窗。
 
