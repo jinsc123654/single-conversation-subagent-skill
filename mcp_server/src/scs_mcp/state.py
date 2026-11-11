@@ -79,7 +79,8 @@ class State:
         return row
 
     def open(self, project_root: str, client_name: str, conversation_id: str | None = None,
-             review_registration: str = "unknown", explicit_skip: bool = False) -> dict:
+             review_registration: str = "unknown", explicit_skip: bool = False,
+             *, resume_session_id: str | None = None) -> dict:
         from pathlib import Path
         if ".." in Path(project_root).parts or Path(project_root).resolve() != self.store.root:
             raise ScsError("PROJECT_MISMATCH", "Session root must match the server's configured project root.")
@@ -87,22 +88,42 @@ class State:
             raise ScsError("INPUT_INVALID", "Supply a short client name and known registration state.")
         if conversation_id is not None and (not conversation_id.strip() or len(conversation_id) > 1024):
             raise ScsError("INPUT_INVALID", "Conversation ID must be a nonempty host-provided identifier.")
+        if resume_session_id is not None and (conversation_id is not None or explicit_skip):
+            raise ScsError("INPUT_INVALID", "Omit conversation_id and explicit_skip when resuming an existing session.")
         temporary = conversation_id is None
-        identity = hashlib.sha256(encode([str(self.store.root), client_name, conversation_id or uuid.uuid4().hex]).encode()).hexdigest()
         with self.store.transaction(True) as con:
-            row = con.execute("SELECT id FROM sessions WHERE identity=?", (identity,)).fetchone()
-            sid = row[0] if row else identifier("S-")
+            if resume_session_id is not None:
+                row = con.execute(
+                    "SELECT id,temporary FROM sessions WHERE id=? AND client=?", (resume_session_id, client_name)
+                ).fetchone()
+                if row is None:
+                    raise ScsError("SESSION_NOT_FOUND", "No matching session for this project and host client.")
+                temporary = bool(row["temporary"])
+            else:
+                identity = hashlib.sha256(
+                    encode([str(self.store.root), client_name, conversation_id or uuid.uuid4().hex]).encode()
+                ).hexdigest()
+                row = con.execute("SELECT id FROM sessions WHERE identity=?", (identity,)).fetchone()
+            sid = row["id"] if row else identifier("S-")
             if row is None:
                 con.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?,?)",
                             (sid, identity, client_name, temporary, review_registration,
                              "quick" if explicit_skip else None, None, None, now()))
                 self.store.event(con, sid, None, "session_open", "EXPLICIT_SKIP" if explicit_skip else "SESSION_OPENED")
-            elif review_registration != "unknown":
-                # Host attestation may become available after registry loading.
-                con.execute("UPDATE sessions SET review_registration=? WHERE id=?", (review_registration, sid))
+            else:
+                if resume_session_id is not None:
+                    self.store.event(con, sid, None, "session_open", "SESSION_RESUMED")
+                if review_registration != "unknown":
+                    # Host attestation may become available after registry loading.
+                    updated = con.execute(
+                        "UPDATE sessions SET review_registration=? WHERE id=? AND review_registration!=?",
+                        (review_registration, sid, review_registration),
+                    )
+                    if updated.rowcount:
+                        self.store.event(con, sid, None, "session_open", "REVIEW_REGISTRATION_UPDATED")
         result = self.get(sid)
         if temporary:
-            result["warning"] = "TEMPORARY_SESSION: retain session_id in this chat; restart recognition is not automatic."
+            result["warning"] = "TEMPORARY_SESSION: retain session_id in this chat and pass it as resume_session_id after reconnecting."
         result["destructive_operations_authorized"] = False
         return result
 
@@ -138,6 +159,16 @@ class State:
             q = con.execute("SELECT * FROM questions WHERE session_id=? AND kind=? AND current=1", (session_id, kind)).fetchone()
             if q:
                 return {"created": False, **dict(q)}
+            # Return the current question so the host can finish it without opening another UI.
+            pending = con.execute(
+                "SELECT id,kind,state FROM questions WHERE session_id=? AND current=1 AND state != 'CONFIRMED'",
+                (session_id,),
+            ).fetchone()
+            if pending:
+                return {"status": "QUESTION_PENDING", "question_id": pending["id"],
+                        "kind": pending["kind"], "state": pending["state"],
+                        "next": "Use interaction_submit with this question_id after an explicit user reply. "
+                                "For an ended question, reopen only on explicit user request."}
             if kind != "mode" and not s["mode"]:
                 raise ScsError("QUESTION_ORDER", "Confirm mode first.")
             if kind == "verification" and s["mode"] not in {"standard", "long"}:
@@ -149,14 +180,12 @@ class State:
             if kind == "codex_review":
                 if s["mode"] in {"standard", "long"} and not s["verification"]:
                     raise ScsError("QUESTION_ORDER", "Confirm verification scope first.")
-                if s["review_registration"] != "registered":
+                if s["review_registration"] == "unknown":
+                    return {"status": "SKIPPED", "reason": "CODEX_REVIEW_REGISTRATION_UNKNOWN"}
+                if s["review_registration"] == "unregistered":
                     return {"status": "SKIPPED", "reason": "CODEX_REVIEW_NOT_REGISTERED"}
                 if recommendation != ["no"]:
                     raise ScsError("CHOICE_INVALID", "The review question recommends no additional review.")
-            # No simultaneous native and MCP questions, even for different kinds.
-            pending = con.execute("SELECT id FROM questions WHERE session_id=? AND current=1 AND state != 'CONFIRMED'", (session_id,)).fetchone()
-            if pending:
-                raise ScsError("QUESTION_PENDING", "Resolve or explicitly reopen the pending question first.")
             qid = identifier("Q-")
             stamp = now()
             con.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)",

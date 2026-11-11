@@ -103,6 +103,18 @@ def schema_for(question: dict, analysis: str | None = None, timeout_seconds: flo
                         choice=(list[enum] if is_multi else enum, field))
 
 
+def native_question(question: dict, analysis: str | None, *, already_pending: bool = False) -> dict:
+    kind = question["kind"]
+    recommendation = json.loads(question["recommendation"])
+    prompt = MESSAGES[kind]
+    if analysis:
+        prompt += "\n" + analysis
+    return {"status": "WAITING_USER" if already_pending else "NATIVE_QUESTION_REQUIRED",
+            "question_id": question["id"], "kind": kind, "state": question["state"],
+            "options": _ordered(kind, recommendation), "recommendation": recommendation,
+            "display_text": prompt}
+
+
 def describe(question: dict, reason: str | None = None, analysis: str | None = None,
              timeout_seconds: float | None = None) -> dict:
     kind = question["kind"]
@@ -129,7 +141,7 @@ def describe(question: dict, reason: str | None = None, analysis: str | None = N
     return {"status": "TEXT_FALLBACK_REQUIRED" if reason else "WAITING_USER",
             "question_id": question["id"], "kind": kind, "state": question["state"],
             "options": ordered, "recommendation": recommendation,
-            "requested_schema": schema_for(question, analysis, timeout_seconds).model_json_schema(), "display_text": text,
+            "display_text": text,
             "fallback_reason": reason, "ui_observation": "UI_NOT_OBSERVABLE",
             "next": "Display options and END this turn. Wait for explicit user reply, then interaction_submit.",
             "destructive_operations_authorized": False}

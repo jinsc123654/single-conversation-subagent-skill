@@ -1,32 +1,26 @@
 ---
 name: single-conversation-subagent
-description: 单对话两级 Subagent 协作；每个真实对话首个任务选择执行模式，标准/长任务确认验证范围；支持原生提问、可选 MCP 状态与纯文本回退。
+description: 单对话两级 Subagent 协作；首次选模式，开场确认验证与收尾审查；支持原生提问、MCP 状态和文本回退。
 ---
 
-主对话是唯一协调者，维护阶段记忆、直接派发宿主原生执行子 Agent 并最终验收。子 Agent 只分析/实现/测试，不继续委派。MCP 只处理交互、状态和证据，不创建或调度 Agent。
+主对话负责用户交互、阶段记忆、直接派发和最终验收。子 Agent 只分析、实现或测试，不再委派。MCP 记录交互、状态和证据，不调度 Agent。
 
-每个对话绑定项目时，优先用用户明确指向的项目目录，否则用宿主提供的当前对话工作目录。保留指定子目录，不自动上溯 Git 根。调用 `session_open(project_root=<绝对项目根>, register_obsidian=true)` 初始化项目的 docs-root、Obsidian 总览并登记给 PyQt，早于模式选择和工作包。仅在宿主允许写入项目元数据和本地项目索引时登记。目录越界或登记失败时说明原因；纯 Skill 仍可完成任务。使用返回的 `obsidian.vault_root`，同项目跨对话复用同一库。
+## 开场
 
-每个真实对话首次任务选四项：快速处理 / 标准执行 / 长任务 / 只调查；必要只读调查后按范围、风险、成本只给一个动态推荐。默认勾选不是用户确认。后续沿用本对话选择，不按 cwd、PID、MCP 连接或旧工作包复用其他对话的选择。同一对话先读 `session_open`/`session_get` 的 `mode`/`verification`/`codex_review`：已确认的直接沿用，不再提问；后续验证/审查问题把上次确认值作为 `recommendation`，让 15 秒自动继续选中上次选项。只有用户明确说“使用长任务/只调查/快速处理/标准执行”这类切换命令时，才 `interaction_reopen(kind="mode", explicit_user_change=True)` 并更新 mode；显式切换用 `interaction_reopen` → `interaction_request(channel="text", recommendation=[新模式])` → `interaction_submit(action="accept", choices=[新模式])`，不要弹表单；普通讨论不推断切换。仅明确“不用问，直接做”可跳过→快速，危险操作仍另确认。**四选一前先做一次任务相关的只读调查**（目标目录/README/git status/少量文件，足够判断范围即可；不要只列目录就提问），**不检查 MCP 注册/配置/项目根，不读无关记忆，不做长搜索**；调查在提问前完成，调查后只调用一次 `session_open(project_root=<任务项目根>, register_obsidian=true)`（配置根只是允许的工作区边界，项目根必须是其子目录；服务端为该项目建 `<项目>/.scs`）取得 `workspace_scan`（服务端项目扫描：README/顶层结构/关键目录/build/dist）与 `mode_options`（模式标签/说明）；把 `workspace_scan` 与调查发现作为 `analysis`，带唯一推荐；**任何首条任务（含转换/脚本执行）在实现前必须先完成四选一；只有用户明确说“不用问/直接做”才可跳过→快速，不能因任务简单或用户说“转换下”跳过**；**提问后等待答复，不再继续调查**。MCP 不可用时用本地只读调查，按 native/text 继续。ZCode 默认 native：Skill 用宿主原生 Ask/Question 主问，MCP 只做 `session_open`/选择记录/`interaction_submit`/工作包/证据/视图；`SCS_QUESTION_CHANNEL=mcp` 的 MCP form 只用于没有原生工具的宿主，不作为 ZCode 默认。
+1. 先做足以推荐模式的少量只读调查。项目根用用户明确指定的目录，否则用当前对话工作目录，不上溯 Git 根。核对宿主技能列表：有 codex-review 传 `registered`，明确不可用传 `unregistered`，无法确认传 `unknown`。
+2. `session_open` 传项目绝对路径、宿主真实 conversation_id（有才传）和已核实的 `review_registration`。项目元数据和索引可写时传 `register_obsidian=true`，建库并登记给 PyQt。已有选择直接沿用。保留 session_id 和原 client_name；同一会话重连或补登记时用 `resume_session_id` 和原项目根恢复。MCP 不可用时，沿用纯 Skill 流程。
+3. 首次问快速处理 / 标准执行 / 长任务 / 只调查，按范围和风险推荐一个。任何首条任务在实现前先完成四选一，只有用户明确说“不用问，直接做”时跳过为快速。显式切换用 `interaction_reopen(explicit_user_change=true)` 后记录新选择。
+4. **开始实现、执行测试或派发前完成开场确认**。标准/长任务先问验证范围并确认写入，之后立即问收尾 Codex 审查。快速模式在 mode 后直接问收尾审查。只调查或审查可用性未确认时跳过审查。已确认的选择直接沿用。审查唯一推荐为不使用。**开场只记录审查选择。用户选择使用时，主对话在任务和所选验证完成后启动一次只读审查，再做最终验收。**
 
-交互按 `session_open` 返回的 `question_channel` 路由：
-1. `native`：先 `interaction_request(channel="native", analysis=...)` 登记并拿到 `question_id`/`display_text`；调用宿主原生 Ask/Question：**推荐项放第一位并标（推荐）**，推荐项 description = `mode_options.desc` + `｜扫描：<workspace_scan 摘要>`，其他选项 description 用 `mode_options.desc`；问题文本带 `display_text` 里的推荐与扫描理由；用户答复后 `interaction_submit`。`NATIVE_QUESTION_REQUIRED` 不是 UI；必须真正调用原生工具，只登记不调用等于没问。没有原生工具时按 `text`。
-2. `text`：完整展示 `display_text`（推荐项第一位、扫描理由、选项说明、question_id），结束当轮，明确回复后 `interaction_submit`。
-3. `mcp`：先 `interaction_ask(timeout_seconds=15)`；表单已把推荐项置顶并在推荐项后附服务端扫描理由，选项带说明。15 秒是服务端截止，不是可见倒计时；到点返回 `TIMED_OUT`+推荐项，模型已继续，表单可能仍留在屏幕上，迟交按 `LATE_REPLY` 忽略。回复用户时提醒“已按推荐项继续，表单可稍后点忽略/关闭，不要重复提交”。返回 `MODERN_NO_BACKCHANNEL`/`ELICITATION_UNSUPPORTED`/`TEXT_FALLBACK_REQUIRED` 时，用同一 `question_id` 改走原生/文本，明确回复后直接 `interaction_submit`。
-4. `auto`：MCP form 可用则按 `mcp`，否则按 `native`/`text`。
-原生/文本路径不声称 15 秒；15 秒只属于 `mcp` form 的服务端截止。所有路径先 `session_open` 绑定宿主真实 conversation ID（登记时必须明确传入 project_root；client_name 可省略，服务端按 host 命名空间）并取 `workspace_scan`/`mode_options`；MCP 不可用时跳过。
+## 逐题交互
 
-提问时传 `analysis`：1-2 句推荐理由/范围分析（≤600 字，不含隐私/凭据）；服务端会自动前置 `workspace_scan`，所以推荐项后面总能跟着项目扫描理由。MCP form 会显示中文 title、推荐项（第一位，带扫描理由）、选项注释（模式说明）、15 秒截止和 question_id；native/text 的 `display_text` 带同一推荐+扫描+选项说明，原生 Ask/Question 的推荐项 description 用 `mode_options.desc` + 扫描摘要。没有 `analysis` 时服务端只显示扫描，信息仍不足，优先补一句再问。
+- 原生路径（ZCode 默认）：`interaction_request(channel="native")` 返回 `NATIVE_QUESTION_REQUIRED` 时，立即调用宿主原生问答工具。用返回的简短 `display_text` 和 `options`，将推荐项置顶并标明。登记状态本身不证明已显示。等到用户实际回答，再用原 `question_id` 调 `interaction_submit`；**看到 `CONFIRMED` 才请求下一题**。没有原生工具时，使用同一题的文本回退。
+- 文本路径：展示完整 `display_text`，结束当轮等待明确回复，然后用同一题号提交。每次只用一路提问。收到 `QUESTION_PENDING` 时处理返回的原题；如果用户已答就补提交，否则继续等待。需要重试已结束的题时，按用户明确要求重开。取消、拒绝、失败和默认勾选均不确认选择。
+- MCP form 是配置为 mcp 或 auto 且支持表单时的回退。仅 `interaction_ask` 使用服务端 15 秒截止。按已告知的超时策略处理，`TIMED_OUT` 不写确认。无 form 或无回通道时用同一题号走原生或文本。原生/文本不声称 15 秒。详见 [MCP 用法](references/mcp.md)。
+- 推荐理由一句话，最多 160 字。首次用 `workspace_scan` 辅助判断范围，不把扫描全文回传到每道题。上下文压缩时只保留会话 ID、项目根、已确认选择、待答题号、工作包修订、下一步和证据路径；按需读取详细状态。
 
-同一时刻只用一路提问。原生已提问时，不再打开 MCP 表单；若用 MCP 记账，interaction_request(channel="native") 只登记，再将真实回复 interaction_submit。原生失败后先记录失败，显式重开问题再换下一路。确认过的选择不重复问；取消/拒绝保持未确认，只有用户要求重试或改变时显式重开。超时仅认可宿主真实可观测结果且事先告知的配置策略；`interaction_ask` 的服务端截止时间是可观测结果，到点标记 `TIMED_OUT` 并返回推荐项；命令等待、RPC 超时、UI 不出现均不是用户超时。fallback（native/text、无 form、modern 无回通道）保持问题 `WAITING_USER`，可直接 `interaction_submit`；RPC 异常才标 `FAILED`，需显式 reopen 后重试。`TIMED_OUT` 不写 `CONFIRMED`，主对话可按本对话策略采用返回的推荐项继续。ZCode 原生 AskUserQuestion 自动解析为 **60 秒隐藏 + 5 分钟截止（空答案）**，这是原生唯一可见倒计时，不是 15 秒；15 秒只能走 `interaction_ask` 的服务端截止（表单无动画倒计时）。两者不能兼得：要可见倒计时用 native，要 15 秒用 mcp。工具已调用不能证明用户看见 UI。
+## 执行与收尾
 
-仅本对话首次进入标准/长任务确认验证范围；任务开始时在快速/标准/长任务、检测到已注册 codex-review 时确认是否在收尾执行 Codex 审查（快速在 mode 后，标准/长任务在 verification 后）；后续沿用已确认的 verification/codex，不再问；显式切换 mode 后已确认的 verification/codex 保持，除非用户明确要求重选：
-- 验证范围：一个动态推荐组合；本轮冒烟、收尾定向/全量/稳定性按实际风险与预算选择。未选项不执行。“不做测试”与“只记录方法”互斥且排除测试，均 NOT_RUN；后者只记录方法，不标 PASS。已有明确授权的测试范围可记录并沿用，不重复请求同一授权。破坏性操作独立确认。
-- Codex 联动：任务开始时在快速/标准/长任务询问是否在收尾执行已注册的 codex-review；只调查/未注册跳过；唯一推荐不使用。任务开始时只记录选择，收尾再实际执行，不重复问；单工作包/修订只审一次。主对话启动外部只读审查，子 Agent 不启动。
+快速直接处理；只调查保持只读，范围大时可派只读子 Agent。子 Agent 继承主对话的授权和验证范围。未选的测试标 `NOT_RUN`；不做测试与只记录方法互斥，均不标 PASS；危险操作独立确认。工作包、并发、证据和交接按需查 [完整协议](references/protocol.md)。不贴全量日志，主对话核对关键证据后验收。
 
-快速直接做、不建子 Agent；只调查只读，范围大可派只读分析子 Agent；两者不强制初始化工作包。执行子 Agent 继承主对话已确认的 mode 和 verification，不重新四选一、不打开提问、不扩大范围；主对话是唯一用户交互入口。标准/长任务及需要恢复、证据、并发时按需读 [完整协议](references/protocol.md)，MCP 参数及故障诊断读 [MCP 用法](references/mcp.md)。MCP 断开时按同一策略维护文件和文本交互；恢复前显式核对 SQLite 与手工记录，不自动覆盖/导入。
-
-docs-root 优先 00_doc / 00_docs / docs / doc，均无创建 docs。AGENT_PROJECT.md、AGENT_COORDINATION.md、evidence/WP-<id>/R<rev>/<subtask-id>/ 在 docs-root/agent/；WP 审查报告在 04_test/report/。不迁移旧文件。主对话维护可审查 Markdown，MCP 只初始化缺失记录并返回同步责任；冲突停下核对。没有可靠证据不得标 PASS，最终接受由主对话决定。
-
-
-需要手动刷新或诊断 Obsidian 项目时，按需读 [Obsidian 视图](references/obsidian.md)。每个项目 docs-root 作为独立库根，project_view_refresh 生成 agent/acceptance/ 浏览页；默认启用后的 MCP 工作包变化自动刷新。project_view_info 返回打开链接及过期/冲突检查。保留批注、源记忆和现有 .obsidian 配置；无插件，不改全局库注册，不把子任务通过当最终验收。PyQt 可从登记记录直接打开该库；通用 URI 可能需要先在 Obsidian 注册库。MCP 返回链接不证明软件已打开。纯 Skill 仍可维护 Markdown，恢复前显式核对。
+docs-root 优先 00_doc / 00_docs / docs / doc，均无则用 docs。项目与协作记忆、证据在其 agent/，审查报告在 04_test/report/。MCP 初始化缺失记录，主对话维护审查记录；恢复前核对 SQLite 与手工记录。PyQt 可直接打开已登记的库，视图刷新和故障处理见 [Obsidian 视图](references/obsidian.md)。

@@ -397,3 +397,84 @@ def test_explicit_skip_can_later_enter_standard_in_same_conversation(state):
     verification = state.request(sid, "verification", ["smoke"], "text")
     assert verification["kind"] == "verification"
     assert open_session(state) == sid
+
+
+async def test_resume_temporary_session_and_correct_review_registration(tmp_path):
+    async def call(client, tool, **args):
+        return (await client.call_tool(tool, args)).structured_content
+
+    project = tmp_path / "project"
+    project.mkdir()
+    params = {"project_root": str(project), "client_name": "test-client"}
+    async with Client(create_server(tmp_path, host="zcode"), mode="legacy") as client:
+        opened = await call(client, "session_open", **params)
+        sid = opened["id"]
+        assert opened["temporary"]
+        for kind, choice in (("mode", "long"), ("verification", "smoke")):
+            question = await call(client, "interaction_request", session_id=sid, kind=kind,
+                                  recommendation=[choice], channel="text")
+            result = await call(client, "interaction_submit", session_id=sid,
+                                question_id=question["question_id"], action="accept", choices=[choice])
+            assert result["status"] == "CONFIRMED"
+        skip = await call(client, "interaction_request", session_id=sid, kind="codex_review",
+                          recommendation=["no"], channel="text")
+        assert skip == {"status": "SKIPPED", "reason": "CODEX_REVIEW_REGISTRATION_UNKNOWN"}
+
+    async with Client(create_server(tmp_path, host="codex"), mode="legacy") as client:
+        foreign = await call(client, "session_open", **params, resume_session_id=sid,
+                             review_registration="registered")
+        assert foreign["error_code"] == "SESSION_NOT_FOUND"
+
+    async with Client(create_server(tmp_path, host="zcode"), mode="legacy") as client:
+        assert (await call(client, "session_get", session_id=sid))["error_code"] == "SESSION_NOT_FOUND"
+        missing_root = await call(client, "session_open", resume_session_id=sid)
+        assert missing_root["error_code"] == "PROJECT_ROOT_REQUIRED"
+        missing = await call(client, "session_open", **params, resume_session_id="missing")
+        assert missing["error_code"] == "SESSION_NOT_FOUND"
+
+        restored = await call(client, "session_open", **params, resume_session_id=sid,
+                              review_registration="registered")
+        assert restored["id"] == sid and restored["temporary"]
+        assert restored["mode"] == "long" and restored["verification"] == ["smoke"]
+        assert restored["review_registration"] == "registered" and restored["codex_review"] is None
+        reopened = await call(client, "session_open", **params, resume_session_id=sid)
+        assert reopened["review_registration"] == "registered"
+        question = await call(client, "interaction_request", session_id=sid, kind="codex_review",
+                              recommendation=["no"], channel="text")
+        assert question["question_id"] and question["kind"] == "codex_review"
+
+
+async def test_native_intake_compact_and_returns_pending_verification(tmp_path):
+    async with Client(create_server(tmp_path, question_channel="native"), mode="legacy") as client:
+        async def call(name, **args):
+            return (await client.call_tool(name, args)).structured_content
+
+        session = await call("session_open", project_root=str(tmp_path), review_registration="registered")
+        sid = session["id"]
+        mode = await call("interaction_request", session_id=sid, kind="mode", recommendation=["long"])
+        await call("interaction_submit", session_id=sid, question_id=mode["question_id"],
+                   action="accept", choices=["long"], source="native")
+        verification = await call("interaction_request", session_id=sid, kind="verification",
+                                  recommendation=["smoke"], analysis="x" * 400)
+        assert verification["status"] == "NATIVE_QUESTION_REQUIRED"
+        assert "requested_schema" not in verification
+        assert verification["display_text"].count("x") == 160
+        assert "扫描：" not in verification["display_text"]
+        assert verification["options"][0]["value"] == "smoke"
+        assert len(json.dumps(verification, ensure_ascii=False).encode()) < 1_500
+
+        review_args = {"session_id": sid, "kind": "codex_review", "recommendation": ["no"]}
+        pending = await call("interaction_request", **review_args)
+        assert pending["status"] == "QUESTION_PENDING"
+        assert pending["question_id"] == verification["question_id"]
+        assert pending["kind"] == "verification" and pending["state"] == "WAITING_USER"
+
+        confirmation = await call("interaction_submit", session_id=sid, question_id=pending["question_id"],
+                                  action="accept", choices=["smoke"], source="native")
+        assert confirmation["status"] == "CONFIRMED"
+        review = await call("interaction_request", **review_args)
+        assert review["status"] == "NATIVE_QUESTION_REQUIRED"
+        assert review["kind"] == "codex_review"
+        restored = await call("session_open", project_root=str(tmp_path), resume_session_id=sid)
+        assert restored["verification"] == ["smoke"]
+        assert "workspace_scan" not in restored and "mode_options" not in restored

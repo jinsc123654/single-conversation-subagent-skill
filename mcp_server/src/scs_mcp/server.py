@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from . import __version__
 from .errors import ScsError
 from .models import SubtaskDefinition, SubtaskResult
-from .interaction import MESSAGES, choice_code, describe, schema_for, supports_form
+from .interaction import MESSAGES, choice_code, describe, native_question, schema_for, supports_form
 from .roots import Roots
 from .project_index import publish
 from .state import OPTIONS
@@ -110,7 +110,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
     @mcp.tool(structured_output=True)
     async def session_open(project_root: str | None = None, client_name: str | None = None, conversation_id: str | None = None,
                      review_registration: Literal["registered", "unregistered", "unknown"] = "unknown",
-                     explicit_skip: bool = False, register_obsidian: bool = False) -> dict[str, Any]:
+                     explicit_skip: bool = False, register_obsidian: bool = False,
+                     resume_session_id: str | None = None) -> dict[str, Any]:
         """Bind a host conversation to its project root and report the host question channel.
 
         project_root defaults to the server's configured workspace root; pass the
@@ -124,21 +125,30 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         initializes this project's docs vault and publishes it to the desktop
         manager before intake. Supply project_root explicitly (user-named project
         or current conversation working directory) and use this only when the
-        project metadata and local index writes are authorized.
+        project metadata and local index writes are authorized. To recover an
+        existing session, pass resume_session_id and its absolute project_root
+        with the original client_name (or omit it as before). Omit conversation_id
+        and explicit_skip when resuming. A known review_registration updates the
+        original session without changing its confirmed choices.
         """
-        if register_obsidian and (not project_root or not Path(project_root).is_absolute()):
+        if (register_obsidian or resume_session_id is not None) and (
+                not project_root or not Path(project_root).is_absolute()):
             raise ScsError("PROJECT_ROOT_REQUIRED", "Pass the absolute project or conversation working directory.")
         namespace = hashlib.sha256(
             json.dumps([raw_host, client_name or ""], ensure_ascii=False, separators=(",", ":")).encode()
         ).hexdigest()[:32]
         resolved_client = "h" + namespace
-        root, _, result = roots.open(project_root, resolved_client, conversation_id, review_registration, explicit_skip)
+        root, _, result = roots.open(
+            project_root, resolved_client, conversation_id, review_registration, explicit_skip,
+            resume_session_id=resume_session_id,
+        )
         result["question_channel"] = question_channel
         result["host"] = display_host
         result["client_label"] = client_name or display_host
         result["project_root"] = str(root)
-        result["workspace_scan"] = scan_workspace(root)
-        result["mode_options"] = OPTIONS["mode"]
+        if result["mode"] is None and not result["questions"]:
+            result["workspace_scan"] = scan_workspace(root)[:320]
+            result["mode_options"] = OPTIONS["mode"]
         if register_obsidian:
             try:
                 view = roots.views(result["id"]).refresh(result["id"], register=True)
@@ -160,9 +170,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
                       question_id: str | None, ctx: Context,
                       analysis: str | None = None) -> dict | Elicit:
         state = roots.for_session(session_id)
-        scan = scan_workspace(state.store.root)[:400]
-        analysis = (f"扫描：{scan}\n分析：{analysis.strip()}" if analysis and analysis.strip()
-                    else f"扫描：{scan}")
+        analysis = analysis.strip()[:160] if analysis else None
+        effective = question_channel if channel == "auto" else channel
         if question_id:
             q = state.question(session_id, question_id)
             if q["kind"] != kind or not q["current"]:
@@ -178,6 +187,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         # A second independent call must not open another UI. The SDK's authenticated
         # retry includes request_state and the same arguments, so it may resolve again.
         if q["state"] == "WAITING_USER" and not ctx.request_state:
+            if effective == "native":
+                return native_question(q, analysis, already_pending=True)
             return describe(q, analysis=analysis)
         if q["state"] in {"UNSUPPORTED", "FAILED"}:
             result = describe(q, "ELICITATION_UNSUPPORTED" if q["state"] == "UNSUPPORTED" else "RPC_ERROR")
@@ -192,14 +203,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
                 if q["state"] in {"UNSUPPORTED", "FAILED"}:
                     result["next"] = "Explicitly interaction_reopen before retrying; the question ended."
                 return result
-        effective = channel
-        if effective == "auto" and question_channel in {"native", "text"}:
-            effective = question_channel
         if effective == "native":
-            result = describe(q, analysis=analysis)
-            result["status"] = "NATIVE_QUESTION_REQUIRED"
-            result["next"] = "Use the host native question tool once; submit the explicit reply with this question_id."
-            return result
+            return native_question(q, analysis)
         if effective == "text":
             return describe(q, "TEXT_REQUESTED", analysis=analysis)
         if not supports_form(ctx.client_capabilities):
@@ -208,9 +213,13 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         # The unique question ID pins the rendered question across multi-round retries.
         _asked_question.set(q["id"])
         timeout = _ask_timeout.get()
+        if analysis:
+            analysis = f"分析：{analysis}"
+        elif q["kind"] == "mode":
+            analysis = f"扫描：{scan_workspace(state.store.root)[:150]}"
         message = MESSAGES[q["kind"]] + " question_id=" + q["id"]
-        if analysis and analysis.strip():
-            message += "\n分析：" + analysis.strip()[:600]
+        if analysis:
+            message += "\n" + analysis
         if timeout and timeout > 0:
             message += f"\n{timeout:g} 秒未选择按推荐项继续。"
         return Elicit(message, schema_for(q, analysis, timeout))

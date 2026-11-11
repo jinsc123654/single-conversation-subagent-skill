@@ -10,7 +10,7 @@ Skill 管策略；本地 Python MCP 管确定性状态、交互与证据；宿�
 
 宿主原生提问 > 声明支持的 MCP 表单 > 文本回退。只使用一路 UI；失败后再明确切换。工具不可见不是默认模式；TEXT_FALLBACK_REQUIRED 必须完整显示选项并结束当轮等待。无法可靠观察 UI 时记 UI_NOT_OBSERVABLE，不宣称已弹窗。
 
-会话绑定真实宿主 conversation ID + 客户端命名空间 + canonical 项目根。无 ID 时新建临时 session_id 并保留在当前对话；不从 cwd/PID/连接 ID 推断对话。新对话重新确认，handoff 只续工作包。
+会话绑定真实宿主 conversation ID + 客户端命名空间 + canonical 项目根。无 ID 时新建临时 session_id 并保留在当前对话；补登记或重连时，用原项目绝对路径、原 client_name 和 resume_session_id 恢复；不从 cwd/PID/连接 ID 推断对话。新对话重新确认，handoff 只续工作包。
 
 问题按 NOT_ASKED → REQUESTED → WAITING_USER → CONFIRMED；另有 DECLINED/CANCELLED/TIMED_OUT/UNSUPPORTED/FAILED。每题唯一 question_id；重复同值提交幂等，终态不同值冲突；显式 reopen 后新 ID，旧回复隔离。UNSUPPORTED/FAILED 可通过文本提交明确选择；取消/拒绝后先等用户要求重开。真实原生失败可登记 unsupported/error 后重开，用下一路交互；不得并行弹框。
 
@@ -58,7 +58,7 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 
 ## Codex 审查联动（标准执行 / 长任务，本地装了 codex-review 时）
 
-前置条件：`codex-review` 的注册状态可确认已装（本会话技能列表里确定有；状态未知时查 `~/.agents/skills/codex-review/SKILL.md` 或项目 `.zcode/skills/codex-review/SKILL.md`，仍未知按未装处理）。满足时，在同一对话首次标准/长任务的验证范围问完后紧接着追加一问：**收尾是否用 Codex 独立审查？** 后续任务沿用该答案，不重问。用户已明确要求 Codex 审查时不问此问，直接按 `codex-review` 技能执行，不被默认“不使用”覆盖。
+前置条件：`codex-review` 的注册状态可确认已装（本会话技能列表或等效宿主证据确定可用；磁盘文件仅证明已安装；无法确认可用时记 unknown）。满足时，在同一对话首次标准/长任务的验证范围问完后紧接着追加一问：**收尾是否用 Codex 独立审查？** 后续任务沿用该答案，不重问。用户已明确要求 Codex 审查时不问此问，直接按 `codex-review` 技能执行，不被默认“不使用”覆盖。
 
 | 选项 | 时机 | 耗时 | 资源 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -68,7 +68,7 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 - 未回复不采用推荐项。仅认可宿主真实可观测的超时结果与事先告知的配置策略；本版服务只记录 TIMED_OUT，不自动确认。文本回退结束当轮等待下一轮输入；取消/拒绝/工具失败不授权继续。
 - 迟到回复绑定所问问题（四选一/验证范围/Codex 联动）、工作包与修订号；先核对当前状态，只调整尚未执行的部分，并报告已发生的操作。选“使用”且尚未收尾的，收尾时执行；收尾已完成的标 `NOT_RUN`，要补审走新修订。
 - 同一工作包/修订只审一次；已被启动的审查者不再启动新的 Codex 会话；引用或讨论 `codex-review` 技能名不等于调用它。
-- 注册状态确定没有 `codex-review` 时跳过此问，不算跳过提问；未知状态不声明已装。
+- 当前会话明确未注册时显示未注册并跳过；未知时显示尚未确认可用并跳过。补登记成功后，只询问尚未确认的审查选择。
 - Codex 是外部只读审查者，不是子 Agent；只能由主对话启动，子 Agent 不得启动。审查期间不改源码、不构建/烧录、不碰串口/板卡，结论只认 Codex 最终消息里的 ACCEPT/REJECT。
 
 ## 工作流程

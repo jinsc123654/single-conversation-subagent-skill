@@ -38,17 +38,19 @@ class Roots:
             self.states[root] = State(Store(root))
         return self.states[root]
 
-    def open(self, project_root, client_name, conversation_id, review_registration, explicit_skip):
+    def open(self, project_root, client_name, conversation_id, review_registration, explicit_skip,
+             *, resume_session_id=None):
         root = self.resolve(project_root)
         state = self.state(root)
-        result = state.open(str(root), client_name, conversation_id, review_registration, explicit_skip)
+        result = state.open(str(root), client_name, conversation_id, review_registration, explicit_skip,
+                            resume_session_id=resume_session_id)
         self.sessions[result["id"]] = root
         return root, state, result
 
     def for_session(self, session_id):
         root = self.sessions.get(session_id)
         if root is None:
-            raise ScsError("SESSION_NOT_FOUND", "Call session_open again with the project root in this server process.")
+            raise ScsError("SESSION_NOT_FOUND", "Use session_open with the original conversation ID or resume_session_id and its project root.")
         return self.states[root]
 
     def _root(self, session_id):
