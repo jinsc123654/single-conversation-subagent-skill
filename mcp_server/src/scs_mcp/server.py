@@ -21,6 +21,7 @@ from .storage import Store
 
 
 _asked_question = ContextVar("scs_question", default=None)
+_ask_timeout = ContextVar("scs_ask_timeout", default=None)
 
 
 class SafeServer(MCPServer):
@@ -125,7 +126,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         return state.get(session_id)
 
     async def prepare(session_id: str, kind: str, recommendation: list[str], channel: str,
-                      question_id: str | None, ctx: Context) -> dict | Elicit:
+                      question_id: str | None, ctx: Context,
+                      analysis: str | None = None) -> dict | Elicit:
         if question_id:
             q = state.question(session_id, question_id)
             if q["kind"] != kind or not q["current"]:
@@ -141,7 +143,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         # A second independent call must not open another UI. The SDK's authenticated
         # retry includes request_state and the same arguments, so it may resolve again.
         if q["state"] == "WAITING_USER" and not ctx.request_state:
-            return describe(q)
+            return describe(q, analysis=analysis)
         if q["state"] in {"UNSUPPORTED", "FAILED"}:
             result = describe(q, "ELICITATION_UNSUPPORTED" if q["state"] == "UNSUPPORTED" else "RPC_ERROR")
             result["next"] = "Explicitly interaction_reopen before retrying; the question ended."
@@ -159,18 +161,24 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         if effective == "auto" and question_channel in {"native", "text"}:
             effective = question_channel
         if effective == "native":
-            result = describe(q)
+            result = describe(q, analysis=analysis)
             result["status"] = "NATIVE_QUESTION_REQUIRED"
             result["next"] = "Use the host native question tool once; submit the explicit reply with this question_id."
             return result
         if effective == "text":
-            return describe(q, "TEXT_REQUESTED")
+            return describe(q, "TEXT_REQUESTED", analysis=analysis)
         if not supports_form(ctx.client_capabilities):
-            return describe(q, "ELICITATION_UNSUPPORTED")
+            return describe(q, "ELICITATION_UNSUPPORTED", analysis=analysis)
         # SDK handles legacy server callbacks and 2026-07-28 InputRequiredResult.
         # The unique question ID pins the rendered question across multi-round retries.
         _asked_question.set(q["id"])
-        return Elicit(MESSAGES[q["kind"]] + " question_id=" + q["id"], schema_for(q))
+        timeout = _ask_timeout.get()
+        message = MESSAGES[q["kind"]] + " question_id=" + q["id"]
+        if analysis and analysis.strip():
+            message += "\n分析：" + analysis.strip()[:600]
+        if timeout and timeout > 0:
+            message += f"\n{timeout:g} 秒未选择按推荐项继续。"
+        return Elicit(message, schema_for(q, analysis, timeout))
 
     # Local closure annotations are deliberately evaluated (no future annotations):
     # SDK get_type_hints must see this exact resolver object, not an unresolved name.
@@ -181,13 +189,15 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         answer: Annotated[ElicitationResult[BaseModel], Resolve(prepare)],
         channel: Literal["auto", "native", "text"] = "auto",
         question_id: str | None = None,
+        analysis: str | None = None,
     ) -> dict[str, Any]:
         """Ask once using the configured host channel; an explicit native/text overrides it.
 
         Supply one recommended path: mode=[quick|standard|long|investigate],
         verification=[smoke,targeted,...] or [none] or [method-only], codex_review=[no].
         channel=auto follows SCS_QUESTION_CHANNEL; use channel=native/text only
-        for an explicit route. Never open two channels at once. question_id pins
+        for an explicit route. analysis is a short rationale shown with the
+        question (no secrets). Never open two channels at once. question_id pins
         a known question during a resumed call.
         """
         if answer.action == "accept" and isinstance(answer.data, dict):
@@ -213,17 +223,24 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         kind: Literal["mode", "verification", "codex_review"],
         recommendation: list[str],
         timeout_seconds: float = 15.0,
+        analysis: str | None = None,
     ) -> dict[str, Any]:
         """Ask through the MCP form with a server-side deadline.
 
         On timeout the question is marked TIMED_OUT and the recommendation is
         returned so the main conversation can continue deterministically. Hosts
         without form support get the normal TEXT_FALLBACK_REQUIRED description.
+        analysis is a short rationale shown in the form; the form also carries
+        the recommendation marker, deadline, and question_id.
         """
         import anyio
         from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
-        outcome = await prepare(session_id, kind, recommendation, "auto", None, ctx)
+        token = _ask_timeout.set(timeout_seconds)
+        try:
+            outcome = await prepare(session_id, kind, recommendation, "auto", None, ctx, analysis)
+        finally:
+            _ask_timeout.reset(token)
         if not isinstance(outcome, Elicit):
             return outcome
         qid = _asked_question.get()
@@ -231,7 +248,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             raise ScsError("QUESTION_NOT_FOUND", "No question was prepared for the form.")
         if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
             q = state.question(session_id, qid)
-            return describe(q, "MODERN_NO_BACKCHANNEL")
+            return describe(q, "MODERN_NO_BACKCHANNEL", analysis=analysis)
         message = outcome.message
         if timeout_seconds is not None and timeout_seconds > 0:
             message += f"；{timeout_seconds:g} 秒后按推荐项继续。"

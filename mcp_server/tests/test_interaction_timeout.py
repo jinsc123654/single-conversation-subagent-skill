@@ -1,5 +1,6 @@
 """Host question channels and the server-side form deadline."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -232,3 +233,43 @@ async def test_rpc_error_marks_question_failed(tmp_path):
         snapshot = (await client.call_tool("session_get", {"session_id": opened["id"]})).structured_content
         failed = [q for q in snapshot["questions"] if q["id"] == data["question_id"]]
         assert failed and failed[0]["state"] == "FAILED"
+
+
+async def test_analysis_and_title_reach_the_form(tmp_path):
+    captured = {}
+
+    async def capture(_context, params):
+        captured["params"] = params
+        return ElicitResult(action="accept", content={"choice": "standard"})
+
+    async with Client(
+        server_params(tmp_path, "mcp", "zcode"),
+        mode="legacy",
+        elicitation_callback=capture,
+        read_timeout_seconds=10,
+    ) as client:
+        opened = await open_session(client)
+        result = await client.call_tool(
+            "interaction_ask",
+            {
+                "session_id": opened["id"],
+                "kind": "mode",
+                "recommendation": ["standard"],
+                "timeout_seconds": 15,
+                "analysis": "推荐 standard：范围小，先做冒烟。",
+            },
+        )
+        assert result.structured_content["status"] == "CONFIRMED"
+        params = captured["params"]
+        if isinstance(params, dict):
+            schema = params.get("requested_schema") or params.get("requestedSchema")
+        else:
+            schema = getattr(params, "requested_schema", None) or getattr(params, "requestedSchema", None)
+        if hasattr(schema, "model_dump"):
+            schema = schema.model_dump()
+        text = json.dumps(schema, ensure_ascii=False)
+        assert "请选择本对话执行模式" in text
+        assert "分析：推荐 standard" in text
+        assert "standard=标准执行（推荐）" in text
+        assert "15 秒未选择按推荐项继续" in text
+        assert "question_id=" in text

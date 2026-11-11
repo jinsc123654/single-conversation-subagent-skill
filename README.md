@@ -116,7 +116,7 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
 }
 ```
 
-ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。`--host zcode` 默认 `SCS_QUESTION_CHANNEL=mcp`，四选一/验证/审查用 `interaction_ask(timeout_seconds=15)`（仅 legacy form）；无 form 或 modern 无回通道时问题保持 `WAITING_USER`，用同一 `question_id` 直接 `interaction_submit`。ZCode 原生 AskUserQuestion 自动解析是 60 秒隐藏 + 5 分钟截止，不是 15 秒。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
+ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。`--host zcode` 默认 `SCS_QUESTION_CHANNEL=mcp`，四选一/验证/审查用 `interaction_ask(timeout_seconds=15)`（仅 legacy form）；MCP form 显示中文 title、`analysis` 推荐理由、推荐项标记、15 秒截止和 question_id。无 form 或 modern 无回通道时问题保持 `WAITING_USER`，用同一 `question_id` 直接 `interaction_submit`。ZCode 原生 AskUserQuestion 自动解析是 60 秒隐藏 + 5 分钟截止，不是 15 秒。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
 
 混合安装器生成的示例使用稳定的 runtime/launcher.py 入口，无需依赖仓库位置。Codex 配置格式参考 [官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 并与本机 CLI help 核对；Claude Code JSON/stdio 参考 [官方 MCP 文档](https://code.claude.com/docs/en/mcp)。
 
@@ -175,8 +175,8 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 | 工具 | 用途 |
 | --- | --- |
 | session_open / session_get | 绑定宿主真实对话、返回 `question_channel`/`host`、已确认选择与未决问题；`project_root` 可省略 |
-| interaction_request / interaction_submit / interaction_reopen | 原生记账、兼容 MCP 提问、文本回退、幂等提交与显式重试；按 host channel 路由 |
-| interaction_ask | `mcp` channel 的 legacy form 服务端 `timeout_seconds`（默认 15s）；超时返回 `TIMED_OUT` + 推荐项；modern/无 form 保持 `WAITING_USER`，同一 `question_id` 直接 submit |
+| interaction_request / interaction_submit / interaction_reopen | 原生记账、兼容 MCP 提问、文本回退、幂等提交与显式重试；按 host channel 路由；`analysis` 显示在文本/原生提问 |
+| interaction_ask | `mcp` channel 的 legacy form 服务端 `timeout_seconds`（默认 15s）；`analysis`/中文 title/推荐标记/15s/question_id 显示在 form；超时返回 `TIMED_OUT` + 推荐项；modern/无 form 保持 `WAITING_USER`，同一 `question_id` 直接 submit |
 | diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
 | work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告 |
 | evidence_verify | 文件、路径、非空、内容与测试结果结构验证；不替代验收 |
