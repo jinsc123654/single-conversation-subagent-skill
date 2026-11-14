@@ -11,6 +11,7 @@ def project(root, schema=2):
     con.executescript('''CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE sessions(id TEXT PRIMARY KEY,client TEXT,mode TEXT,verification TEXT,codex_review INTEGER,review_registration TEXT,created_at TEXT);
     CREATE TABLE work_packages(id TEXT PRIMARY KEY,session_id TEXT,revision INTEGER,version INTEGER,state TEXT,data TEXT,docs_root TEXT,created_at TEXT);
+    CREATE TABLE work_attempts(id TEXT PRIMARY KEY,package_id TEXT,revision INTEGER,subtask_id TEXT,attempt_no INTEGER,state TEXT,host_agent_id TEXT,controller_session TEXT,input_snapshot TEXT,resources TEXT,result_state TEXT,result_data TEXT,created_at TEXT,updated_at TEXT,last_observed_at TEXT);
     CREATE TABLE events(seq INTEGER PRIMARY KEY,at TEXT,tool TEXT,event TEXT,error_code TEXT);''')
     con.execute('INSERT INTO metadata VALUES(?,?)', ('project_root', str(root)))
     con.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?,?)', ('session-one','fixture-host','long','["full"]',0,'registered','2026-11-10T00:00:00Z'))

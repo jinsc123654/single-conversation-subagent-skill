@@ -1,4 +1,4 @@
-# single-conversation-subagent 2.6.0
+# single-conversation-subagent 2.7.0
 
 单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。
 
@@ -180,9 +180,23 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 每页 `manual:begin / manual:end` 标记之间可写手工批注，刷新原样保留。生成区域被修改、标记异常或目标文件不属于本生成器时拒绝覆盖。单文件原子替换和内容前置检查防止常见并发覆盖；服务进程之间串行，外部编辑器不受硬锁约束。中断后可重试刷新自身的部分生成结果。既有源记忆不被投影视图覆盖，旧目录记录只链接/标明库外位置，不迁移。
 
-“已完成子任务”表示已报告通过且本次核对证据未变；工作包仍需主对话最终验收。旧版只保留当前工作包的数据库升级时，仅回填实际当前修订；不虚构早期历史。迁移升级到 schema 2，原会话、工作包、证据保持不变；旧版 2.0 程序不能读取 schema 2，升级前应备份状态，回滚时恢复对应备份。
+“已完成子任务”表示已报告通过且本次核对证据未变；工作包仍需主对话最终验收。旧版只保留当前工作包的数据库升级时，仅回填实际当前修订；不虚构早期历史。迁移升级到 schema 3，原会话、工作包、证据保持不变；旧版程序不能读取更高 schema，升级前应备份状态，回滚时恢复对应备份。
 
 工作包有终态：`COMPLETED`（主对话验收通过）和 `ABANDONED`（重复、被取代或放弃）。关闭必须带 `close_reason`，服务写入 `closed_at`、`closed_by_session` 和事件记录；关闭后不可修改，后续工作新建工作包。桌面管理器默认隐藏终态，可勾选“显示已关闭”；长期未更新的非终态显示“滞留 N 天”。
+
+## 多子 Agent 并发（2.7.0）
+
+长任务可在同一项目内并发多个执行子 Agent：同一 WP 的多个就绪子任务，或同一项目内的多个 WP。主对话负责编排；MCP 只做 DAG 校验、原子资源占用、attempt 状态和证据记录，不创建/调度 Agent。
+
+- 子任务新增 `depends_on`、`resources`（`file:` / `device:` / `serial:` / `programmer:`，`read` / `write`）和 `required`；依赖必须已核验 `PASS` / `SUBSTITUTED`。
+- 每次执行先 `work_attempt_prepare` 原子占用完整资源集合并建立 attempt，成功后才启动宿主 Agent；返回 `attempt_id` 和 `evidence_dir`。
+- 生命周期 `PREPARED → LAUNCHING → RUNNING → DRAINING → ENDED`，另有 `UNKNOWN`；`UNKNOWN` 不释放资源、不自动重派。
+- 结果用 `work_attempt_update(state="ENDED", result=...)` 登记；主对话串行提交，`operation_id` 保证重试幂等。
+- 文件目录覆盖后代；R/R 可并行，R/W、W/W 冲突；资源集合原子获取；TTL 到期不等于进程停止。
+- `REVIEW_READY` / `COMPLETED` / `ABANDONED` / 新修订 / handoff 前必须有静止屏障；有活动 attempt 时拒绝关闭或直接写结果。
+- 默认并发上限 4，无宿主并发证据时取 1；首版不支持跨项目联合调度和设备共享域。
+
+SQLite 升级到 schema 3：新增 `work_attempts`、`work_operations`，`leases` 增加 `mode/attempt_id/package_id`；旧库自动迁移，旧工作包不虚构历史 attempt。
 
 完整用法、冲突恢复和数据边界见 [Obsidian 视图说明](single-conversation-subagent/references/obsidian.md)。当前实现不自动修改全局库注册列表，创建 .obsidian 不代表已注册或已打开；Obsidian GUI/URI 真正唤起仍需在本机手工验证。
 
@@ -196,6 +210,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 | diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
 | work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告；`COMPLETED`/`ABANDONED` 终态需 `close_reason` |
 | work_package_close | 本地管理器/操作员关闭滞留或重复工作包；从包内读取 owner session，仍校验版本、终态和原因，保留审计 |
+| work_attempt_prepare / update / list | 并发执行 attempt：原子占资源、生命周期与结果登记、查询；不创建 Agent |
 | evidence_verify | 文件、路径、非空、内容与测试结果结构验证；不替代验收 |
 | resource_acquire / release | 带 TTL/owner/token 的建议性文件/设备租约 |
 | handoff_export / resume | 带摘要哈希的本地审计交接，不复制会话确认 |
@@ -203,7 +218,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 只读资源 `scs://session/{id}`、`scs://work-package/{id}`。完整参数、错误码、使用与恢复示例见 [MCP 用法](single-conversation-subagent/references/mcp.md)。
 
-会话不以 cwd、PID、MCP 连接 ID 识别；`session_open` 把配置 host 与 client_name 一起做结构化 SHA-256 命名空间（存储为 `h<sha256>`，返回 `client_label` 供阅读），不同宿主使用同一 conversation ID 也不会共用会话；`project_root` 是任务项目根，必须在配置工作区内，每个项目独立 `<项目>/.scs`；无可靠 ID 则显式临时会话。SQLite schema 2、WAL、事务、busy timeout；多进程使用相同项目 DB，工作包更新必须携带 expected_version。数据库路径及伴随文件不得为符号链接；证据读取通过目录描述符逐级拒绝符号链接和越界。状态目录不是进程级沙箱，不能防止同一用户的恶意外部进程替换整个目录；本服务不适合不互信多用户。
+会话不以 cwd、PID、MCP 连接 ID 识别；`session_open` 把配置 host 与 client_name 一起做结构化 SHA-256 命名空间（存储为 `h<sha256>`，返回 `client_label` 供阅读），不同宿主使用同一 conversation ID 也不会共用会话；`project_root` 是任务项目根，必须在配置工作区内，每个项目独立 `<项目>/.scs`；无可靠 ID 则显式临时会话。SQLite schema 3、WAL、事务、busy timeout；多进程使用相同项目 DB，工作包更新必须携带 expected_version。数据库路径及伴随文件不得为符号链接；证据读取通过目录描述符逐级拒绝符号链接和越界。状态目录不是进程级沙箱，不能防止同一用户的恶意外部进程替换整个目录；本服务不适合不互信多用户。
 
 Markdown 由主对话同步：docs-root 依次为 00_doc、00_docs、docs、doc，均无则创建 docs。保持 `<docs-root>/agent/AGENT_PROJECT.md`、`AGENT_COORDINATION.md`、`evidence/WP-<id>/R<rev>/<subtask-id>/` 及 `04_test/report/`。服务只初始化缺失记忆文件，绝不覆盖既有内容；所有工作包变更提示 record_sync_required。MCP 断开时纯 Skill 维护文件；恢复前显式核对，当前不提供自动导入器或自动覆盖。
 

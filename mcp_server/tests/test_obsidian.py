@@ -240,10 +240,14 @@ def test_migrate_schema1_preserves_sessions_packages_and_only_current_revision(p
         sessions = con.execute("SELECT * FROM sessions").fetchall()
     migrated = Store(store.root)
     with migrated.transaction() as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 3
         assert [tuple(r) for r in con.execute("SELECT * FROM work_packages")] == original
         assert [tuple(r) for r in con.execute("SELECT * FROM sessions")] == sessions
         assert [r[0] for r in con.execute("SELECT revision FROM work_package_revisions")] == [3]
+        lease_columns = {row[1] for row in con.execute("PRAGMA table_info(leases)")}
+        assert {"mode", "attempt_id", "package_id"} <= lease_columns
+        tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"work_attempts", "work_operations"} <= tables
     out = ProjectView(migrated).refresh(sid)
     page = store.root / out["view_root"] / "work-packages" / (p["id"] + ".md")
     assert "早期修订没有结构化快照" in page.read_text()

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from . import __version__
 from .errors import ScsError
-from .models import SubtaskDefinition, SubtaskResult
+from .models import AttemptResult, SubtaskDefinition, SubtaskResult, WorkPackageDefinition
 from .interaction import MESSAGES, choice_code, describe, native_question, schema_for, supports_form
 from .obsidian import ProjectView
 from .roots import Roots
@@ -379,20 +379,62 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
     async def work_package_update(session_id: str, package_id: str, expected_version: int,
                                   state: Literal["PENDING", "IN_PROGRESS", "REVIEW_READY", "BLOCKED", "COMPLETED", "ABANDONED"] | None = None,
                                   results: list[SubtaskResult] | None = None, new_revision: bool = False,
-                                  close_reason: str | None = None) -> dict[str, Any]:
+                                  close_reason: str | None = None,
+                                  definition: WorkPackageDefinition | None = None,
+                                  operation_id: str | None = None) -> dict[str, Any]:
         """Update with a version precondition. COMPLETED/ABANDONED are terminal and need close_reason.
 
         results=[{id,status:PASS|FAIL|BLOCKED|NOT_RUN|SUBSTITUTED,
         evidence:[{path,sha256,required_content?}]}]. A PASS report needs reverified
         unchanged evidence. new_revision resets results and allocates fresh evidence
-        directories; it preserves every earlier file. COMPLETED requires REVIEW_READY;
-        ABANDONED may close a pending, active or blocked package. Closed packages are
-        immutable; start a new package for follow-up work.
+        directories; it preserves every earlier file. Supplying definition with
+        new_revision replaces the DAG, scope and acceptance after revalidation.
+        Direct results are refused while attempts are active; end the attempt instead.
+        COMPLETED requires REVIEW_READY; ABANDONED may close a pending, active or
+        blocked package. operation_id makes a retry return the original receipt.
         """
         result = roots.work(session_id).update(session_id, package_id, expected_version, state,
-                             [r.model_dump() for r in results] if results is not None else None, new_revision,
-                             close_reason)
+                             [r.model_dump() for r in results] if results is not None else None,
+                             new_revision, close_reason,
+                             definition.model_dump() if definition is not None else None, operation_id)
         return refresh_enabled_view(session_id, result)
+
+    @mcp.tool(structured_output=True)
+    async def work_attempt_prepare(session_id: str, package_id: str, expected_version: int,
+                                   subtask_id: str, host_agent_id: str | None = None,
+                                   ttl_seconds: float = 120) -> dict[str, Any]:
+        """Atomically reserve resources and register an execution attempt before launching an agent.
+
+        Dependencies must already have a verified PASS/SUBSTITUTED result and no
+        active attempt. Returns attempt_id, evidence_dir and lease tokens; launch the
+        host Agent only after this returns. The work package version is unchanged.
+        """
+        result = roots.work(session_id).prepare_attempt(session_id, package_id, expected_version,
+                                                        subtask_id, host_agent_id, ttl_seconds)
+        return refresh_enabled_view(session_id, result)
+
+    @mcp.tool(structured_output=True)
+    async def work_attempt_update(session_id: str, attempt_id: str, expected_version: int,
+                                  state: Literal["PREPARED", "LAUNCHING", "RUNNING", "DRAINING", "ENDED", "UNKNOWN"] | None = None,
+                                  result: AttemptResult | None = None,
+                                  host_agent_id: str | None = None,
+                                  operation_id: str | None = None) -> dict[str, Any]:
+        """Advance an attempt lifecycle or end it with a result.
+
+        Use LAUNCHING/RUNNING to bind the host agent, UNKNOWN when the outcome is
+        lost, and ENDED with result when activity is confirmed stopped. ENDED writes
+        the subtask report and increments the package version; PASS needs evidence
+        under the attempt directory. operation_id makes retries idempotent.
+        """
+        updated = roots.work(session_id).update_attempt(session_id, attempt_id, expected_version,
+                                                        state, result.model_dump() if result is not None else None,
+                                                        host_agent_id, operation_id)
+        return refresh_enabled_view(session_id, updated)
+
+    @mcp.tool(structured_output=True)
+    async def work_attempt_list(session_id: str, package_id: str, revision: int | None = None) -> dict[str, Any]:
+        """List execution attempts and their lifecycle/result for one package (read-only)."""
+        return roots.work(session_id).list_attempts(session_id, package_id, revision)
 
     @mcp.tool(structured_output=True)
     async def work_package_close(project_root: str, package_id: str, expected_version: int,

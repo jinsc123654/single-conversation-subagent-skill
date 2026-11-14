@@ -232,6 +232,18 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(self.window.packages.item(0, 2).text(), "已放弃")
         self.assertIn("superseded", self.window.packages.item(0, 2).toolTip())
 
+    def test_attempt_tab_and_close_guard(self):
+        with sqlite3.connect(self.root / ".scs/state.sqlite3") as con:
+            con.execute("INSERT INTO work_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        ("A-demo", "WP-demo", 1, "T1", 1, "RUNNING", "agent-1", "session-one",
+                         "{}", "[]", None, None, "2026-11-14T00:00:00Z", "2026-11-14T00:00:00Z",
+                         "2026-11-14T00:00:00Z"))
+        self.load()
+        self.assertEqual(self.window.attempts.rowCount(), 1)
+        self.assertEqual(self.window.packages.item(0, 4).text(), "运行 1 · 未知 0")
+        self.window.packages.selectRow(0)
+        self.assertFalse(self.window.close_button.isEnabled())
+
     def test_stale_open_package_shows_badge(self):
         with sqlite3.connect(self.root / ".scs/state.sqlite3") as con:
             con.execute("UPDATE work_packages SET created_at='2026-10-01T00:00:00+00:00' WHERE id='WP-demo'")

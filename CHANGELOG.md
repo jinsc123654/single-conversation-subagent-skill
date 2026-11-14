@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.7.0 — 2026-11-15
+
+- 长任务多子 Agent 并发（首版）：子任务新增 `depends_on` / `resources` / `required`，创建与修订时校验 DAG；支持同项目包内与跨包并发。
+- SQLite schema 3：新增 `work_attempts`（一次执行实例）与 `work_operations`（幂等回执）；`leases` 增加 `mode` / `attempt_id` / `package_id`；v1/v2 自动迁移，旧工作包不虚构历史 attempt。
+- MCP 新增 `work_attempt_prepare` / `work_attempt_update` / `work_attempt_list`：原子资源集合、层级路径冲突、R/W 与 W/W 互斥、attempt 生命周期、`UNKNOWN` 资源隔离、`operation_id` 幂等，工具数 21。
+- 静止屏障：`REVIEW_READY` / `COMPLETED` / `ABANDONED` / 新修订 / handoff 前禁止活动 attempt；有活动 attempt 时拒绝直接写子任务结果。
+- 桌面管理器：工作包“执行”列、执行实例页、运行/未知计数、活动 attempt 时禁用关闭；Obsidian 新增 `60_执行实例.md` 和工作包 attempt 段。
+- 测试：154 项 MCP、35 项桌面全部通过。
+- 首版范围：同项目包内/跨包。跨项目设备共享域、活动 handoff 转移、worktree 自动集成留待后续。
+
 ## 2.6.0 — 2026-11-14
 
 - 工作包新增终态 `COMPLETED`（主对话验收通过）和 `ABANDONED`（重复、被取代或放弃）；关闭必须带 `close_reason`，写入 `closed_at`/`closed_by_session` 和事件，关闭后不可修改。`PENDING/IN_PROGRESS/BLOCKED` 可放弃，`REVIEW_READY` 可完成或放弃。

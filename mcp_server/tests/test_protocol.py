@@ -113,10 +113,18 @@ async def test_independent_stdio_obsidian_view_auto_refresh(mode, tmp_path):
         out = await call("project_view_refresh", session_id=sid, initialize_vault=True)
         assert out["view_initialized"] and out["local_config_present"]
         tools = await client.list_tools()
-        assert len(tools.tools) == 18
+        assert len(tools.tools) == 21
         p = await call("work_package_create", session_id=sid, goal="View stdio probe", allowed_files=["src"], acceptance=["live view"], request_key="view",
             subtasks=[{"id":"T1", "kind":"analyze", "allowed_files":["src"], "acceptance":["view report"]}])
         assert p["view_update"]["status"] == "OK"
-        await call("work_package_update", session_id=sid, package_id=p["id"], expected_version=1, state="IN_PROGRESS")
+        p = await call("work_package_update", session_id=sid, package_id=p["id"], expected_version=1, state="IN_PROGRESS")
         assert not (await call("project_view_info", session_id=sid))["snapshot_stale"]
+        attempt = await call("work_attempt_prepare", session_id=sid, package_id=p["id"],
+                             expected_version=p["version"], subtask_id="T1")
+        assert attempt["attempt"]["state"] == "PREPARED" and attempt["leases"]
+        ended = await call("work_attempt_update", session_id=sid, attempt_id=attempt["attempt"]["id"],
+                           expected_version=p["version"], state="ENDED", result={"status": "NOT_RUN"})
+        assert ended["version"] == p["version"] + 1 and ended["task_status"] == "NOT_RUN"
+        listed = await call("work_attempt_list", session_id=sid, package_id=p["id"])
+        assert len(listed["attempts"]) == 1
         assert (tmp_path / out["overview_path"]).exists()

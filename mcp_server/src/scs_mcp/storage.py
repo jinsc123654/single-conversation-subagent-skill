@@ -1,4 +1,4 @@
-"""SQLite schema v2 (migrates v1 without losing records). One connection per transaction; all writes serialize."""
+"""SQLite schema v3 (migrates v1/v2 without losing records). One connection per transaction; all writes serialize."""
 
 import json
 import os
@@ -52,7 +52,32 @@ CREATE TABLE IF NOT EXISTS work_package_revisions(
 );
 CREATE TABLE IF NOT EXISTS leases(
  resource TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES sessions(id),
- token TEXT UNIQUE NOT NULL, expires REAL NOT NULL
+ token TEXT UNIQUE NOT NULL, expires REAL NOT NULL,
+ mode TEXT NOT NULL DEFAULT 'write', attempt_id TEXT, package_id TEXT
+);
+CREATE TABLE IF NOT EXISTS work_attempts(
+ id TEXT PRIMARY KEY,
+ package_id TEXT NOT NULL REFERENCES work_packages(id),
+ revision INTEGER NOT NULL,
+ subtask_id TEXT NOT NULL,
+ attempt_no INTEGER NOT NULL,
+ state TEXT NOT NULL,
+ host_agent_id TEXT,
+ controller_session TEXT NOT NULL REFERENCES sessions(id),
+ input_snapshot TEXT NOT NULL,
+ resources TEXT NOT NULL,
+ result_state TEXT,
+ result_data TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ last_observed_at TEXT,
+ UNIQUE(package_id,revision,subtask_id,attempt_no)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS active_attempt ON work_attempts(package_id,revision,subtask_id)
+ WHERE state!='ENDED';
+CREATE TABLE IF NOT EXISTS work_operations(
+ id TEXT PRIMARY KEY, tool TEXT NOT NULL, session_id TEXT,
+ payload TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS handoffs(
  id TEXT PRIMARY KEY, package_id TEXT NOT NULL REFERENCES work_packages(id),
@@ -79,15 +104,25 @@ class Store:
         try:
             con.execute("PRAGMA journal_mode=WAL")
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise ScsError("SCHEMA_UNSUPPORTED", "Database was created by a newer server.")
             # executescript is atomic via an explicit transaction in the script.
             con.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + """
 INSERT OR IGNORE INTO work_package_revisions
 SELECT id,revision,version,state,data,docs_root,strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM work_packages;
-PRAGMA user_version=2; COMMIT;
+COMMIT;
 """)
             with con:
+                # v2 -> v3: leases gain mode/attempt ownership; attempts and
+                # operation receipts are additive tables. Existing rows remain.
+                columns = {row[1] for row in con.execute("PRAGMA table_info(leases)")}
+                if "mode" not in columns:
+                    con.execute("ALTER TABLE leases ADD COLUMN mode TEXT NOT NULL DEFAULT 'write'")
+                if "attempt_id" not in columns:
+                    con.execute("ALTER TABLE leases ADD COLUMN attempt_id TEXT")
+                if "package_id" not in columns:
+                    con.execute("ALTER TABLE leases ADD COLUMN package_id TEXT")
+                con.execute("PRAGMA user_version=3")
                 stored = con.execute("SELECT value FROM metadata WHERE key='project_root'").fetchone()
                 if stored and stored[0] != str(self.root):
                     raise ScsError("PROJECT_MISMATCH", "State belongs to another canonical project root.")

@@ -91,7 +91,7 @@ def database(root, *, write=False, timeout=2):
             con.execute("PRAGMA query_only=ON")
         con.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         version = con.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise ValueError("状态库版本不受支持；管理器不会迁移它")
         record = con.execute("SELECT value FROM metadata WHERE key='project_root'").fetchone()
         if not record or record[0] != str(root):
@@ -138,18 +138,39 @@ def snapshot(root):
             result.update(database="可读取", schema=con.execute("PRAGMA user_version").fetchone()[0])
             result["sessions"] = [dict(r) for r in con.execute(
                 "SELECT id,client,mode,verification,codex_review,review_registration,created_at FROM sessions ORDER BY created_at DESC LIMIT 200")]
+            attempts_by_package = {}
+            has_attempts = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_attempts'").fetchone()
+            if has_attempts:
+                for attempt in con.execute(
+                        "SELECT id,package_id,revision,subtask_id,attempt_no,state,host_agent_id,result_state,"
+                        "updated_at,last_observed_at,resources FROM work_attempts ORDER BY created_at,attempt_no LIMIT 2000"):
+                    attempts_by_package.setdefault(attempt["package_id"], []).append({
+                        "id": attempt["id"], "revision": attempt["revision"],
+                        "subtask_id": attempt["subtask_id"], "attempt_no": attempt["attempt_no"],
+                        "state": attempt["state"], "host_agent_id": attempt["host_agent_id"],
+                        "result_state": attempt["result_state"], "updated_at": attempt["updated_at"],
+                        "last_observed_at": attempt["last_observed_at"],
+                        "resources": json.loads(attempt["resources"] or "[]")})
             rows = list(con.execute("SELECT * FROM work_packages ORDER BY created_at DESC,id LIMIT 500"))
             for row in rows:
                 data = json.loads(row["data"])
+                attempts = attempts_by_package.get(row["id"], [])
                 result["packages"].append({"id": row["id"], "goal": data["goal"], "revision": row["revision"],
                     "version": row["version"], "state": row["state"], "tasks": len(data["subtasks"]),
                     "docs_root": row["docs_root"], "session_id": row["session_id"], "created_at": row["created_at"],
                     "updated_at": data.get("updated_at"), "closed_at": data.get("closed_at"),
-                    "close_reason": data.get("close_reason")})
+                    "close_reason": data.get("close_reason"), "attempts": attempts,
+                    "active_attempts": sum(1 for item in attempts if item["state"] != "ENDED")})
             result["events"] = [dict(r) for r in con.execute(
                 "SELECT at,tool,event,error_code FROM events ORDER BY seq DESC LIMIT 40")]
-            result["counts"] = {table: con.execute("SELECT count(*) FROM " + table).fetchone()[0]
-                                for table in ("sessions", "work_packages", "events")}
+            result["counts"] = {
+                "sessions": con.execute("SELECT count(*) FROM sessions").fetchone()[0],
+                "work_packages": con.execute("SELECT count(*) FROM work_packages").fetchone()[0],
+                "events": con.execute("SELECT count(*) FROM events").fetchone()[0],
+            }
+            if has_attempts:
+                result["counts"]["attempts"] = con.execute("SELECT count(*) FROM work_attempts").fetchone()[0]
         m = manifest(root)
         if m:
             missing = sum(not inside(root, name).is_file() for name in m["files"])

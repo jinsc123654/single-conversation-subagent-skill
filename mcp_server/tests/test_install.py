@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from scs_mcp import __version__
+
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -86,7 +88,7 @@ def test_hybrid_real_runtime_and_examples(tmp_path):
     assert entry["args"][-1] == str(root)
     version = subprocess.run([sys.executable, "launcher.py", "--version"], cwd=str(runtime),
                              capture_output=True, timeout=5, shell=False)
-    assert version.stdout.strip() == b"2.4.3"
+    assert version.stdout.strip() == __version__.encode()
     assert install(tmp_path, *args).returncode == 0
     assert install(tmp_path, "--mode", "hybrid", "--check").returncode == 0
     assert not (root / ".scs").exists()  # --version/check never creates project state

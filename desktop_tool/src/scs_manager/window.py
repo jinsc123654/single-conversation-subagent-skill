@@ -20,7 +20,15 @@ from .sidebar import ProjectTree
 
 STATE_LABELS = {"PENDING": "待开始", "IN_PROGRESS": "进行中", "REVIEW_READY": "待主对话验收", "BLOCKED": "受阻",
                 "COMPLETED": "已完成", "ABANDONED": "已放弃"}
+ATTEMPT_LABELS = {"PREPARED": "已准备", "LAUNCHING": "启动中", "RUNNING": "运行中",
+                  "DRAINING": "收尾中", "ENDED": "已结束", "UNKNOWN": "失联"}
 CLOSED_STATES = {"COMPLETED", "ABANDONED"}
+
+
+def attempt_summary(package):
+    active = sum(1 for item in package.get("attempts", []) if item["state"] not in {"ENDED", "UNKNOWN"})
+    unknown = sum(1 for item in package.get("attempts", []) if item["state"] == "UNKNOWN")
+    return f"运行 {active} · 未知 {unknown}" if active or unknown else "—"
 
 
 def age_days(stamp):
@@ -221,8 +229,8 @@ class MainWindow(QMainWindow):
         self.tree.doubleClicked.connect(lambda _index: self.open_selection())
         fb.addWidget(self.tree)
         self.tabs.addTab(folders, "项目目录")
-        self.packages = QTableWidget(0, 4)
-        self.packages.setHorizontalHeaderLabels(["工作包 / 目标", "修订", "状态", "子任务数"])
+        self.packages = QTableWidget(0, 5)
+        self.packages.setHorizontalHeaderLabels(["工作包 / 目标", "修订", "状态", "子任务数", "执行"])
         self.packages.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.packages.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.packages.horizontalHeader().setStretchLastSection(True)
@@ -241,6 +249,12 @@ class MainWindow(QMainWindow):
         package_layout.addLayout(package_toolbar)
         package_layout.addWidget(self.packages, 1)
         self.tabs.addTab(package_tab, "工作包")
+        self.attempts = QTableWidget(0, 7)
+        self.attempts.setHorizontalHeaderLabels(["工作包 / 子任务", "attempt", "状态", "宿主", "结果", "最后观测", "资源"])
+        self.attempts.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.attempts.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.attempts.horizontalHeader().setStretchLastSection(True)
+        self.tabs.addTab(self.attempts, "执行实例")
         view = QWidget()
         vb = QVBoxLayout(view)
         view.setMinimumHeight(550)
@@ -313,7 +327,7 @@ class MainWindow(QMainWindow):
         self.packages.setRowCount(len(self.visible_packages))
         for row, package in enumerate(self.visible_packages):
             values = (package["id"] + "\n" + package["goal"], package["revision"],
-                      package_state_label(package), package["tasks"])
+                      package_state_label(package), package["tasks"], attempt_summary(package))
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setToolTip(package.get("close_reason") or str(value))
@@ -321,13 +335,32 @@ class MainWindow(QMainWindow):
         self.packages.resizeRowsToContents()
         self.update_close_button()
 
+    def render_attempts(self):
+        rows = []
+        for package in (self.current_snapshot or {}).get("packages", []):
+            for attempt in package.get("attempts", []):
+                rows.append((package, attempt))
+        self.attempts.setRowCount(len(rows))
+        for row, (package, attempt) in enumerate(rows):
+            resources = ", ".join(item.get("resource", "") for item in attempt.get("resources", [])) or "—"
+            values = (package["id"] + " / " + attempt["subtask_id"], attempt["id"],
+                      ATTEMPT_LABELS.get(attempt["state"], attempt["state"]),
+                      attempt.get("host_agent_id") or "—", attempt.get("result_state") or "—",
+                      attempt.get("last_observed_at") or attempt.get("updated_at") or "—", resources)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                self.attempts.setItem(row, column, item)
+        self.attempts.resizeRowsToContents()
+
     def selected_package(self):
         row = self.packages.currentRow()
         return self.visible_packages[row] if 0 <= row < len(self.visible_packages) else None
 
     def update_close_button(self):
         package = self.selected_package()
-        self.close_button.setEnabled(bool(package) and package["state"] not in CLOSED_STATES)
+        self.close_button.setEnabled(bool(package) and package["state"] not in CLOSED_STATES
+                                      and package.get("active_attempts", 0) == 0)
 
     def close_package(self):
         package = self.selected_package()
@@ -449,6 +482,7 @@ class MainWindow(QMainWindow):
             self.tree.setRootIndex(self.files.index(""))
             self.tree.setEnabled(False)
             self.packages.setRowCount(0)
+            self.attempts.setRowCount(0)
             self.sessions.clear()
             self.summary.setText("本地数据：—　工作包：—　受管视图：—")
             self.view_info.setText("尚未选择项目")
@@ -483,6 +517,7 @@ class MainWindow(QMainWindow):
         self.project_path.setText(root)
         self.connection.setText("宿主连接：不可观测 · 尚未执行连接自检")
         self.packages.setRowCount(0)
+        self.attempts.setRowCount(0)
         self.sessions.clear()
         self.events.clear()
         self.view_details.clear()
@@ -698,7 +733,9 @@ class MainWindow(QMainWindow):
         counts = data.get("counts", {})
         v = data["view"]
         closed = sum(1 for package in data["packages"] if package["state"] in CLOSED_STATES)
-        self.summary.setText(f"本地数据：{data['database']}　·　会话：{counts.get('sessions', 0)}　·　工作包：{counts.get('work_packages', 0)}（已关闭 {closed}）\n"
+        attempts = counts.get("attempts")
+        attempt_text = f"　·　执行实例：{attempts}" if attempts is not None else ""
+        self.summary.setText(f"本地数据：{data['database']}　·　会话：{counts.get('sessions', 0)}　·　工作包：{counts.get('work_packages', 0)}（已关闭 {closed}）{attempt_text}\n"
                              f"受管视图：{v['state']}　·　{v['count']} 个受管文件")
         selected = self.sessions.currentData()
         self.sessions.clear()
@@ -710,6 +747,7 @@ class MainWindow(QMainWindow):
         if index >= 0:
             self.sessions.setCurrentIndex(index)
         self.render_packages()
+        self.render_attempts()
         self.view_info.setText("库目录：" + data['docs_root'] + "\n受管目录：agent/acceptance\n自动刷新：" +
                                ("启用" if v['auto_refresh'] else "未启用") + "　· 最近生成：" + (v.get('refreshed_at') or "—"))
         self.managed_files.clear()

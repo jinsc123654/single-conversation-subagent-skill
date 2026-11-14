@@ -1,3 +1,3 @@
 """Deterministic local collaboration state; never an agent dispatcher."""
 
-__version__ = "2.4.3"
+__version__ = "2.7.0"

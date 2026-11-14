@@ -25,12 +25,15 @@ PAGES = {
     "complete": "30_已完成子任务.md",
     "closed": "40_已关闭.md",
     "unknown": "50_未分类.md",
+    "attempts": "60_执行实例.md",
     "recent": "90_最近修订.md",
     "all": "95_全部工作包.md",
     "help": "99_视图说明.md",
 }
 LABELS = {"PENDING": "待开始", "IN_PROGRESS": "进行中", "REVIEW_READY": "待主对话验收", "BLOCKED": "受阻",
           "COMPLETED": "已完成", "ABANDONED": "已放弃",
+          "PREPARED": "已准备", "LAUNCHING": "启动中", "RUNNING": "运行中",
+          "DRAINING": "收尾中", "ENDED": "已结束", "UNKNOWN": "失联",
           "PASS": "已报告通过", "FAIL": "失败", "NOT_RUN": "未运行", "SUBSTITUTED": "替代条件完成"}
 
 
@@ -82,7 +85,8 @@ class ProjectView:
     def _snapshot(self, con):
         packages = [dict(r) for r in con.execute("SELECT * FROM work_packages ORDER BY created_at,id")]
         revisions = [dict(r) for r in con.execute("SELECT * FROM work_package_revisions ORDER BY package_id,revision")]
-        return packages, revisions, digest(encode([packages, revisions]).encode())
+        attempts = [dict(r) for r in con.execute("SELECT * FROM work_attempts ORDER BY created_at,attempt_no")]
+        return packages, revisions, attempts, digest(encode([packages, revisions, attempts]).encode())
 
     def _manifest(self, path: str, docs: str):
         raw = self.paths.read_optional(path)
@@ -132,12 +136,16 @@ class ProjectView:
             return False, error.code
         return True, None
 
-    def _render(self, docs: str, view: str, packages: list[dict], revisions: list[dict]) -> tuple[dict[str, str], dict]:
+    def _render(self, docs: str, view: str, packages: list[dict], revisions: list[dict],
+                attempts: list[dict]) -> tuple[dict[str, str], dict]:
         pages = {}
         groups = {key: [] for key in ("attention", "progress", "review", "complete", "closed", "unknown")}
         by_package = {}
         for row in revisions:
             by_package.setdefault(row["package_id"], []).append(row)
+        attempts_by_package = {}
+        for row in attempts:
+            attempts_by_package.setdefault(row["package_id"], []).append(row)
         outside = set()
         invalid = []
         for row in packages:
@@ -175,6 +183,18 @@ class ProjectView:
                 if task["status"] == "PASS" and valid and row["state"] not in CLOSED_STATES:
                     groups["complete"].append((page, f"{pid} / {task['id']} · {data['goal']}"))
             history = by_package.get(pid, [])
+            lines += ["", "## 执行实例", ""]
+            attempt_rows = attempts_by_package.get(pid, [])
+            if attempt_rows:
+                for attempt in attempt_rows:
+                    resource_text = ", ".join(item.get("resource", "") for item in json.loads(attempt["resources"])) or "—"
+                    lines.append("- `" + text(attempt["id"]) + "` · " + text(attempt["subtask_id"]) + " · "
+                                 + LABELS.get(attempt["state"], text(attempt["state"]))
+                                 + " · host=" + text(attempt["host_agent_id"] or "—")
+                                 + " · 结果=" + LABELS.get(attempt["result_state"], text(attempt["result_state"] or "—"))
+                                 + " · 资源=" + text(resource_text))
+            else:
+                lines.append("暂无执行实例。")
             lines += ["", "## 修订记录", ""]
             if history and history[0]["revision"] > 1:
                 lines += ["早期修订没有结构化快照；原始记忆和证据保留，未推断其状态。", ""]
@@ -216,11 +236,28 @@ class ProjectView:
         pages[recent] = "# 最近修订\n\n" + ("\n".join("- " + self._link(recent, view + f"/revisions/{r['package_id']}-R{r['revision']}.md", f"{r['package_id']} / R{r['revision']} · {r['captured_at']}", docs) for r in ordered[:50]) or "暂无修订。")
         all_page = view + "/" + PAGES["all"]
         pages[all_page] = "# 全部工作包\n\n" + ("\n".join("- " + self._link(all_page, view + "/work-packages/" + r["id"] + ".md", r["id"] + " · " + json.loads(r["data"])["goal"], docs) for r in packages) or "暂无工作包。")
+        attempts_page = view + "/" + PAGES["attempts"]
+        attempt_lines = ["# 执行实例", ""]
+        if attempts:
+            for attempt in attempts:
+                resources = ", ".join(item.get("resource", "") for item in json.loads(attempt["resources"])) or "—"
+                attempt_lines.append("- " + self._link(attempts_page,
+                    view + "/work-packages/" + attempt["package_id"] + ".md",
+                    f"{attempt['package_id']} / {attempt['subtask_id']} · {attempt['id']}", docs)
+                    + " · " + LABELS.get(attempt["state"], text(attempt["state"]))
+                    + " · host=" + text(attempt["host_agent_id"] or "—")
+                    + " · 结果=" + LABELS.get(attempt["result_state"], text(attempt["result_state"] or "—"))
+                    + " · 资源=" + text(resources))
+        else:
+            attempt_lines.append("暂无执行实例。")
+        attempt_lines += ["", self._link(attempts_page, view + "/" + PAGES["home"], "返回项目总览", docs)]
+        pages[attempts_page] = "\n".join(attempt_lines)
         home = view + "/" + PAGES["home"]
         lines = ["# " + text(self.store.root.name) + " · 项目总览", "", "项目资料与工作记录都在本库中。", "", "## 按状态查看", ""]
         for key, title in titles.items():
             lines.append("- " + self._link(home, view + "/" + PAGES[key], f"{title}（{len(groups[key])}）", docs))
         lines += ["", "## 修订与说明", "", "- " + self._link(home, recent, "最近修订", docs),
+                  "- " + self._link(home, attempts_page, f"执行实例（{len(attempts)}）", docs),
                   "- " + self._link(home, view + "/" + PAGES["help"], "使用与更新说明", docs), "", self._sources(home, docs, docs)]
         if not packages:
             lines += ["", "目前没有 MCP 工作包。既有手工项目记录仍可通过上方记忆来源打开；未自动推断或导入其状态。"]
@@ -232,8 +269,10 @@ class ProjectView:
             "## 手工批注", "", "可以在每页底部 manual:begin 与 manual:end 两条标记之间写批注，刷新时原样保留。生成区域修改或标记异常时刷新会停止；不要直接修改生成区域来改变任务状态。", "",
             "## 首次打开", "", "从配套管理器点击“用 Obsidian 打开”可使用项目独立启动配置，首次无需手工登记。普通 URI 方式则在 Obsidian 中选择“打开文件夹为仓库”，选择本项目的 " + text(docs) + " 文件夹。以后使用项目总览的 Obsidian 打开链接。仅有 .obsidian 文件夹不能证明已注册或已打开，本服务不改全局仓库列表。", "",
             "## 更新", "", "阶段结束或工作包变更后调用 project_view_refresh；project_view_info 只检查是否过期和返回打开链接。修改手工记忆不会自动导入 SQLite，需主对话先核对。", "",
-            self._link(help_page, all_page, "查找全部工作包", docs), "", self._link(help_page, home, "返回项目总览", docs)])
-        return pages, {"work_packages": len(packages), "revisions": len(revisions), "groups": {k: len(v) for k, v in groups.items()},
+            self._link(help_page, all_page, "查找全部工作包", docs),
+            "- " + self._link(help_page, attempts_page, "查看执行实例", docs), "", self._link(help_page, home, "返回项目总览", docs)])
+        return pages, {"work_packages": len(packages), "revisions": len(revisions), "attempts": len(attempts),
+                       "groups": {k: len(v) for k, v in groups.items()},
                        "evidence_issues": invalid, "sources_outside_vault": sorted(outside)}
 
     def _info(self, con, docs: str, view: str, manifest, snapshot: str) -> dict:
@@ -276,7 +315,7 @@ class ProjectView:
             self.state._session(con, session_id)
             docs, view, path = self._layout(con)
             manifest, _ = self._manifest(path, docs)
-            _, _, snapshot = self._snapshot(con)
+            _, _, _, snapshot = self._snapshot(con)
             return self._info(con, docs, view, manifest, snapshot)
 
     def refresh(self, session_id: str, initialize_vault: bool = False, auto_refresh: bool = True,
@@ -297,8 +336,8 @@ class ProjectView:
                     auto_refresh = manifest["auto_refresh"]
                 con.execute("INSERT OR IGNORE INTO metadata VALUES('docs_root', ?)", (docs,))
             configured = self._vault_config(docs)  # preflight symlinks before any writes
-            packages, revisions, snapshot = self._snapshot(con)
-            pages, summary = self._render(docs, view, packages, revisions)
+            packages, revisions, attempts, snapshot = self._snapshot(con)
+            pages, summary = self._render(docs, view, packages, revisions, attempts)
             if len(pages) > 2000:
                 raise ScsError("VIEW_LIMIT", "View exceeds 2000 generated notes; narrow the project before refreshing.")
             owned = dict(manifest["files"]) if manifest else {}

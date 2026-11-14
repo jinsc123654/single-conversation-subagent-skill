@@ -47,6 +47,41 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 - 每次派发范围有界；子 Agent 回传状态、实际动作、证据路径、首异常、剩余问题、资源释放，不贴原始日志。
 - 子 Agent 不提问、不做验收、不写顶层规划和记忆；需要用户决策时回主对话。
 
+## 多子 Agent 并发（长任务）
+
+长任务默认主动识别可并发的独立工作；主对话编排，MCP 只校验/记录，不调度 Agent。支持同一 WP 内多个就绪子任务并发，以及同一 canonical 项目内多个 WP 并发；首版不支持跨项目联合调度。
+
+### 执行单元
+
+- WP 是目标/验收边界；revision 是冻结定义；subtask 是 DAG 节点；attempt 是一次真实执行。
+- 子任务可声明 `depends_on`（同包子任务 ID）、`resources`（`file:` / `device:` / `serial:` / `programmer:` 加 `read` / `write`）和 `required`。
+- 依赖必须已核验 `PASS` / `SUBSTITUTED`，且没有活动 attempt；证据目录为 `.../R<rev>/<subtask>/<attempt>/`。
+- 子 Agent 必须拿到 `attempt_id`；不得直接更新 WP、顶层记忆或验收；主对话串行登记结果。
+
+### 调度
+
+- 先 `work_attempt_prepare` 原子占用资源并建立 attempt；成功后才启动宿主 Agent，禁止先派发后登记。
+- prepare 返回 `attempt_id`、`evidence_dir` 和 leases；子 Agent 在证据目录落盘。
+- 生命周期：`PREPARED → LAUNCHING → RUNNING → DRAINING → ENDED`，另有 `UNKNOWN`；`UNKNOWN` 不释放执行槽/资源，也不自动重派。
+- 结束用 `work_attempt_update(state="ENDED", result=..., operation_id=...)`；主对话串行提交。`VERSION_CONFLICT` 后重读版本，只补未登记结果。
+- 默认并发上限 4；没有宿主真实并发证据时取 1。优先级：用户明确事项 > 关键路径 > 解除阻塞的短任务 > 等待时间。
+- 依赖未满足或资源未获得时不启动，换其他就绪任务；失败节点停止其后继，独立分支继续。
+
+### 资源冲突
+
+- 文件路径按段判断：目录覆盖后代；R/R 可并行；R/W、W/W 冲突。
+- 一次 attempt 的资源集合必须原子获取或全部失败；不允许持有部分资源等待剩余资源。
+- 设备按逻辑 ID；首版不建立跨项目设备域。TTL 到期不等于进程停止；旧 attempt 未 `ENDED` 时资源隔离，不能仅凭 TTL 放行新写者。
+- 不抢占运行中的写任务；先停止并确认静止，再交接。
+
+### 静止屏障与幂等
+
+- `REVIEW_READY`、`COMPLETED`、`ABANDONED`、`new_revision`、`handoff_export` 前必须没有活动 attempt，否则返回 `ATTEMPTS_ACTIVE`。
+- 放弃/异常包先结束或确认停止相关 attempt；有活动 attempt 时禁止用 `work_package_update` 直接写子任务结果，必须走 `work_attempt_update`。
+- `work_package_update` / `work_attempt_update` 支持 `operation_id`：同 id 同载荷返回原回执，不同载荷返回 `OPERATION_CONFLICT`。
+- 事件记录 attempt 准备、状态变化、结束、资源冲突；不记录提示词全文。
+- 首版并发范围：同项目包内/跨包。跨项目设备域、活动 handoff 转移、worktree 自动集成留到后续版本。
+
 ## 验证范围（标准执行 / 长任务）
 
 同一对话只在首次标准/长任务问一次，后续沿用；只给一个推荐路径：主对话先做必要的只读调查，再按改动风险、影响面、验证成本、资源和回滚难度选择一个组合（例如小改→本轮冒烟；核心/硬件相关→定向或全量；并发/时序→稳定性）；不固定同一路径。其他选项不标推荐/默认。

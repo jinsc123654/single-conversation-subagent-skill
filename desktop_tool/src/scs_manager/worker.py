@@ -47,7 +47,7 @@ def main():
             if not isinstance(payload, dict):
                 raise ValueError("关闭请求格式错误")
             with database(args.root) as con:
-                if con.execute("PRAGMA user_version").fetchone()[0] != 2:
+                if con.execute("PRAGMA user_version").fetchone()[0] not in (2, 3):
                     raise ValueError("请先按 MCP 升级说明备份并升级旧状态库；此按钮不会替你迁移")
             bridge = Path(__file__).with_name("mcp_bridge.py")
             result = subprocess.run([args.python, str(bridge), "close", "--root", args.root],
@@ -63,7 +63,7 @@ def main():
             # Connecting starts the configured server: only accept already upgraded
             # schema 2 here, so a status button cannot silently migrate an old DB.
             with database(args.root) as con:
-                if con.execute("PRAGMA user_version").fetchone()[0] != 2:
+                if con.execute("PRAGMA user_version").fetchone()[0] not in (2, 3):
                     raise ValueError("请先按 MCP 升级说明备份并升级旧状态库；此按钮不会替你迁移")
             bridge = Path(__file__).with_name("mcp_bridge.py")
             result = subprocess.run([args.python, str(bridge), args.action, "--root", args.root,
