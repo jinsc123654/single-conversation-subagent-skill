@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scs-mcp"
-version = "2.2.0"
+version = "2.6.0"
 description = "Local state and interaction tools for single-conversation-subagent"
 requires-python = ">=3.11"
 dependencies = ["mcp==2.3.0", "pydantic>=2.12,<3"]

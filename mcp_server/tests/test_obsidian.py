@@ -344,3 +344,18 @@ def test_view_refresh_waits_for_intake_and_investigate_stays_read_only(tmp_path)
         view.refresh(sid, True)
     assert err.value.code == "READ_ONLY_MODE"
     assert not (tmp_path / "docs").exists()
+
+
+def test_closed_package_moves_to_closed_view(project):
+    store, sid, work, view = project
+    p = package(project)
+    closed = work.update(sid, p["id"], p["version"], "ABANDONED", close_reason="superseded by WP-108")
+    out = view.refresh(sid, True)
+    closed_page = store.root / out["docs_root"] / "agent/acceptance/40_已关闭.md"
+    progress_page = store.root / out["docs_root"] / "agent/acceptance/20_进行中.md"
+    assert closed_page.is_file()
+    assert p["id"] in closed_page.read_text(encoding="utf-8")
+    assert p["id"] not in progress_page.read_text(encoding="utf-8")
+    package_page = store.root / out["docs_root"] / f"agent/acceptance/work-packages/{p['id']}.md"
+    assert "关闭原因：" in package_page.read_text(encoding="utf-8")
+    assert closed["state"] == "ABANDONED"

@@ -145,6 +145,8 @@ docs-root = 首个存在的 `00_doc` / `00_docs` / `docs` / `doc`；均无则新
 
 `state`：`REVIEW_READY` / `PARTIAL` / `BLOCKED`。子任务状态：`PASS` / `FAIL` / `BLOCKED` / `NOT_RUN` / `SUBSTITUTED`；没有证据不能标 `PASS`。
 
+工作包终态：主对话验收通过后用 `COMPLETED` 关闭；重复、被取代或不再需要的用 `ABANDONED` 关闭。终态必须带 `close_reason`，服务写入 `closed_at`、`closed_by_session` 和事件记录，之后不可修改；后续工作新建工作包。主对话用 `work_package_update`；桌面管理器用本地操作员工具 `work_package_close`，从包内读取 owner session，不能借此跳过版本或原因校验。阶段收尾时核对长期 `PENDING/IN_PROGRESS` 的滞留包和重复包，按实际情况关闭，避免记录一直挂在“待开始”。桌面管理器默认隐藏终态，可用“显示已关闭”查看。
+
 ## 边界
 
 1. 只有主对话创建子 Agent；子 Agent 不继续委派。

@@ -10,11 +10,11 @@ def project(root, schema=2):
     con = sqlite3.connect(root / '.scs/state.sqlite3')
     con.executescript('''CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE sessions(id TEXT PRIMARY KEY,client TEXT,mode TEXT,verification TEXT,codex_review INTEGER,review_registration TEXT,created_at TEXT);
-    CREATE TABLE work_packages(id TEXT PRIMARY KEY,goal TEXT,revision INTEGER,state TEXT,data TEXT,docs_root TEXT,created_at TEXT);
+    CREATE TABLE work_packages(id TEXT PRIMARY KEY,session_id TEXT,revision INTEGER,version INTEGER,state TEXT,data TEXT,docs_root TEXT,created_at TEXT);
     CREATE TABLE events(seq INTEGER PRIMARY KEY,at TEXT,tool TEXT,event TEXT,error_code TEXT);''')
     con.execute('INSERT INTO metadata VALUES(?,?)', ('project_root', str(root)))
     con.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?,?)', ('session-one','fixture-host','long','["full"]',0,'registered','2026-11-10T00:00:00Z'))
-    con.execute('INSERT INTO work_packages VALUES(?,?,?,?,?,?,?)', ('WP-demo','测试示例',1,'REVIEW_READY',json.dumps({'goal':'测试示例（合成数据）','subtasks':[{'id':'T1','status':'PASS'}]}),'docs','2026-11-10T00:00:00Z'))
+    con.execute('INSERT INTO work_packages VALUES(?,?,?,?,?,?,?,?)', ('WP-demo','session-one',1,1,'REVIEW_READY',json.dumps({'goal':'测试示例（合成数据）','subtasks':[{'id':'T1','status':'PASS'}]}),'docs','2026-11-10T00:00:00Z'))
     con.execute('INSERT INTO events VALUES(?,?,?,?,?)',(1,'2026-11-10T00:00:00Z','work_package_update','UPDATED',None))
     con.execute(f'PRAGMA user_version={schema}')
     con.commit()

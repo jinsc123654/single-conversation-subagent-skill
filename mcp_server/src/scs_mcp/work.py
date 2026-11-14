@@ -9,9 +9,13 @@ from .evidence import verify_file
 from .state import State
 from .storage import Store, encode, now
 
-STATES = {"PENDING": {"IN_PROGRESS", "BLOCKED"}, "IN_PROGRESS": {"REVIEW_READY", "BLOCKED"},
-          "BLOCKED": {"IN_PROGRESS"}, "REVIEW_READY": {"IN_PROGRESS", "BLOCKED"}}
+STATES = {"PENDING": {"IN_PROGRESS", "BLOCKED", "ABANDONED"},
+          "IN_PROGRESS": {"REVIEW_READY", "BLOCKED", "ABANDONED"},
+          "BLOCKED": {"IN_PROGRESS", "ABANDONED"},
+          "REVIEW_READY": {"IN_PROGRESS", "BLOCKED", "COMPLETED", "ABANDONED"},
+          "COMPLETED": set(), "ABANDONED": set()}
 RESULTS = {"PASS", "FAIL", "BLOCKED", "NOT_RUN", "SUBSTITUTED"}
+CLOSED_STATES = {"COMPLETED", "ABANDONED"}
 
 
 class Work:
@@ -141,14 +145,16 @@ class Work:
 
     def update(self, session_id: str, package_id: str, expected_version: int,
                state: str | None = None, results: list[dict] | None = None,
-               new_revision: bool = False) -> dict:
-        if not new_revision and state is None and not results:
-            raise ScsError("INPUT_INVALID", "Specify a state, results, or a new revision.")
-        if new_revision and (state is not None or results):
+               new_revision: bool = False, close_reason: str | None = None) -> dict:
+        if not new_revision and state is None and not results and close_reason is None:
+            raise ScsError("INPUT_INVALID", "Specify a state, results, close reason, or a new revision.")
+        if new_revision and (state is not None or results or close_reason is not None):
             raise ScsError("INPUT_INVALID", "Start a revision separately from reporting results.")
         with self.store.transaction(True) as con:
             row = self._get(con, package_id)
             self._access(con, session_id, row)
+            if row["state"] in CLOSED_STATES:
+                raise ScsError("PACKAGE_CLOSED", "Closed work packages are immutable; create a new package for follow-up work.")
             if expected_version != row["version"]:
                 raise ScsError("VERSION_CONFLICT", "Refresh the work package; another writer changed its version.")
             session = self.state._session(con, session_id)
@@ -158,6 +164,17 @@ class Work:
             self.store.revision_snapshot(con, row)
             data = json.loads(row["data"])
             target = state or row["state"]
+            closing = target in CLOSED_STATES
+            if closing:
+                if results:
+                    raise ScsError("INPUT_INVALID", "Close the package without new subtask results.")
+                if not isinstance(close_reason, str) or not close_reason.strip():
+                    raise ScsError("CLOSE_REASON_REQUIRED", "Record why this work package is completed or abandoned.")
+                if len(close_reason.strip()) > 2000:
+                    raise ScsError("INPUT_INVALID", "Close reason exceeds 2000 characters.")
+                close_reason = close_reason.strip()
+            elif close_reason is not None:
+                raise ScsError("INPUT_INVALID", "A close reason is only valid with COMPLETED or ABANDONED.")
             revision = row["revision"]
             if new_revision:
                 revision += 1
@@ -189,14 +206,20 @@ class Work:
                     if check["status"] != "VERIFIED" or entry.get("sha256") != check["sha256"]:
                         raise ScsError("EVIDENCE_INVALID", "Evidence is invalid, insufficient or changed since verification.")
                 task.update(status=result["status"], evidence=evidence)
-            if target == "REVIEW_READY" and any(t["status"] in {"FAIL", "BLOCKED"} for t in data["subtasks"]):
-                raise ScsError("RESULT_BLOCKED", "Resolve failed/blocked subtasks before reporting review readiness.")
+            if target in {"REVIEW_READY", "COMPLETED"} and any(t["status"] in {"FAIL", "BLOCKED"} for t in data["subtasks"]):
+                raise ScsError("RESULT_BLOCKED", "Resolve failed/blocked subtasks before reporting review readiness or completion.")
             self._verify_reports(data, row, revision)
+            data["updated_at"] = now()
+            if closing:
+                data["closed_at"] = data["updated_at"]
+                data["close_reason"] = close_reason
+                data["closed_by_session"] = session_id
             # Every successful mutation consumes one version. Retrying a stale write
             # gives VERSION_CONFLICT rather than silently overwriting another writer.
             con.execute("UPDATE work_packages SET revision=?,version=version+1,state=?,data=? WHERE id=? AND version=?",
                         (revision, target, encode(data), package_id, expected_version))
-            self.store.event(con, session_id, None, "work_package_update", "PACKAGE_UPDATED")
+            self.store.event(con, session_id, None, "work_package_update",
+                             "PACKAGE_CLOSED" if closing else "PACKAGE_UPDATED")
             updated = self._get(con, package_id)
             self.store.revision_snapshot(con, updated)
             return self._snapshot(updated)

@@ -7,6 +7,19 @@ from pathlib import Path
 
 
 async def run(args):
+    close_request = None
+    if args.action == "close":
+        raw = sys.stdin.buffer.read(200_001)
+        if len(raw) > 200_000:
+            raise ValueError("关闭请求过大")
+        close_request = json.loads(raw)
+        if not isinstance(close_request, dict):
+            raise ValueError("关闭请求格式错误")
+        for key in ("package", "state", "reason"):
+            if not isinstance(close_request.get(key), str) or not close_request[key].strip():
+                raise ValueError("关闭请求缺少字段：" + key)
+        if type(close_request.get("version")) is not int or close_request["version"] < 1:
+            raise ValueError("关闭请求版本号无效")
     from mcp import Client
     from mcp.client.stdio import StdioServerParameters
     source = Path(__file__).resolve().parents[3] / "mcp_server/src"
@@ -22,6 +35,10 @@ async def run(args):
             return out
         if args.action == "refresh":
             return await call("project_view_refresh", {"session_id": args.session, "initialize_vault": True})
+        if args.action == "close":
+            return await call("work_package_close", {"project_root": args.root,
+                "package_id": close_request["package"], "expected_version": close_request["version"],
+                "state": close_request["state"], "close_reason": close_request["reason"]})
         diagnostics = await call("diagnostics_check", {})
         tools = await client.list_tools()
         result = {"checked_at": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
@@ -34,7 +51,7 @@ async def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("probe", "refresh"))
+    parser.add_argument("action", choices=("probe", "refresh", "close"))
     parser.add_argument("--root", required=True)
     parser.add_argument("--session", default="")
     args = parser.parse_args()

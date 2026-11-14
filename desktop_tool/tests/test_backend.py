@@ -157,6 +157,13 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(result[0]['packages'][0]['id'],'WP-demo')
         self.assertEqual(db.read_bytes(),before)
 
+    def test_catalog_hides_closed_packages(self):
+        from scs_manager.backend import project_catalog
+        root = project(self.root / 'closed')
+        with sqlite3.connect(root / '.scs/state.sqlite3') as con:
+            con.execute("UPDATE work_packages SET state='ABANDONED' WHERE id='WP-demo'")
+        self.assertEqual(project_catalog([str(root)])[0]['packages'], [])
+
     def test_catalog_missing_project_is_retained_as_unavailable(self):
         from scs_manager.backend import project_catalog
         out=project_catalog([str(self.root/'missing')])

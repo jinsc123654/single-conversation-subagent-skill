@@ -24,6 +24,8 @@ theme.apply(APP, force='light')
 class WindowTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.state_env = patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(self.temp.name) / "state")})
+        self.state_env.start()
         self.root = project(Path(self.temp.name) / '示例项目')
         self.config = Path(self.temp.name) / 'own/projects.json'
         self.window = MainWindow(self.config, initial_projects=[self.root], auto_load=False)
@@ -35,6 +37,7 @@ class WindowTests(unittest.TestCase):
         self.wait_idle()
         self.window.deleteLater()
         APP.processEvents()
+        self.state_env.stop()
         self.temp.cleanup()
 
     def wait_idle(self):
@@ -215,6 +218,28 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(self.window.projects.item(0).data(0, Qt.UserRole), str(root))
         self.assertEqual(obsidian_target(root)["vault_root"], str(root / "docs"))
         self.assertFalse(self.config.exists())
+
+    def test_closed_packages_hidden_by_default_and_toggle(self):
+        with sqlite3.connect(self.root / ".scs/state.sqlite3") as con:
+            data = json.loads(con.execute("SELECT data FROM work_packages").fetchone()[0])
+            data["close_reason"] = "superseded by WP-108"
+            con.execute("UPDATE work_packages SET state='ABANDONED', data=? WHERE id='WP-demo'", (json.dumps(data),))
+        self.load()
+        self.assertEqual(self.window.packages.rowCount(), 0)
+        self.assertIn("已关闭 1", self.window.summary.text())
+        self.window.show_closed.setChecked(True)
+        self.assertEqual(self.window.packages.rowCount(), 1)
+        self.assertEqual(self.window.packages.item(0, 2).text(), "已放弃")
+        self.assertIn("superseded", self.window.packages.item(0, 2).toolTip())
+
+    def test_stale_open_package_shows_badge(self):
+        with sqlite3.connect(self.root / ".scs/state.sqlite3") as con:
+            con.execute("UPDATE work_packages SET created_at='2026-10-01T00:00:00+00:00' WHERE id='WP-demo'")
+        self.load()
+        self.assertEqual(self.window.packages.rowCount(), 1)
+        self.assertIn("滞留", self.window.packages.item(0, 2).text())
+        self.window.packages.selectRow(0)
+        self.assertTrue(self.window.close_button.isEnabled())
 
     def test_failed_detached_launch_reports_error(self):
         self.load()

@@ -1,4 +1,4 @@
-# single-conversation-subagent 2.5.0
+# single-conversation-subagent 2.6.0
 
 单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。
 
@@ -182,6 +182,8 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 “已完成子任务”表示已报告通过且本次核对证据未变；工作包仍需主对话最终验收。旧版只保留当前工作包的数据库升级时，仅回填实际当前修订；不虚构早期历史。迁移升级到 schema 2，原会话、工作包、证据保持不变；旧版 2.0 程序不能读取 schema 2，升级前应备份状态，回滚时恢复对应备份。
 
+工作包有终态：`COMPLETED`（主对话验收通过）和 `ABANDONED`（重复、被取代或放弃）。关闭必须带 `close_reason`，服务写入 `closed_at`、`closed_by_session` 和事件记录；关闭后不可修改，后续工作新建工作包。桌面管理器默认隐藏终态，可勾选“显示已关闭”；长期未更新的非终态显示“滞留 N 天”。
+
 完整用法、冲突恢复和数据边界见 [Obsidian 视图说明](single-conversation-subagent/references/obsidian.md)。当前实现不自动修改全局库注册列表，创建 .obsidian 不代表已注册或已打开；Obsidian GUI/URI 真正唤起仍需在本机手工验证。
 
 ## 工具与状态
@@ -192,7 +194,8 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 | interaction_request / interaction_submit / interaction_reopen | Skill 原生提问的记录/提交/显式重试；不是默认 UI；支持文本回退与幂等提交；`analysis` 显示在 display_text/原生记账 |
 | interaction_ask | 仅 `mcp` 兜底 channel 的 legacy form 服务端 `timeout_seconds`（默认 15s）；`analysis`/中文 title/选项注释/推荐标记/15s/question_id 显示在 form；超时返回 `TIMED_OUT` + 推荐项；modern/无 form 保持 `WAITING_USER`，同一 `question_id` 直接 submit；ZCode 不默认使用 |
 | diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
-| work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告 |
+| work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告；`COMPLETED`/`ABANDONED` 终态需 `close_reason` |
+| work_package_close | 本地管理器/操作员关闭滞留或重复工作包；从包内读取 owner session，仍校验版本、终态和原因，保留审计 |
 | evidence_verify | 文件、路径、非空、内容与测试结果结构验证；不替代验收 |
 | resource_acquire / release | 带 TTL/owner/token 的建议性文件/设备租约 |
 | handoff_export / resume | 带摘要哈希的本地审计交接，不复制会话确认 |

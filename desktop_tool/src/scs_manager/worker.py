@@ -14,7 +14,7 @@ def main():
     if os.name == "posix":
         os.setsid()
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("snapshot", "scan", "probe", "refresh", "archive", "catalog", "prepare-obsidian"))
+    parser.add_argument("action", choices=("snapshot", "scan", "probe", "refresh", "archive", "catalog", "prepare-obsidian", "close"))
     parser.add_argument("--root", required=True)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--session", default="")
@@ -39,6 +39,26 @@ def main():
             data = discover(args.root)
         elif args.action == "archive":
             data = archive_view(args.root)
+        elif args.action == "close":
+            raw = sys.stdin.buffer.read(200_001)
+            if len(raw) > 200_000:
+                raise ValueError("关闭请求过大")
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("关闭请求格式错误")
+            with database(args.root) as con:
+                if con.execute("PRAGMA user_version").fetchone()[0] != 2:
+                    raise ValueError("请先按 MCP 升级说明备份并升级旧状态库；此按钮不会替你迁移")
+            bridge = Path(__file__).with_name("mcp_bridge.py")
+            result = subprocess.run([args.python, str(bridge), "close", "--root", args.root],
+                                    input=json.dumps(payload, ensure_ascii=False).encode(),
+                                    capture_output=True, timeout=22)
+            if len(result.stdout) > 2_000_000:
+                raise ValueError("响应超过限制")
+            reply = json.loads(result.stdout)
+            if not reply.get("ok"):
+                raise ValueError(reply.get("error", "MCP 操作失败"))
+            data = reply["data"]
         else:
             # Connecting starts the configured server: only accept already upgraded
             # schema 2 here, so a status button cannot silently migrate an old DB.

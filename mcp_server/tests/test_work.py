@@ -288,3 +288,42 @@ def test_sqlite_companion_symlink_is_rejected(tmp_path, suffix):
         Store(tmp_path)
     assert err.value.code == "PATH_UNSAFE"
     assert target.read_text() == "keep"
+
+
+def test_abandoned_closes_pending_package_and_keeps_reason(setup):
+    store, _, sid, work = setup
+    p = package(work, sid)
+    closed = work.update(sid, p["id"], p["version"], "ABANDONED", close_reason="superseded by WP-108")
+    assert closed["state"] == "ABANDONED"
+    assert closed["close_reason"] == "superseded by WP-108"
+    assert closed["closed_by_session"] == sid
+    assert closed["closed_at"] == closed["updated_at"]
+    with sqlite3.connect(store.root / ".scs/state.sqlite3") as con:
+        assert con.execute("SELECT tool,event FROM events ORDER BY seq DESC LIMIT 1").fetchone() == (
+            "work_package_update", "PACKAGE_CLOSED")
+    with pytest.raises(ScsError) as err:
+        work.update(sid, p["id"], closed["version"], "IN_PROGRESS")
+    assert err.value.code == "PACKAGE_CLOSED"
+
+
+def test_completed_requires_review_ready_and_reason(setup):
+    _, _, sid, work = setup
+    p = package(work, sid)
+    with pytest.raises(ScsError) as err:
+        work.update(sid, p["id"], p["version"], "COMPLETED", close_reason="accepted")
+    assert err.value.code == "STATE_INVALID"
+    p = work.update(sid, p["id"], p["version"], "IN_PROGRESS")
+    p = work.update(sid, p["id"], p["version"], "REVIEW_READY")
+    with pytest.raises(ScsError) as err:
+        work.update(sid, p["id"], p["version"], "COMPLETED")
+    assert err.value.code == "CLOSE_REASON_REQUIRED"
+    done = work.update(sid, p["id"], p["version"], "COMPLETED", close_reason="main conversation accepted")
+    assert done["state"] == "COMPLETED" and done["close_reason"] == "main conversation accepted"
+
+
+def test_close_reason_rejected_without_terminal_state(setup):
+    _, _, sid, work = setup
+    p = package(work, sid)
+    with pytest.raises(ScsError) as err:
+        work.update(sid, p["id"], p["version"], "IN_PROGRESS", close_reason="not closed")
+    assert err.value.code == "INPUT_INVALID"

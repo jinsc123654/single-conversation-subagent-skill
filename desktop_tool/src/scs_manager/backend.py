@@ -142,7 +142,10 @@ def snapshot(root):
             for row in rows:
                 data = json.loads(row["data"])
                 result["packages"].append({"id": row["id"], "goal": data["goal"], "revision": row["revision"],
-                    "state": row["state"], "tasks": len(data["subtasks"]), "docs_root": row["docs_root"]})
+                    "version": row["version"], "state": row["state"], "tasks": len(data["subtasks"]),
+                    "docs_root": row["docs_root"], "session_id": row["session_id"], "created_at": row["created_at"],
+                    "updated_at": data.get("updated_at"), "closed_at": data.get("closed_at"),
+                    "close_reason": data.get("close_reason")})
             result["events"] = [dict(r) for r in con.execute(
                 "SELECT at,tool,event,error_code FROM events ORDER BY seq DESC LIMIT 40")]
             result["counts"] = {table: con.execute("SELECT count(*) FROM " + table).fetchone()[0]
@@ -316,9 +319,11 @@ def project_catalog(roots):
                     if has_revisions:
                         query='''SELECT p.id,p.state,p.data,p.created_at,coalesce((SELECT max(captured_at)
                           FROM work_package_revisions r WHERE r.package_id=p.id),p.created_at) AS activity
-                          FROM work_packages p ORDER BY activity DESC,p.id LIMIT 8'''
+                          FROM work_packages p WHERE p.state NOT IN ('COMPLETED','ABANDONED')
+                          ORDER BY activity DESC,p.id LIMIT 8'''
                     else:
-                        query='SELECT id,state,data,created_at,created_at AS activity FROM work_packages ORDER BY created_at DESC,id LIMIT 8'
+                        query='''SELECT id,state,data,created_at,created_at AS activity FROM work_packages
+                          WHERE state NOT IN ('COMPLETED','ABANDONED') ORDER BY created_at DESC,id LIMIT 8'''
                     for row in con.execute(query):
                         last=timestamp(row['activity'])
                         entry['last_activity']=max(entry['last_activity'],last)

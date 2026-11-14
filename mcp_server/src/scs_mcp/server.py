@@ -16,9 +16,12 @@ from . import __version__
 from .errors import ScsError
 from .models import SubtaskDefinition, SubtaskResult
 from .interaction import MESSAGES, choice_code, describe, native_question, schema_for, supports_form
+from .obsidian import ProjectView
 from .roots import Roots
 from .project_index import publish
 from .state import OPTIONS
+from .storage import Store
+from .work import Work
 from .workspace import scan_workspace
 
 
@@ -374,18 +377,46 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
 
     @mcp.tool(structured_output=True)
     async def work_package_update(session_id: str, package_id: str, expected_version: int,
-                                  state: Literal["PENDING", "IN_PROGRESS", "REVIEW_READY", "BLOCKED"] | None = None,
-                                  results: list[SubtaskResult] | None = None, new_revision: bool = False) -> dict[str, Any]:
-        """Update with a version precondition. Never makes a final acceptance decision.
+                                  state: Literal["PENDING", "IN_PROGRESS", "REVIEW_READY", "BLOCKED", "COMPLETED", "ABANDONED"] | None = None,
+                                  results: list[SubtaskResult] | None = None, new_revision: bool = False,
+                                  close_reason: str | None = None) -> dict[str, Any]:
+        """Update with a version precondition. COMPLETED/ABANDONED are terminal and need close_reason.
 
         results=[{id,status:PASS|FAIL|BLOCKED|NOT_RUN|SUBSTITUTED,
         evidence:[{path,sha256,required_content?}]}]. A PASS report needs reverified
         unchanged evidence. new_revision resets results and allocates fresh evidence
-        directories; it preserves every earlier file.
+        directories; it preserves every earlier file. COMPLETED requires REVIEW_READY;
+        ABANDONED may close a pending, active or blocked package. Closed packages are
+        immutable; start a new package for follow-up work.
         """
         result = roots.work(session_id).update(session_id, package_id, expected_version, state,
-                             [r.model_dump() for r in results] if results is not None else None, new_revision)
+                             [r.model_dump() for r in results] if results is not None else None, new_revision,
+                             close_reason)
         return refresh_enabled_view(session_id, result)
+
+    @mcp.tool(structured_output=True)
+    async def work_package_close(project_root: str, package_id: str, expected_version: int,
+                                 state: Literal["COMPLETED", "ABANDONED"], close_reason: str) -> dict[str, Any]:
+        """Close a stale or duplicate package from the local manager without resuming its conversation.
+
+        The owner session is read from the package; version, close reason and audit
+        events are still enforced. COMPLETED requires REVIEW_READY; ABANDONED may
+        close a pending, active or blocked package. Prefer work_package_update in the
+        owning conversation; this operator path exists for local reconciliation.
+        """
+        root = roots.resolve(project_root)
+        store = Store(root)
+        work = Work(store)
+        with store.transaction() as con:
+            owner = work._get(con, package_id)["session_id"]
+        result = work.update(owner, package_id, expected_version, state, close_reason=close_reason)
+        try:
+            updated = ProjectView(store).refresh(owner, initialize_vault=True)
+            result["view_update"] = {"status": "OK", "updated_files": updated["updated_files"]}
+        except ScsError as error:
+            result["view_update"] = error.result()
+            result["view_update"]["work_package_saved"] = True
+        return result
 
     @mcp.tool(structured_output=True)
     async def evidence_verify(session_id: str, package_id: str, revision: int, subtask_id: str,

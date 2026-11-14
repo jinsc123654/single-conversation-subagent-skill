@@ -11,7 +11,7 @@ from urllib.parse import quote, urlencode
 from .errors import ScsError
 from .state import State
 from .storage import Store, encode, now
-from .work import Work
+from .work import CLOSED_STATES, Work
 from .vault_profile import prepare_profile, profile_info, profile_uri
 
 BEGIN = "<!-- manual:begin -->"
@@ -23,12 +23,14 @@ PAGES = {
     "progress": "20_进行中.md",
     "review": "25_待验收.md",
     "complete": "30_已完成子任务.md",
+    "closed": "40_已关闭.md",
     "unknown": "50_未分类.md",
     "recent": "90_最近修订.md",
     "all": "95_全部工作包.md",
     "help": "99_视图说明.md",
 }
 LABELS = {"PENDING": "待开始", "IN_PROGRESS": "进行中", "REVIEW_READY": "待主对话验收", "BLOCKED": "受阻",
+          "COMPLETED": "已完成", "ABANDONED": "已放弃",
           "PASS": "已报告通过", "FAIL": "失败", "NOT_RUN": "未运行", "SUBSTITUTED": "替代条件完成"}
 
 
@@ -132,7 +134,7 @@ class ProjectView:
 
     def _render(self, docs: str, view: str, packages: list[dict], revisions: list[dict]) -> tuple[dict[str, str], dict]:
         pages = {}
-        groups = {key: [] for key in ("attention", "progress", "review", "complete", "unknown")}
+        groups = {key: [] for key in ("attention", "progress", "review", "complete", "closed", "unknown")}
         by_package = {}
         for row in revisions:
             by_package.setdefault(row["package_id"], []).append(row)
@@ -150,13 +152,17 @@ class ProjectView:
             if row["docs_root"] != docs:
                 outside.add(row["docs_root"])
             tasks = data["subtasks"]
-            bucket = ("attention" if not valid or row["state"] == "BLOCKED" or any(t["status"] in {"FAIL", "BLOCKED"} for t in tasks)
+            bucket = ("closed" if row["state"] in CLOSED_STATES
+                      else "attention" if not valid or row["state"] == "BLOCKED" or any(t["status"] in {"FAIL", "BLOCKED"} for t in tasks)
                       else "review" if row["state"] == "REVIEW_READY"
                       else "progress" if row["state"] in {"PENDING", "IN_PROGRESS"} else "unknown")
             summary = f"{pid} · {data['goal']} · R{row['revision']}"
             groups[bucket].append((page, summary))
             lines = ["# " + text(data["goal"]), "", f"工作包：`{pid}` · 当前修订：R{row['revision']} · 版本：{row['version']}", "",
-                     "状态：" + LABELS.get(row["state"], text(row["state"])), "", "## 验收条件", ""]
+                     "状态：" + LABELS.get(row["state"], text(row["state"])), ""]
+            if data.get("close_reason"):
+                lines += ["关闭原因：" + text(data["close_reason"]), ""]
+            lines += ["## 验收条件", ""]
             lines.extend("- " + text(item) for item in data["acceptance"])
             lines += ["", "## 子任务", ""]
             for task in tasks:
@@ -166,7 +172,7 @@ class ProjectView:
                 lines.append("- **" + text(task["id"]) + "**：" + label)
                 for entry in task["evidence"]:
                     lines.append("  - " + self._link(page, entry["path"], "证据：" + PurePosixPath(entry["path"]).name, docs))
-                if task["status"] == "PASS" and valid:
+                if task["status"] == "PASS" and valid and row["state"] not in CLOSED_STATES:
                     groups["complete"].append((page, f"{pid} / {task['id']} · {data['goal']}"))
             history = by_package.get(pid, [])
             lines += ["", "## 修订记录", ""]
@@ -193,12 +199,15 @@ class ProjectView:
             lines += ["", "历史快照保留当时报告；当前证据有效性请查看工作包页。", "",
                       self._link(page, view + "/work-packages/" + pid + ".md", "查看工作包", docs), "", self._sources(page, docs, row["docs_root"])]
             pages[page] = "\n".join(lines)
-        titles = {"attention": "需要关注", "progress": "进行中", "review": "待验收", "complete": "已完成子任务", "unknown": "未分类"}
+        titles = {"attention": "需要关注", "progress": "进行中", "review": "待验收", "complete": "已完成子任务",
+                  "closed": "已关闭工作包", "unknown": "未分类"}
         for key, title in titles.items():
             page = view + "/" + PAGES[key]
             lines = ["# " + title, ""]
             if key == "complete":
                 lines += ["这里汇总已报告通过且本次检查证据未变化的子任务。工作包的最终验收由主对话记录在项目记忆中。", ""]
+            if key == "closed":
+                lines += ["这里列出已关闭的工作包：COMPLETED 为主对话验收通过，ABANDONED 为被取代或放弃；关闭原因保留在工作包页和修订记录中。关闭后不可再修改，后续工作新建工作包。", ""]
             lines += ["- " + self._link(page, target, label, docs) for target, label in groups[key]] or ["暂无条目。"]
             lines += ["", self._link(page, view + "/" + PAGES["home"], "返回项目总览", docs)]
             pages[page] = "\n".join(lines)

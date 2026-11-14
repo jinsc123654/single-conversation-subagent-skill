@@ -1,6 +1,7 @@
 """Optional project/state browser; all filesystem/database jobs are asynchronous."""
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import signal
 import sys
@@ -8,16 +9,76 @@ import time
 
 from PyQt5.QtCore import QDir, QProcess, QProcessEnvironment, QTimer, Qt, QUrl
 from PyQt5.QtGui import QDesktopServices
-from PyQt5.QtWidgets import (QApplication, QAbstractItemView, QComboBox, QFileDialog,
-    QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSplitter, QTabWidget, QTableWidget,
-    QTableWidgetItem, QTextBrowser, QTreeView, QVBoxLayout, QWidget)
+from PyQt5.QtWidgets import (QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog,
+    QDialogButtonBox, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSplitter,
+    QTabWidget, QTableWidget, QTableWidgetItem, QTextBrowser, QTextEdit, QTreeView, QVBoxLayout, QWidget)
 
 from . import __version__, theme
 from .backend import Registry, canonical, docs_root, inside
 from .sidebar import ProjectTree
 
-STATE_LABELS = {"PENDING": "待开始", "IN_PROGRESS": "进行中", "REVIEW_READY": "待主对话验收", "BLOCKED": "受阻"}
+STATE_LABELS = {"PENDING": "待开始", "IN_PROGRESS": "进行中", "REVIEW_READY": "待主对话验收", "BLOCKED": "受阻",
+                "COMPLETED": "已完成", "ABANDONED": "已放弃"}
+CLOSED_STATES = {"COMPLETED", "ABANDONED"}
+
+
+def age_days(stamp):
+    if not stamp:
+        return None
+    try:
+        value = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return max(0, (datetime.now(timezone.utc) - value).days)
+
+
+def package_state_label(package):
+    label = STATE_LABELS.get(package["state"], package["state"])
+    if package["state"] in CLOSED_STATES:
+        return label
+    days = age_days(package.get("updated_at") or package.get("created_at"))
+    return label + (f" · 滞留 {days} 天" if days is not None and days >= 7 else "")
+
+
+class ClosePackageDialog(QDialog):
+    def __init__(self, package, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("关闭工作包")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        title = QLabel(package["id"] + "\n" + package["goal"])
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        self.completed = QRadioButton("已完成：主对话验收通过")
+        self.abandoned = QRadioButton("已放弃：被取代、重复或不再需要")
+        self.abandoned.setChecked(True)
+        if package.get("state") != "REVIEW_READY":
+            self.completed.setEnabled(False)
+            self.completed.setToolTip("只有“待主对话验收”的工作包才能标记完成")
+        layout.addWidget(self.completed)
+        layout.addWidget(self.abandoned)
+        layout.addWidget(QLabel("关闭原因（必填，写入审计记录）"))
+        self.reason = QTextEdit()
+        self.reason.setPlaceholderText("例如：由 WP-108/R1 结案报告取代")
+        self.reason.setFixedHeight(90)
+        layout.addWidget(self.reason)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept(self):
+        if not self.reason.toPlainText().strip():
+            QMessageBox.warning(self, "需要原因", "关闭工作包必须写明原因。")
+            return
+        self.accept()
+
+    def values(self):
+        return ("COMPLETED" if self.completed.isChecked() else "ABANDONED",
+                self.reason.toPlainText().strip())
 
 
 class MainWindow(QMainWindow):
@@ -37,6 +98,7 @@ class MainWindow(QMainWindow):
         self.catalog = {}
         self.current_root = None
         self.current_snapshot = None
+        self.visible_packages = []
         self.busy = False
         self.closing = False
         self.last_error = ""
@@ -165,7 +227,20 @@ class MainWindow(QMainWindow):
         self.packages.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.packages.horizontalHeader().setStretchLastSection(True)
         self.packages.setColumnWidth(0, 380)
-        self.tabs.addTab(self.packages, "工作包")
+        self.packages.itemSelectionChanged.connect(self.update_close_button)
+        package_tab = QWidget()
+        package_layout = QVBoxLayout(package_tab)
+        package_toolbar = QHBoxLayout()
+        self.show_closed = QCheckBox("显示已关闭")
+        self.show_closed.setChecked(bool(self.settings.get("show_closed", False)))
+        self.show_closed.toggled.connect(self.toggle_closed)
+        package_toolbar.addWidget(self.show_closed)
+        self.close_button = self.button(package_toolbar, "关闭工作包…", self.close_package)
+        self.close_button.setEnabled(False)
+        package_toolbar.addStretch()
+        package_layout.addLayout(package_toolbar)
+        package_layout.addWidget(self.packages, 1)
+        self.tabs.addTab(package_tab, "工作包")
         view = QWidget()
         vb = QVBoxLayout(view)
         view.setMinimumHeight(550)
@@ -225,6 +300,45 @@ class MainWindow(QMainWindow):
 
     def persist(self):
         self.registry.save(self.settings)
+
+    def toggle_closed(self, checked):
+        self.settings["show_closed"] = bool(checked)
+        self.safe(self.persist)
+        self.render_packages()
+
+    def render_packages(self):
+        packages = (self.current_snapshot or {}).get("packages", [])
+        show_closed = self.show_closed.isChecked()
+        self.visible_packages = [p for p in packages if show_closed or p["state"] not in CLOSED_STATES]
+        self.packages.setRowCount(len(self.visible_packages))
+        for row, package in enumerate(self.visible_packages):
+            values = (package["id"] + "\n" + package["goal"], package["revision"],
+                      package_state_label(package), package["tasks"])
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(package.get("close_reason") or str(value))
+                self.packages.setItem(row, column, item)
+        self.packages.resizeRowsToContents()
+        self.update_close_button()
+
+    def selected_package(self):
+        row = self.packages.currentRow()
+        return self.visible_packages[row] if 0 <= row < len(self.visible_packages) else None
+
+    def update_close_button(self):
+        package = self.selected_package()
+        self.close_button.setEnabled(bool(package) and package["state"] not in CLOSED_STATES)
+
+    def close_package(self):
+        package = self.selected_package()
+        if not package or self.busy:
+            return
+        dialog = ClosePackageDialog(package, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        state, reason = dialog.values()
+        self.start_job("close", payload={"package": package["id"], "state": state,
+            "reason": reason, "version": package["version"]})
 
     def rebuild_projects(self):
         hidden = set(self.settings.get("hidden_projects", []))
@@ -380,12 +494,20 @@ class MainWindow(QMainWindow):
         self.tree.setRootIndex(self.files.index(root))
         self.start_job("snapshot")
 
-    def select_package(self,package):
-        for i,p in enumerate((self.current_snapshot or {}).get("packages",[])):
-            if p["id"]==package:
-                self.packages.selectRow(i)
+    def select_package(self, package):
+        for row, item in enumerate(self.visible_packages):
+            if item["id"] == package:
+                self.packages.selectRow(row)
                 self.tabs.setCurrentIndex(1)
-                break
+                return
+        for item in (self.current_snapshot or {}).get("packages", []):
+            if item["id"] == package and item["state"] in CLOSED_STATES and not self.show_closed.isChecked():
+                self.show_closed.setChecked(True)
+                for row, visible in enumerate(self.visible_packages):
+                    if visible["id"] == package:
+                        self.packages.selectRow(row)
+                        self.tabs.setCurrentIndex(1)
+                        return
 
     def selected_path(self):
         index = self.tree.currentIndex()
@@ -463,7 +585,7 @@ class MainWindow(QMainWindow):
             if self.current_root and not self.busy:
                 self.start_job("snapshot", quiet=True)
 
-    def start_job(self, action, root=None, quiet=False, selection=""):
+    def start_job(self, action, root=None, quiet=False, selection="", payload=None):
         root = root or self.current_root
         if self.busy or not root:
             return
@@ -473,7 +595,9 @@ class MainWindow(QMainWindow):
         self.output = bytearray()
         self.job_error = ""
         self.projects.setEnabled(False)
-        self.status.setText("正在" + {"snapshot": "读取状态", "probe": "执行短期 stdio 自检", "refresh": "刷新视图", "scan": "发现项目", "archive": "归档视图", "prepare-obsidian": "准备 Obsidian 文档库"}[action] + "…") if not quiet else None
+        self.status.setText("正在" + {"snapshot": "读取状态", "probe": "执行短期 stdio 自检", "refresh": "刷新视图",
+            "scan": "发现项目", "archive": "归档视图", "prepare-obsidian": "准备 Obsidian 文档库",
+            "close": "关闭工作包"}[action] + "…") if not quiet else None
         base = Path(__file__).resolve().parents[3]
         default_python = base / ".venv/bin/python"
         server_python = self.settings.get("server_python") or (str(default_python) if default_python.exists() else sys.executable)
@@ -482,6 +606,9 @@ class MainWindow(QMainWindow):
         self.job.setProcessEnvironment(env)
         self.job.start(sys.executable, ["-m", "scs_manager.worker", action, "--root", str(root),
             "--python", server_python, "--session", self.sessions.currentData() or "", "--selection", selection])
+        if payload is not None:
+            self.job.write(json.dumps(payload, ensure_ascii=False).encode())
+            self.job.closeWriteChannel()
         self.timeout.start(28000)
 
     def read_output(self):
@@ -570,7 +697,8 @@ class MainWindow(QMainWindow):
         self.current_snapshot = data
         counts = data.get("counts", {})
         v = data["view"]
-        self.summary.setText(f"本地数据：{data['database']}　·　会话：{counts.get('sessions', 0)}　·　工作包：{counts.get('work_packages', 0)}\n"
+        closed = sum(1 for package in data["packages"] if package["state"] in CLOSED_STATES)
+        self.summary.setText(f"本地数据：{data['database']}　·　会话：{counts.get('sessions', 0)}　·　工作包：{counts.get('work_packages', 0)}（已关闭 {closed}）\n"
                              f"受管视图：{v['state']}　·　{v['count']} 个受管文件")
         selected = self.sessions.currentData()
         self.sessions.clear()
@@ -581,13 +709,7 @@ class MainWindow(QMainWindow):
         index = self.sessions.findData(selected)
         if index >= 0:
             self.sessions.setCurrentIndex(index)
-        self.packages.setRowCount(len(data["packages"]))
-        for row, p in enumerate(data["packages"]):
-            for col, value in enumerate((p['id'] + "\n" + p['goal'], p['revision'], STATE_LABELS.get(p['state'], p['state']), p['tasks'])):
-                item = QTableWidgetItem(str(value))
-                item.setToolTip(str(value))
-                self.packages.setItem(row, col, item)
-        self.packages.resizeRowsToContents()
+        self.render_packages()
         self.view_info.setText("库目录：" + data['docs_root'] + "\n受管目录：agent/acceptance\n自动刷新：" +
                                ("启用" if v['auto_refresh'] else "未启用") + "　· 最近生成：" + (v.get('refreshed_at') or "—"))
         self.managed_files.clear()
