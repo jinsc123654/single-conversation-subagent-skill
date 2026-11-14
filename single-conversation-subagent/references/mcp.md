@@ -15,7 +15,7 @@
 5. TEXT_FALLBACK_REQUIRED：显示 display_text 中完整选项与唯一推荐，结束当轮等回复；再 `interaction_submit(session_id=...,question_id=...,action="accept",choices=["long"],source="text")`。不把文本当原生弹窗成功。
 6. `session_get` 读取已确认选择与未决问题。同题重复 request 不弹第二个 UI，已确认直接返回 ALREADY_CONFIRMED。同一对话沿用已确认的 `mode`/`verification`/`codex_review`，不重复提问；后续验证/审查问题的 `recommendation` 用上次确认值，15 秒超时自动继续上次选项。只有用户显式说“使用长任务/只调查/快速处理/标准执行”才 `interaction_reopen(kind="mode", explicit_user_change=true)`，随后 `interaction_request(channel="text", recommendation=[新模式])` → `interaction_submit(accept)`，不弹表单。`mcp` 15s 超时后模型继续，表单仍由宿主持有，提示用户稍后忽略，不重复提交。
 
-模式值 `quick/standard/long/investigate`。推荐是单元素列表。仅首次进入 standard/long 后请求 verification，值为 `smoke/targeted/full/stability/none/method-only`，支持多选；推荐只有一个列表组合。`none` 和 `method-only` 各自排除所有其他项。冒烟本轮，定向/全量/稳定性收尾；用户指定预算、资源、方法写入协调记录。危险操作不在此表单授权范围。
+模式值 `quick/standard/long/investigate`。推荐是单元素列表。仅首次进入 standard/long 后请求 verification，值为 `smoke/targeted/full/stability/none/method-only`，支持多选；推荐只有一个列表组合。`none` 和 `method-only` 各自排除所有其他项。冒烟本轮，定向/全量/稳定性收尾；用户指定预算、资源、方法写入协调记录。危险操作不在此表单授权范围。`long` 模式下所有任务性查找、分析、实现和测试由执行子 Agent 完成，主对话只保留目标、决策、未决问题、下一步、证据路径和记录。
 
 verification 仅标准/长任务请求；快速/只调查跳过。codex_review 在任务开始时、快速/标准/长任务、只有宿主确证注册 codex-review 时才请求，值 `no/yes`，唯一推荐 `["no"]`；只调查、未知或未注册返回 SKIPPED；未知的原因为 CODEX_REVIEW_REGISTRATION_UNKNOWN，明确未注册为 CODEX_REVIEW_NOT_REGISTERED；标准/长任务要求先确认 verification，快速不要求。任务开始只记录选择，收尾再实际执行，不重复问。`explicit_skip=true` 仅用于用户明确“不用问，直接做”，记录 quick；需要改变模式时显式 reopen，不把自动检测当用户跳过。
 
