@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.4 — 2026-11-14
+
+- 仓库纳入 `codex-review/` 技能：Codex 只读独立审查（固定 `gpt-6.1-sol`），含 brief 模板与「会话复用」规则——审查基线（项目 + WP/Rn + 审查对象 + 只读清单 + 验收标准）一致才续跑，基线变化或审查期间有写入则新开；续跑显式传 `-m` 并核验启动头。
+- `install.sh` 新增 `--skill codex-review`：纯 Skill 安装到 `$AGENT_HOME/skills/codex-review/`，不注入 AGENTS 规则、不建 MCP runtime；`--check`/`--uninstall` 复用同一路径。主技能安装路径与行为不变。
+- README 增加双技能说明；会话复用规则按 Codex 设计审查（首轮 REJECT）收敛后落盘。
+
 ## 2.4.3 — 2026-11-11
 
 - `recommendation` 和提交 choices 同时接受代码值（`none`）与中文显示标签（`不做测试`/`本轮冒烟`/`不使用`）；避免模型按界面文案传参时 `CHOICE_INVALID`。

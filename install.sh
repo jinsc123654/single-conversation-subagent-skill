@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SKILL_NAME=single-conversation-subagent
+SKILL_SELECT=single-conversation-subagent
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_HOME="${AGENT_HOME:-$HOME/.agents}"
 AGENT_HOME="${AGENT_HOME%/}"
@@ -22,6 +23,8 @@ usage() {
   cat <<'HELP'
 Usage: bash install.sh [options]
   --mode skill|hybrid       Default skill; hybrid adds a local MCP runtime.
+  --skill NAME              Bundled skill to install: single-conversation-subagent (default)
+                            or codex-review (pure Skill; no AGENTS rule, no MCP runtime).
   --with-default-rule       Update only this skill's marked block in AGENT_HOME/AGENTS.md.
   --instructions-file PATH  Update the marked block in this file; implies default rule.
   --python PATH             Python 3.11+ for hybrid (or SCS_PYTHON).
@@ -39,10 +42,11 @@ HELP
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --mode|--instructions-file|--python|--project-root|--allow-root|--host|--question-channel)
+    --mode|--instructions-file|--python|--project-root|--allow-root|--host|--question-channel|--skill)
       [ "$#" -ge 2 ] || { echo "Missing option value" >&2; exit 2; }
       case "$1" in
         --mode) MODE="$2" ;;
+        --skill) SKILL_SELECT="$2" ;;
         --instructions-file) INSTRUCTIONS_FILE="$2"; WITH_RULE=1 ;;
         --python) PYTHON_BIN="$2" ;;
         --project-root) PROJECT_ROOT="$2" ;;
@@ -61,6 +65,18 @@ while [ "$#" -gt 0 ]; do
 done
 case "$MODE" in skill|hybrid) ;; *) echo 'Mode must be skill or hybrid' >&2; exit 2 ;; esac
 case "$HOST" in codex|zcode|claude|generic) ;; *) echo 'Host must be codex, zcode, claude or generic' >&2; exit 2 ;; esac
+case "$SKILL_SELECT" in
+  single-conversation-subagent|codex-review) SKILL_NAME="$SKILL_SELECT" ;;
+  *) echo "Unknown skill: $SKILL_SELECT" >&2; exit 2 ;;
+esac
+if [ "$SKILL_NAME" != single-conversation-subagent ]; then
+  if [ "$WITH_RULE" -eq 1 ]; then
+    echo "Note: $SKILL_NAME has no AGENTS rule block; installing Skill only." >&2
+  fi
+  MODE=skill
+  WITH_RULE=0
+  INSTRUCTIONS_FILE=""
+fi
 if [ -z "$QUESTION_CHANNEL" ]; then
   case "$HOST" in
     codex) QUESTION_CHANNEL=native ;;

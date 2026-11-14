@@ -1,4 +1,4 @@
-# single-conversation-subagent 2.4.3
+# single-conversation-subagent 2.4.4
 
 单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。
 
@@ -53,6 +53,20 @@ bash install.sh --mode hybrid --check
 安装器在修改前备份，只替换本技能的标记块，保留其他技能/项目内容；重复安装不重复注入规则。拒绝目标及其父目录的符号链接、父目录跳转、畸形规则标记和源目录自覆盖。安装器不改写现有客户端 MCP 配置；生成可审查示例到 runtime 的 `client-examples.json`、`codex-example.toml`，由用户复制合并。未给 project-root 时须替换示例占位符。**重开对话**以加载 Skill 和规则变更。
 
 手动安装：复制 `single-conversation-subagent/` 到宿主实际的 skills 目录，再把 AGENTS.snippet.md 的标记块合入宿主读取的指令文件；无 bash/无 Python 也能使用纯 Skill。不要覆盖其他标记块或已有项目记忆。
+
+## 另一个技能：codex-review
+
+本仓库同时管理 `codex-review/`：让 Codex 以只读方式独立审查任务、未提交改动、修订或 commit，输出逐项判定与最终 `ACCEPT/REJECT`；审查模型固定为 `gpt-6.1-sol`，含 brief 模板与会话复用规则（审查基线一致才 `codex exec resume`，基线变化新开会话）。
+
+```bash
+bash install.sh --skill codex-review
+bash install.sh --skill codex-review --check
+bash install.sh --skill codex-review --uninstall
+```
+
+默认装到 `$AGENT_HOME/skills/codex-review/`。它是纯 Skill：没有 AGENTS 规则块，也没有 MCP runtime；`--mode hybrid` 与 `--with-default-rule` 会被忽略并降为纯 Skill 安装。手动安装时复制 `codex-review/` 到宿主 skills 目录即可。
+
+两个技能相互独立：主技能在收尾联动时按用户选择调用 codex-review，不依赖安装顺序。
 
 ## 客户端配置
 
