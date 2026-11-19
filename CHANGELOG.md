@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.9.0 — 2026-11-19
+
+- 高危/长任务方案指导：修改系统关键配置、删除/覆盖关键数据、不可逆系统级操作或长任务，在实现前推荐一次 Codex 只读项目方案指导（仅一次）；主对话记录结果，不重复，不替代收尾审查。
+- 收尾审查推荐改为按项目情况：大多数普通/小型/已验证任务推荐不审查；高风险、跨仓库/大范围、验证不足或方案指导发现重大风险时推荐使用。MCP `codex_review` 接受 `recommendation=["yes"]` 或 `["no"]`，不再强制只推荐 no。
+- Skill、AGENTS 规则、README、协议和 MCP 参考同步；测试覆盖 yes 推荐的原生问题路径。
+- 测试：163 项 MCP、45 项桌面通过。
+
 ## 2.8.0 — 2026-11-19
 
 - 本机 Markdown 任务看板：新增 `board_task_list/get/add/claim/start/update/comment/complete/abandon/release/prompt` 共 11 个 MCP 工具；任务存 `$SCS_BOARD_DIR`（默认 `~/.local/share/scs-manager/board`），每个任务一个 `.md` + `.jsonl` 事件，不跨机、不改 `.scs` schema；认领冲突返回 `TASK_CLAIMED` 与新建会话任务 hint。

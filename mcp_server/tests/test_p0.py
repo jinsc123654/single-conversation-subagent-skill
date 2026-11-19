@@ -463,7 +463,7 @@ async def test_native_intake_compact_and_returns_pending_verification(tmp_path):
         assert verification["options"][0]["value"] == "smoke"
         assert len(json.dumps(verification, ensure_ascii=False).encode()) < 1_500
 
-        review_args = {"session_id": sid, "kind": "codex_review", "recommendation": ["no"]}
+        review_args = {"session_id": sid, "kind": "codex_review", "recommendation": ["yes"]}
         pending = await call("interaction_request", **review_args)
         assert pending["status"] == "QUESTION_PENDING"
         assert pending["question_id"] == verification["question_id"]
@@ -475,6 +475,7 @@ async def test_native_intake_compact_and_returns_pending_verification(tmp_path):
         review = await call("interaction_request", **review_args)
         assert review["status"] == "NATIVE_QUESTION_REQUIRED"
         assert review["kind"] == "codex_review"
+        assert review["recommendation"] == ["yes"]
         restored = await call("session_open", project_root=str(tmp_path), resume_session_id=sid)
         assert restored["verification"] == ["smoke"]
         assert "workspace_scan" not in restored and "mode_options" not in restored

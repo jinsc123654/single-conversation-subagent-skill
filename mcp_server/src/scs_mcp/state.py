@@ -184,8 +184,6 @@ class State:
                     return {"status": "SKIPPED", "reason": "CODEX_REVIEW_REGISTRATION_UNKNOWN"}
                 if s["review_registration"] == "unregistered":
                     return {"status": "SKIPPED", "reason": "CODEX_REVIEW_NOT_REGISTERED"}
-                if recommendation != ["no"]:
-                    raise ScsError("CHOICE_INVALID", "The review question recommends no additional review.")
             qid = identifier("Q-")
             stamp = now()
             con.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)",

@@ -17,7 +17,7 @@
 
 模式值 `quick/standard/long/investigate`。推荐是单元素列表。仅首次进入 standard/long 后请求 verification，值为 `smoke/targeted/full/stability/none/method-only`，支持多选；推荐只有一个列表组合。`none` 和 `method-only` 各自排除所有其他项。冒烟本轮，定向/全量/稳定性收尾；用户指定预算、资源、方法写入协调记录。危险操作不在此表单授权范围。`long` 模式下所有任务性查找、分析、实现和测试由执行子 Agent 完成，主对话只保留目标、决策、未决问题、下一步、证据路径和记录。
 
-verification 仅标准/长任务请求；快速/只调查跳过。codex_review 在任务开始时、快速/标准/长任务、只有宿主确证注册 codex-review 时才请求，值 `no/yes`，唯一推荐 `["no"]`；只调查、未知或未注册返回 SKIPPED；未知的原因为 CODEX_REVIEW_REGISTRATION_UNKNOWN，明确未注册为 CODEX_REVIEW_NOT_REGISTERED；标准/长任务要求先确认 verification，快速不要求。任务开始只记录选择，收尾再实际执行，不重复问。`explicit_skip=true` 仅用于用户明确“不用问，直接做”，记录 quick；需要改变模式时显式 reopen，不把自动检测当用户跳过。
+verification 仅标准/长任务请求；快速/只调查跳过。codex_review 在任务开始时、快速/标准/长任务、只有宿主确证注册 codex-review 时才请求，值 `no/yes`；`recommendation` 由 Skill 按项目情况给单个值：高风险（系统关键配置、删除关键数据、安全相关）、跨仓库/大范围、验证不足或方案指导发现重大风险时推荐 `["yes"]`，大多数普通/小型/已验证任务推荐 `["no"]`；MCP 不再强制只推荐 no。只调查、未知或未注册返回 SKIPPED；未知的原因为 CODEX_REVIEW_REGISTRATION_UNKNOWN，明确未注册为 CODEX_REVIEW_NOT_REGISTERED；标准/长任务要求先确认 verification，快速不要求。任务开始只记录选择，收尾再实际执行，不重复问。高危/长任务的 Codex 方案指导用宿主原生问答或文本回退，同一任务只做一次，不写入 MCP question，也不替代 codex_review。`explicit_skip=true` 仅用于用户明确“不用问，直接做”，记录 quick；需要改变模式时显式 reopen，不把自动检测当用户跳过。
 
 ## 恢复会话与补登记
 
