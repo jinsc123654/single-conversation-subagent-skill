@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.8.0 — 2026-11-19
+
+- 本机 Markdown 任务看板：新增 `board_task_list/get/add/claim/start/update/comment/complete/abandon/release/prompt` 共 11 个 MCP 工具；任务存 `$SCS_BOARD_DIR`（默认 `~/.local/share/scs-manager/board`），每个任务一个 `.md` + `.jsonl` 事件，不跨机、不改 `.scs` schema；认领冲突返回 `TASK_CLAIMED` 与新建会话任务 hint。
+- 桌面管理器重排为 project-pulse 风格：统一顶栏（导航/摘要/主题/帮助）、3/4/5 列自适应项目卡片、最近待办预览、我的待办页（过滤/搜索/完成/编辑/居中空状态）、浅色/深色主题。
+- 工作包关闭支持 `force=true` 跳过状态/证据/活动 attempt 检查（仍要求 close_reason，结束活动 attempt 并写 `PACKAGE_FORCE_CLOSED`）；工作包工具栏/右键可复制 Agent 入口和任务包特征。
+- 管理器启动走 `qt-fractional`/XWayland；`DISPLAY` 为空时明确报错；`--check` 报告 `qt_qpa_platform`、`xwayland_display`。
+- 桌面管理器跨进程只读查找已登记会话（操作员路径），修复含 `#`/`?` 的 session ID URI。
+- 测试：163 项 MCP、45 项桌面通过。
+
 ## 2.7.0 — 2026-11-15
 
 - 长任务多子 Agent 并发（首版）：子任务新增 `depends_on` / `resources` / `required`，创建与修订时校验 DAG；支持同项目包内与跨包并发。

@@ -66,6 +66,157 @@ def docs_root(root):
     return root / "docs"
 
 
+BOARD_STATES = ("todo", "claimed", "in_progress", "done", "abandoned")
+BOARD_TERMINAL = {"done", "abandoned"}
+
+
+def board_dir():
+    """Local Markdown board directory, matching the MCP server default."""
+    explicit = os.environ.get("SCS_BOARD_DIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    base = os.environ.get("XDG_DATA_HOME", "").strip()
+    root = Path(base).expanduser() if base else Path.home() / ".local" / "share"
+    return root / "scs-manager" / "board"
+
+
+def _board_task(path, root=None):
+    """Read one board Markdown file; optionally filter to one project."""
+    if path.stat().st_size > 1_000_000:
+        raise ValueError("待办文件过大")
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise ValueError("待办缺少 frontmatter")
+    end = text.find("\n---\n", 4)
+    if end < 0:
+        raise ValueError("待办 frontmatter 未闭合")
+    values = {}
+    for line in text[4:end].splitlines():
+        if not line.strip():
+            continue
+        key, separator, raw = line.partition(":")
+        if not separator:
+            raise ValueError("待办字段格式错误")
+        key = key.strip()
+        try:
+            values[key] = json.loads(raw.strip())
+        except ValueError:
+            values[key] = raw.strip()
+    if values.get("id") != path.stem:
+        raise ValueError("待办 ID 与文件名不一致")
+    if root is not None and values.get("project_root") != str(root):
+        return None
+    project_root = values.get("project_root") or ""
+    detail = text[end + 5:].strip("\n")
+    updated = values.get("updated_at") or ""
+    try:
+        stamp = datetime.fromisoformat(str(updated))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        stamp = None
+    now = datetime.now(timezone.utc)
+    age = (now - stamp).total_seconds() / 86400 if stamp else 0.0
+    state = str(values.get("state") or "todo")
+    events = []
+    event_file = path.parents[1] / "events" / f"{path.stem}.jsonl"
+    if event_file.is_file():
+        try:
+            for line in event_file.read_text(encoding="utf-8").splitlines()[-20:]:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+        except OSError:
+            events = []
+    return {
+        "id": values.get("id"),
+        "project_root": project_root,
+        "project_name": Path(project_root).name if project_root else "",
+        "title": values.get("title") or "",
+        "detail": detail,
+        "priority": values.get("priority") or "medium",
+        "due_at": values.get("due_at") or "",
+        "state": state,
+        "session_id": values.get("session_id") or "",
+        "created_session": values.get("created_session") or "",
+        "owner": values.get("owner") or "",
+        "work_package_id": values.get("work_package_id") or "",
+        "created_by": values.get("created_by") or "",
+        "created_at": values.get("created_at") or "",
+        "updated_at": updated,
+        "version": int(values.get("version") or 1),
+        "age_days": round(max(0.0, age), 2),
+        "stale": state not in BOARD_TERMINAL and age >= 3,
+        "events": events,
+    }
+
+
+def board_snapshot(root):
+    """Read-only view of this project's local Markdown board; never creates it."""
+    root = canonical(root)
+    board = board_dir()
+    counts = {name: 0 for name in BOARD_STATES}
+    result = {"board_dir": str(board), "available": False, "tasks": [], "counts": counts, "errors": []}
+    tasks_dir = board / "tasks"
+    if not tasks_dir.is_dir():
+        return result
+    result["available"] = True
+    tasks = []
+    for path in sorted(tasks_dir.glob("*.md")):
+        if path.name.startswith(".tmp-"):
+            continue
+        try:
+            task = _board_task(path, root)
+        except (OSError, ValueError) as error:
+            result["errors"].append(f"{path.name}: {error}")
+            continue
+        if task is None:
+            continue
+        tasks.append(task)
+        if task["state"] in counts:
+            counts[task["state"]] += 1
+    tasks.sort(key=lambda item: (item.get("updated_at", ""), item.get("id", "")), reverse=True)
+    result["tasks"] = tasks[:500]
+    result["counts"] = {**counts, "total": sum(counts.values())}
+    return result
+
+
+def board_all():
+    """All local board tasks across projects, grouped for the overview pages."""
+    board = board_dir()
+    tasks_dir = board / "tasks"
+    counts = {name: 0 for name in BOARD_STATES}
+    result = {"board_dir": str(board), "available": False, "tasks": [], "counts": counts,
+              "projects": {}, "errors": []}
+    if not tasks_dir.is_dir():
+        return result
+    result["available"] = True
+    tasks = []
+    for path in sorted(tasks_dir.glob("*.md")):
+        if path.name.startswith(".tmp-"):
+            continue
+        try:
+            task = _board_task(path, None)
+        except (OSError, ValueError) as error:
+            result["errors"].append(f"{path.name}: {error}")
+            continue
+        if task is None:
+            continue
+        tasks.append(task)
+        if task["state"] in counts:
+            counts[task["state"]] += 1
+        if task["state"] not in BOARD_TERMINAL:
+            root = task.get("project_root") or ""
+            result["projects"][root] = result["projects"].get(root, 0) + 1
+    tasks.sort(key=lambda item: (item.get("updated_at", ""), item.get("id", "")), reverse=True)
+    result["tasks"] = tasks[:1000]
+    result["counts"] = {**counts, "total": sum(counts.values())}
+    return result
+
+
 def read_json(path, maximum=2_000_000):
     with Path(path).open("rb") as handle:
         raw = handle.read(maximum + 1)
@@ -177,6 +328,7 @@ def snapshot(root):
             result["view"] = {"state": "刷新未完成" if m.get("pending") else "已生成（需连接检查有效性）",
                 "count": len(m["files"]), "auto_refresh": bool(m.get("auto_refresh")),
                 "refreshed_at": m.get("refreshed_at"), "missing": missing, "files": sorted(m["files"])}
+    result["board"] = board_snapshot(root)
     return result
 
 
@@ -323,29 +475,34 @@ def registered_projects():
     return read_index()
 
 
-def project_catalog(roots):
-    """Small sidebar summaries; reads never update the activity timestamp."""
+def project_catalog(roots, board=None):
+    """Small project cards; reads never update the activity timestamp."""
     if not isinstance(roots,list) or len(roots)>500 or any(not isinstance(p,str) for p in roots):
         raise ValueError('项目列表格式错误或超过500项')
+    board = board or board_all()
     projects=[]
     for raw in roots:
-        entry={'root':raw,'name':Path(raw).name,'last_activity':0.0,'packages':[],'error':None}
+        entry={'root':raw,'name':Path(raw).name,'last_activity':0.0,'packages':[],'sessions':[],
+               'counts':{'sessions':0,'packages':0,'in_progress':0,'review_ready':0,'todos':0},'error':None}
+        entry['counts']['todos']=board['projects'].get(raw,0)
         try:
             root=canonical(raw)
+            entry['counts']['todos']=board['projects'].get(str(root),entry['counts']['todos'])
             if inside(root,'.scs/state.sqlite3').is_file():
                 with database(root,timeout=0.15) as con:
                     latest=con.execute('SELECT max(at) FROM events').fetchone()[0]
                     entry['last_activity']=timestamp(latest)
+                    entry['sessions']=[dict(r) for r in con.execute("SELECT id,client,mode,verification,codex_review,review_registration,created_at FROM sessions ORDER BY created_at DESC LIMIT 200")]
+                    entry['counts']['sessions']=len(entry['sessions'])
+                    entry['counts']['packages']=con.execute('SELECT count(*) FROM work_packages').fetchone()[0]
+                    entry['counts']['in_progress']=con.execute("SELECT count(*) FROM work_packages WHERE state='IN_PROGRESS'").fetchone()[0]
+                    entry['counts']['review_ready']=con.execute("SELECT count(*) FROM work_packages WHERE state='REVIEW_READY'").fetchone()[0]
                     has_revisions=con.execute("SELECT 1 FROM sqlite_master WHERE name='work_package_revisions'").fetchone()
                     if has_revisions:
-                        query='''SELECT p.id,p.state,p.data,p.created_at,coalesce((SELECT max(captured_at)
-                          FROM work_package_revisions r WHERE r.package_id=p.id),p.created_at) AS activity
-                          FROM work_packages p WHERE p.state NOT IN ('COMPLETED','ABANDONED')
-                          ORDER BY activity DESC,p.id LIMIT 8'''
+                        rows = con.execute("SELECT p.id,p.state,p.data,p.created_at,coalesce((SELECT max(captured_at) FROM work_package_revisions r WHERE r.package_id=p.id),p.created_at) AS activity FROM work_packages p WHERE p.state NOT IN ('COMPLETED','ABANDONED') ORDER BY activity DESC,p.id LIMIT 8").fetchall()
                     else:
-                        query='''SELECT id,state,data,created_at,created_at AS activity FROM work_packages
-                          WHERE state NOT IN ('COMPLETED','ABANDONED') ORDER BY created_at DESC,id LIMIT 8'''
-                    for row in con.execute(query):
+                        rows = con.execute("SELECT id,state,data,created_at,created_at AS activity FROM work_packages WHERE state NOT IN ('COMPLETED','ABANDONED') ORDER BY created_at DESC,id LIMIT 8").fetchall()
+                    for row in rows:
                         last=timestamp(row['activity'])
                         entry['last_activity']=max(entry['last_activity'],last)
                         goal=json.loads(row['data']).get('goal',row['id'])

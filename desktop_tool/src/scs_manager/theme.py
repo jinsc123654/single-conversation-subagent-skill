@@ -408,6 +408,91 @@ QFrame#metric {{
     border: 1px solid {p.border};
     border-radius: 10px;
 }}
+QLabel#metricValue {{ font-size: 24px; font-weight: 600; }}
+QFrame#projectCard, QFrame#todoCard {{
+    background: {p.surface};
+    border: 1px solid {p.border};
+    border-radius: 12px;
+}}
+QFrame#projectCard:hover, QFrame#todoCard:hover {{ border-color: {p.border_strong}; }}
+QLabel#projectName {{ font-size: 15px; font-weight: 600; }}
+QLabel#projectMetric {{ color: {p.muted}; font-size: 11px; }}
+QLabel#projectMetricValue {{ font-size: 18px; font-weight: 600; }}
+QLabel#todoTitle {{ font-size: 14px; font-weight: 600; }}
+QFrame#appHeader {{
+    background: {p.surface};
+    border: none;
+    border-bottom: 1px solid {p.border};
+}}
+QLabel#productTitle {{ font-size: 17px; font-weight: 600; }}
+QFrame#pageNavigation {{
+    background: {p.surface_alt};
+    border-radius: 16px;
+}}
+QPushButton[role="pageNav"] {{
+    background: transparent;
+    color: {p.text_dim};
+    border: 1px solid transparent;
+    border-radius: 13px;
+    min-height: 0px;
+    padding: 5px 12px;
+}}
+QPushButton[role="pageNav"]:hover:!checked {{ color: {p.text}; }}
+QPushButton[role="pageNav"]:checked {{
+    background: {p.surface};
+    color: {p.text};
+    border-color: {p.border};
+}}
+QLabel[role="summaryValue"] {{ font-size: 19px; font-weight: 600; }}
+QLabel[role="summaryCaption"] {{ color: {p.text_dim}; font-size: 11px; }}
+QPushButton[role="filter"] {{
+    background: transparent;
+    color: {p.text_dim};
+    min-height: 0px;
+    padding: 6px 11px;
+    border-radius: 12px;
+}}
+QPushButton[role="filter"]:hover {{ background: {p.surface_alt}; }}
+QPushButton[role="filter"]:checked {{
+    background: {tint(p.accent, 0.12)};
+    color: {p.accent};
+}}
+QPushButton[role="cardAction"] {{
+    background: transparent;
+    color: {p.text_dim};
+    border: 1px solid transparent;
+    border-radius: 13px;
+    min-height: 0px;
+    padding: 0px 6px;
+}}
+QPushButton[role="cardAction"]:hover {{
+    background: {p.surface_alt};
+    color: {p.text};
+}}
+QPushButton[role="cardAction"]:checked {{
+    background: {tint(p.accent, 0.12)};
+    color: {p.accent};
+}}
+QPushButton[role="pageNav"]:focus,
+QPushButton[role="filter"]:focus,
+QPushButton[role="cardAction"]:focus {{ border: 1px solid {p.accent}; }}
+QFrame#previewBox {{
+    background: {p.surface};
+    border: 1px solid {p.border};
+    border-radius: 12px;
+}}
+QFrame#emptyStateCard {{
+    background: {p.surface};
+    border: 1px solid {p.border};
+    border-radius: 12px;
+}}
+QLabel#emptyStateTitle {{ font-size: 18px; font-weight: 600; }}
+QFrame#todoCard[terminal="true"] QLabel#todoTitle {{ color: {p.muted}; }}
+QTabWidget#mainPages::pane {{
+    border: none;
+    background: {p.bg};
+    top: 0px;
+}}
 QFrame#screen:hover {{ border-color: {p.border_strong}; }}
 QFrame#screen[dead="true"] {{ border-color: {tint(p.red, 0.5)}; }}
 QFrame#hairline {{ background: {p.border}; border: none; max-height: 1px; }}

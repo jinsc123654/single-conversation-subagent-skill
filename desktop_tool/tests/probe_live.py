@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -55,8 +56,10 @@ print(row["id"])
         results.append('snapshot:PASS')
         window.start_job('probe')
         wait()
-        assert '17 个工具' in window.connection.text(), window.connection.text()
-        results.append('real-stdio-probe-17-tools:PASS')
+        connection = window.connection.text()
+        count = re.search(r'(\d+) 个工具', connection)
+        assert connection.startswith('自检成功') and count and int(count.group(1)) >= 17, connection
+        results.append('real-stdio-probe-tools:PASS')
         with patch.object(QMessageBox, 'question', return_value=QMessageBox.Yes):
             window.refresh_view()
         wait(); QTest.qWait(30); wait()

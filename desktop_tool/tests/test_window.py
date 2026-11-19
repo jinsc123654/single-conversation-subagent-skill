@@ -14,7 +14,7 @@ from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from scs_manager import theme
 from scs_manager.backend import Registry, obsidian_target
-from scs_manager.window import MainWindow
+from scs_manager.window import ClosePackageDialog, MainWindow
 from helpers import project
 
 APP = QApplication.instance() or QApplication([])
@@ -242,7 +242,29 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(self.window.attempts.rowCount(), 1)
         self.assertEqual(self.window.packages.item(0, 4).text(), "运行 1 · 未知 0")
         self.window.packages.selectRow(0)
-        self.assertFalse(self.window.close_button.isEnabled())
+        # Active attempts no longer disable the button: the close dialog offers
+        # an explicit forced-close path for orphan/stuck packages.
+        self.assertTrue(self.window.close_button.isEnabled())
+        self.assertIn("强制关闭", self.window.close_button.toolTip())
+
+    def test_force_close_dialog_and_agent_prompt(self):
+        with sqlite3.connect(self.root / ".scs/state.sqlite3") as con:
+            con.execute("UPDATE work_packages SET state='IN_PROGRESS' WHERE id='WP-demo'")
+        self.load()
+        self.window.packages.selectRow(0)
+        package = self.window.selected_package()
+        dialog = ClosePackageDialog(package, self.window)
+        self.assertFalse(dialog.completed.isEnabled())
+        dialog.force.setChecked(True)
+        self.assertTrue(dialog.completed.isEnabled())
+        dialog.completed.setChecked(True)
+        dialog.reason.setPlainText("游离任务，确认已完成")
+        self.assertEqual(dialog.values(), ("COMPLETED", "游离任务，确认已完成", True))
+        self.window.copy_package_prompt()
+        copied = QApplication.clipboard().text()
+        self.assertIn(package["id"], copied)
+        self.assertIn("work_package_close", copied)
+        self.assertIn("force=true", copied)
 
     def test_stale_open_package_shows_badge(self):
         with sqlite3.connect(self.root / ".scs/state.sqlite3") as con:

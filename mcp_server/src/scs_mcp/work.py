@@ -547,6 +547,45 @@ class Work:
                 self._store_operation(con, operation_id, "work_package_update", session_id, payload, response)
             return response
 
+    def force_close(self, package_id: str, expected_version: int | None,
+                    state: str, close_reason: str) -> dict:
+        """Operator reconciliation: close an orphan/stuck package regardless of state.
+
+        Normal ``update`` keeps the state machine, evidence and active-attempt
+        checks. This path is only for the local manager when a package has no
+        owning conversation left; it records the operator reason, ends active
+        attempts and writes an audit event.
+        """
+        if state not in CLOSED_STATES:
+            raise ScsError("INPUT_INVALID", "Force close state must be COMPLETED or ABANDONED.")
+        if not isinstance(close_reason, str) or not close_reason.strip():
+            raise ScsError("CLOSE_REASON_REQUIRED", "Record why this work package is force closed.")
+        reason = close_reason.strip()[:2000]
+        with self.store.transaction(True) as con:
+            row = self._get(con, package_id)
+            if row["state"] in CLOSED_STATES:
+                return self._snapshot(row)
+            if expected_version is not None and expected_version != row["version"]:
+                raise ScsError("VERSION_CONFLICT", "Refresh before force closing.")
+            at = now()
+            data = json.loads(row["data"])
+            data["updated_at"] = at
+            data["closed_at"] = at
+            data["close_reason"] = reason
+            data["closed_by_session"] = row["session_id"]
+            data["force_closed"] = True
+            con.execute("UPDATE work_packages SET state=?,data=?,version=version+1 WHERE id=? AND version=?",
+                        (state, encode(data), package_id, row["version"]))
+            con.execute("UPDATE work_attempts SET state='ENDED', result_state='FAIL', result_data=?, "
+                        "updated_at=?, last_observed_at=? WHERE package_id=? AND state!='ENDED'",
+                        (encode({"force_closed": True, "reason": reason}), at, at, package_id))
+            self.store.event(con, row["session_id"], None, "work_package_update", "PACKAGE_FORCE_CLOSED")
+            updated = self._get(con, package_id)
+            self.store.revision_snapshot(con, updated)
+            result = self._snapshot(updated)
+            result["forced"] = True
+            return result
+
     def export(self, session_id: str, package_id: str, expected_version: int) -> dict:
         with self.store.transaction(True) as con:
             row = self._get(con, package_id)

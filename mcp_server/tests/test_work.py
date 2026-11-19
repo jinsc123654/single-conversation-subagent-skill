@@ -86,6 +86,22 @@ def test_missing_empty_traversal_and_symlink_never_verify(setup, tmp_path):
     assert work.evidence(sid, p["id"], 1, "T1", "/etc/passwd")["status"] == "INVALID"
 
 
+def test_force_close_orphan_package_bypasses_state_machine(setup):
+    store, _, sid, work = setup
+    p = package(work, sid)
+    result = work.force_close(p["id"], p["version"], "COMPLETED", "orphan completed elsewhere")
+    assert result["state"] == "COMPLETED"
+    assert result["forced"] is True
+    assert result["close_reason"] == "orphan completed elsewhere"
+    assert result["version"] == p["version"] + 1
+    again = work.force_close(p["id"], None, "COMPLETED", "again")
+    assert again["state"] == "COMPLETED"
+    with pytest.raises(ScsError):
+        work.force_close(p["id"], None, "ABANDONED", "")
+    with pytest.raises(ScsError):
+        work.force_close(p["id"], None, "IN_PROGRESS", "bad target")
+
+
 def test_pass_needs_unchanged_evidence_and_optimistic_version(setup):
     store, _, sid, work = setup
     p = package(work, sid)

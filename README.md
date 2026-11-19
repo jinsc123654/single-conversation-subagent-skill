@@ -1,4 +1,4 @@
-# single-conversation-subagent 2.7.0
+# single-conversation-subagent 2.8.0
 
 单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。
 
@@ -166,7 +166,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 授权多个工作区时，可在 MCP 启动参数或安装命令中重复添加 `--allow-root /absolute/workspace`。现有 `--project-root` 保留为默认工作区。服务只在已配置的目录范围内处理项目，无法用对话参数扩大范围。
 
-仍是 **1 个 MCP 服务，现在提供 17 个工具**。新增两个视图工具，不需要再安装另一套 MCP 或 Obsidian 社区插件。
+仍是 **1 个 MCP 服务，现在提供 32 个工具**（21 个原有工具 + 11 个本机待办 `board_task_*` 工具）。新增视图工具和本机待办不需要再安装另一套 MCP 或 Obsidian 社区插件。
 
 每个项目选中的 docs-root 就是独立的 Obsidian 库根。默认 `00_doc → 00_docs → docs → doc`，都没有时使用 docs；视图在 `<docs-root>/agent/acceptance/`，与项目资料、记忆和证据保持同一文档根。
 
@@ -183,6 +183,14 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 “已完成子任务”表示已报告通过且本次核对证据未变；工作包仍需主对话最终验收。旧版只保留当前工作包的数据库升级时，仅回填实际当前修订；不虚构早期历史。迁移升级到 schema 3，原会话、工作包、证据保持不变；旧版程序不能读取更高 schema，升级前应备份状态，回滚时恢复对应备份。
 
 工作包有终态：`COMPLETED`（主对话验收通过）和 `ABANDONED`（重复、被取代或放弃）。关闭必须带 `close_reason`，服务写入 `closed_at`、`closed_by_session` 和事件记录；关闭后不可修改，后续工作新建工作包。桌面管理器默认隐藏终态，可勾选“显示已关闭”；长期未更新的非终态显示“滞留 N 天”。
+
+## 本机任务看板与项目总览（2.8.0）
+
+新增与工作包独立的本机 Markdown 待办看板：`board_task_list/get/add/claim/start/update/comment/complete/abandon/release/prompt` 共 11 个工具。任务保存在 `$SCS_BOARD_DIR`（默认 `~/.local/share/scs-manager/board`），每个任务一个 `.md`，事件追加 `.jsonl`，不跨机同步，不改 `.scs/state.sqlite3` schema。认领冲突返回 `TASK_CLAIMED` 和 `hint`，建议新建任务并指定 `session_id`。
+
+桌面管理器新增统一顶栏、项目总览卡片（进行中/待验收/待办/会话，3/4/5 列自适应）、我的待办页（过滤/搜索/完成/编辑/空状态）和最近待办预览；工作包关闭支持 `force=true` 的游离任务强制关闭，并可复制 Agent 入口/任务包特征。管理器使用 `qt-fractional` 走 XWayland，未检测到 XWayland 时明确报错。
+
+验证：163 项 MCP 测试、45 项桌面测试；`desktop_tool/build.sh check` 通过。
 
 ## 多子 Agent 并发（2.7.0）
 
@@ -209,7 +217,7 @@ SQLite 升级到 schema 3：新增 `work_attempts`、`work_operations`，`leases
 | interaction_ask | 仅 `mcp` 兜底 channel 的 legacy form 服务端 `timeout_seconds`（默认 15s）；`analysis`/中文 title/选项注释/推荐标记/15s/question_id 显示在 form；超时返回 `TIMED_OUT` + 推荐项；modern/无 form 保持 `WAITING_USER`，同一 `question_id` 直接 submit；ZCode 不默认使用 |
 | diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
 | work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告；`COMPLETED`/`ABANDONED` 终态需 `close_reason` |
-| work_package_close | 本地管理器/操作员关闭滞留或重复工作包；从包内读取 owner session，仍校验版本、终态和原因，保留审计 |
+| work_package_close | 本地管理器/操作员关闭滞留或重复工作包；从包内读取 owner session，仍校验版本、终态和原因，保留审计；`force=true` 用于确认过的游离/卡住包，绕过状态/证据/活动 attempt 检查并写 `PACKAGE_FORCE_CLOSED` |
 | work_attempt_prepare / update / list | 并发执行 attempt：原子占资源、生命周期与结果登记、查询；不创建 Agent |
 | evidence_verify | 文件、路径、非空、内容与测试结果结构验证；不替代验收 |
 | resource_acquire / release | 带 TTL/owner/token 的建议性文件/设备租约 |
@@ -272,7 +280,7 @@ docs/                         设计与验收报告（运行记忆不打包）
 
 ## 可选桌面项目管理器
 
-`desktop_tool/` 提供独立 PyQt5 管理器：项目添加/发现、目录浏览、Obsidian 跳转、工作包与 MCP 记录、短期连接自检、视图刷新和可恢复归档。参照本机 PyQt 工具风格；不进入 MCP 的安装器和依赖，不强制安装，也不管理宿主进程。运行 `bash desktop_tool/run.sh`，详情见 [管理器说明](desktop_tool/README.md)。
+`desktop_tool/` 提供独立 PyQt5 管理器：项目添加/发现、目录浏览、Obsidian 跳转、工作包与 MCP 记录、短期连接自检、视图刷新和可恢复归档，并提供**项目总览卡片 / 我的待办 / 本机待办看板**（会话选择、认领冲突回退、工作包强制关闭、复制 Agent 入口/任务包特征）。参照本机 PyQt 工具风格；不进入 MCP 的安装器和依赖，不强制安装，也不管理宿主进程。运行 `bash desktop_tool/run.sh`，详情见 [管理器说明](desktop_tool/README.md)。
 
 多项目根：管理器添加项目时选任务项目根（配置工作区边界内），每个项目独立 `<项目>/.scs`；当前四选一只是 session/question，不是工作包，工作包树要等标准/长任务创建 WP 才出现。
 

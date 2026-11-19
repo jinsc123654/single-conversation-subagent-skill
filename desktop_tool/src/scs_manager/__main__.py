@@ -20,9 +20,14 @@ def main():
     args = parser.parse_args()
     config = args.config or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "scs-manager/projects.json"
     available = importlib.util.find_spec("PyQt5") is not None
+    fractional = Path.home() / ".local" / "bin" / "qt-fractional"
     if args.check:
         print(json.dumps({"app": "scs-manager", "version": __version__, "python": sys.executable,
             "pyqt5_available": available, "gui_session": bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
+            "qt_qpa_platform": os.environ.get("QT_QPA_PLATFORM") or ("xcb via qt-fractional" if fractional.is_file() else "auto"),
+            "qt_fractional": str(fractional) if fractional.is_file() else None,
+            "xwayland_display": bool(os.environ.get("DISPLAY")),
+            "wayland_display": bool(os.environ.get("WAYLAND_DISPLAY")),
             "own_config": str(config), "system_install": "not required", "mcp_dependency": "separate Python, mcp 2.3",
             "writes_performed": False}, ensure_ascii=False, indent=2))
         return 0 if available else 1
@@ -34,7 +39,7 @@ def main():
     from .window import MainWindow
     app = QApplication([sys.argv[0]])
     app.setApplicationName("scs-manager")
-    app.setApplicationDisplayName("SCS 项目管理器")
+    app.setApplicationDisplayName("SCS 项目看板")
     app.setDesktopFileName("scs-manager")
     theme.apply(app, force=args.theme)
     if args.theme:

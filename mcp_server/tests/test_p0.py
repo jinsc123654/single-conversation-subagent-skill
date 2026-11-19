@@ -478,3 +478,26 @@ async def test_native_intake_compact_and_returns_pending_verification(tmp_path):
         restored = await call("session_open", project_root=str(tmp_path), resume_session_id=sid)
         assert restored["verification"] == ["smoke"]
         assert "workspace_scan" not in restored and "mode_options" not in restored
+
+
+async def test_operator_lookup_reaches_session_from_earlier_process(tmp_path):
+    # The desktop probe uses names like this; '#' and '?' must not break the
+    # read-only sqlite URI.
+    project = tmp_path / "项目 #?.test"
+    project.mkdir()
+    sid = State(Store(project)).open(str(project), "earlier-host", "old-chat")["id"]
+    async with Client(create_server(project, allow_session_lookup=True), mode="legacy") as client:
+        view = (await client.call_tool("project_view_info", {"session_id": sid})).structured_content
+        assert view["status"] == "OK", view
+        snapshot = (await client.call_tool("session_get", {"session_id": sid})).structured_content
+        assert snapshot["id"] == sid
+
+
+async def test_operator_lookup_unknown_session_creates_nothing(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    async with Client(create_server(project, allow_session_lookup=True), mode="legacy") as client:
+        result = (await client.call_tool("project_view_info", {"session_id": "S-missing"})).structured_content
+        assert result["status"] == "ERROR"
+        assert result["error_code"] == "SESSION_NOT_FOUND"
+        assert not (project / ".scs").exists()

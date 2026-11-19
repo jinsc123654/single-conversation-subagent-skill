@@ -7,6 +7,8 @@ reconfiguring the server for every project.
 """
 
 from pathlib import Path
+import sqlite3
+from urllib.parse import quote
 
 from .errors import ScsError
 from .locks import Leases
@@ -17,9 +19,10 @@ from .work import Work
 
 
 class Roots:
-    def __init__(self, default_root, allowed_roots=()):
+    def __init__(self, default_root, allowed_roots=(), *, allow_session_lookup=False):
         self.default_root = Path(default_root).resolve()
         self.allowed_roots = (self.default_root, *(Path(root).resolve() for root in allowed_roots))
+        self.allow_session_lookup = bool(allow_session_lookup)
         self.states = {}
         self.sessions = {}
         self.works = {}
@@ -49,9 +52,42 @@ class Roots:
 
     def for_session(self, session_id):
         root = self.sessions.get(session_id)
+        if root is None and self.allow_session_lookup:
+            root = self._locate_session(session_id)
+            if root is not None:
+                self.sessions[session_id] = root
+                self.state(root)
         if root is None:
             raise ScsError("SESSION_NOT_FOUND", "Use session_open with the original conversation ID or resume_session_id and its project root.")
         return self.states[root]
+
+    def _locate_session(self, session_id):
+        """Find a session created by an earlier server process.
+
+        Only enabled for local operator tooling (desktop manager), which starts
+        one short-lived server per action and cannot know the host's raw client
+        label. Look inside already-created state databases, read-only: this must
+        neither create nor migrate a project.
+        """
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        for root in self.allowed_roots:
+            database = root / ".scs" / "state.sqlite3"
+            if not database.is_file():
+                continue
+            try:
+                connection = sqlite3.connect(f"file:{quote(str(database))}?mode=ro", uri=True, timeout=1.0)
+            except sqlite3.Error:
+                continue
+            try:
+                found = connection.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone()
+            except sqlite3.Error:
+                found = None
+            finally:
+                connection.close()
+            if found:
+                return root
+        return None
 
     def _root(self, session_id):
         return self.for_session(session_id).store.root

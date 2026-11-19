@@ -13,6 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description="Local single-conversation-subagent MCP (stdio)")
     parser.add_argument("--project-root", type=Path, required=True, help="Explicit allowed local project root")
     parser.add_argument("--allow-root", type=Path, action="append", default=[], help="Additional allowed workspace; repeatable")
+    parser.add_argument("--board-dir", type=Path, default=None, help="Local Markdown board directory; defaults to $SCS_BOARD_DIR or ~/.local/share/scs-manager/board")
     parser.add_argument("--version", action="version", version=__version__)
     args = parser.parse_args()
     # SDK logs may contain client-supplied values when debugging. Disable its
@@ -22,7 +23,11 @@ def main():
         from .server import create_server
         channel = os.environ.get("SCS_QUESTION_CHANNEL", "auto").strip().lower()
         host = os.environ.get("SCS_HOST", "generic").strip() or "generic"
-        create_server(args.project_root, channel, host, allowed_roots=args.allow_root).run(transport="stdio")
+        # Local operator tooling (desktop manager) opts in explicitly; hosts keep
+        # the default in-process session rule.
+        lookup = os.environ.get("SCS_ALLOW_SESSION_LOOKUP", "").strip().lower() in {"1", "true", "yes"}
+        create_server(args.project_root, channel, host, allowed_roots=args.allow_root,
+                      allow_session_lookup=lookup, board_dir=args.board_dir).run(transport="stdio")
     except Exception:
         print("scs_mcp startup failed; check project path, dependencies and local state permissions.", file=sys.stderr)
         raise SystemExit(1) from None

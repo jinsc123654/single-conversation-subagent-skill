@@ -7,14 +7,16 @@ import subprocess
 import sqlite3
 import sys
 
-from .backend import archive_view, database, discover, snapshot, project_catalog, prepare_obsidian, registered_projects
+from .backend import archive_view, board_all, database, discover, snapshot, project_catalog, prepare_obsidian, registered_projects
 
 
 def main():
     if os.name == "posix":
         os.setsid()
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("snapshot", "scan", "probe", "refresh", "archive", "catalog", "prepare-obsidian", "close"))
+    parser.add_argument("action", choices=("snapshot", "scan", "probe", "refresh", "archive", "catalog",
+                                           "prepare-obsidian", "close", "board-add", "board-start",
+                                           "board-complete", "board-abandon", "board-prompt", "board-update"))
     parser.add_argument("--root", required=True)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--session", default="")
@@ -30,7 +32,8 @@ def main():
             hidden = set(request["hidden_projects"])
             automatic = [root for root in registered_projects() if root not in hidden]
             roots = list(dict.fromkeys([*manual, *automatic]))[:500]
-            data = project_catalog(roots)
+            board = board_all()
+            data = {"projects": project_catalog(roots, board), "board": board}
         elif args.action == "prepare-obsidian":
             data=prepare_obsidian(args.root,args.selection or None)
         elif args.action == "snapshot":
@@ -39,6 +42,24 @@ def main():
             data = discover(args.root)
         elif args.action == "archive":
             data = archive_view(args.root)
+        elif args.action in ("board-add", "board-start", "board-complete", "board-abandon",
+                             "board-prompt", "board-update"):
+            raw = sys.stdin.buffer.read(200_001)
+            if len(raw) > 200_000:
+                raise ValueError("待办请求过大")
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("待办请求格式错误")
+            bridge = Path(__file__).with_name("mcp_bridge.py")
+            result = subprocess.run([args.python, str(bridge), args.action, "--root", args.root],
+                                    input=json.dumps(payload, ensure_ascii=False).encode(),
+                                    capture_output=True, timeout=22)
+            if len(result.stdout) > 2_000_000:
+                raise ValueError("响应超过限制")
+            reply = json.loads(result.stdout)
+            if not reply.get("ok"):
+                raise ValueError(reply.get("error", "MCP 操作失败"))
+            data = reply["data"]
         elif args.action == "close":
             raw = sys.stdin.buffer.read(200_001)
             if len(raw) > 200_000:
