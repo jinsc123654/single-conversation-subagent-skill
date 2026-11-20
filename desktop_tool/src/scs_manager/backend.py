@@ -278,6 +278,39 @@ def manifest(root):
     return value
 
 
+def _session_rows(con):
+    """Session rows plus a derived long-mode codex_gate.
+
+    Older fixtures/DBs may not have the questions table at all; then the gate is
+    simply None and the legacy codex_review value keeps selecting long sessions.
+    """
+    has_questions = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='questions'").fetchone()
+    if not has_questions:
+        return [{**dict(row), "codex_gate": None} for row in con.execute(
+            "SELECT id,client,mode,verification,codex_review,review_registration,created_at "
+            "FROM sessions ORDER BY created_at DESC LIMIT 200")]
+    rows = []
+    for row in con.execute(
+            "SELECT s.id,s.client,s.mode,s.verification,s.codex_review,s.review_registration,s.created_at,"
+            "(SELECT q.answer FROM questions q WHERE q.session_id=s.id AND q.kind='codex_gate' "
+            "AND q.current=1 AND q.state='CONFIRMED' LIMIT 1) AS codex_gate_answer "
+            "FROM sessions s ORDER BY s.created_at DESC LIMIT 200"):
+        data = dict(row)
+        answer = data.pop("codex_gate_answer", None)
+        gate = None
+        if answer:
+            try:
+                parsed = json.loads(answer)
+                if isinstance(parsed, list) and parsed and isinstance(parsed[0], str):
+                    gate = parsed[0]
+            except (TypeError, ValueError):
+                gate = None
+        data["codex_gate"] = gate
+        rows.append(data)
+    return rows
+
+
 def snapshot(root):
     root = canonical(root)
     docs = docs_root(root)
@@ -287,8 +320,7 @@ def snapshot(root):
     if inside(root, ".scs/state.sqlite3").is_file():
         with database(root) as con:
             result.update(database="可读取", schema=con.execute("PRAGMA user_version").fetchone()[0])
-            result["sessions"] = [dict(r) for r in con.execute(
-                "SELECT id,client,mode,verification,codex_review,review_registration,created_at FROM sessions ORDER BY created_at DESC LIMIT 200")]
+            result["sessions"] = _session_rows(con)
             attempts_by_package = {}
             has_attempts = con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_attempts'").fetchone()
@@ -492,7 +524,7 @@ def project_catalog(roots, board=None):
                 with database(root,timeout=0.15) as con:
                     latest=con.execute('SELECT max(at) FROM events').fetchone()[0]
                     entry['last_activity']=timestamp(latest)
-                    entry['sessions']=[dict(r) for r in con.execute("SELECT id,client,mode,verification,codex_review,review_registration,created_at FROM sessions ORDER BY created_at DESC LIMIT 200")]
+                    entry['sessions'] = _session_rows(con)
                     entry['counts']['sessions']=len(entry['sessions'])
                     entry['counts']['packages']=con.execute('SELECT count(*) FROM work_packages').fetchone()[0]
                     entry['counts']['in_progress']=con.execute("SELECT count(*) FROM work_packages WHERE state='IN_PROGRESS'").fetchone()[0]

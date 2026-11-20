@@ -10,11 +10,13 @@ from .state import OPTIONS
 MESSAGES = {
     "mode": "请选择本对话执行模式。唯一推荐项只是界面默认值，须明确提交。",
     "verification": "请选择验证范围（可多选）。不做测试/只记录方法各自与其他选项互斥；破坏性操作另行确认。",
+    "codex_gate": "请选择长任务的 Codex 复核策略：packages 每个工作包复核并在收尾再审查；closure 仅收尾审查；none 不做 Codex 审查。推荐只是默认值，须明确提交。",
     "codex_review": "收尾是否使用已注册的 codex-review 做只读独立审查？",
 }
 TITLES = {
     "mode": "请选择本对话执行模式",
     "verification": "请选择验证范围",
+    "codex_gate": "请选择长任务 Codex 复核策略",
     "codex_review": "收尾是否使用 codex-review",
 }
 

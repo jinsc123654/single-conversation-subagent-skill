@@ -1,31 +1,43 @@
-# single-conversation-subagent 2.9.0
+# single-conversation-subagent 3.0.0
 
-单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。
+单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。3.0 为长任务增加 `codex_gate` 包级复核、侦察/实施/验证三角色与扇出预算，并把破坏性操作闸门扩展到所有模式。
 
-ZCode 默认 `SCS_QUESTION_CHANNEL=native`：Skill 用宿主原生 AskUserQuestion 问四选一/验证/Codex 联动；MCP 的 `session_open(project_root=<任务项目根>)` 返回 `workspace_scan`/`mode_options`/`project_root`，为任务项目建设独立 `<项目>/.scs` 并记录选择。MCP form/15 秒只作为没有原生提问工具宿主的兜底，不默认使用。推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认；原生/文本路径不声称 15 秒。
+ZCode 默认 `SCS_QUESTION_CHANNEL=native`：Skill 用宿主原生 AskUserQuestion 问四选一/验证/`codex_gate`/`codex_review`；MCP 的 `session_open(project_root=<任务项目根>)` 返回 `workspace_scan`/`mode_options`/`project_root`/`codex_gate`/`intake`，为任务项目建设独立 `<项目>/.scs` 并记录选择。MCP form/15 秒只作为没有原生提问工具宿主的兜底，不默认使用。推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认；原生/文本路径不声称 15 秒。
 
 ```mermaid
 flowchart TD
   S["真实对话首个任务"] --> I["任务相关只读调查"]
-  I --> O["session_open(project_root=任务项目根) → workspace_scan/mode_options"]
-  O --> A["Skill 原生 AskUserQuestion：任务长度"]
+  I --> O["session_open → workspace_scan / mode_options"]
+  O --> A["Skill 原生提问：四选一"]
   A --> M{"模式"}
-  M -->|标准/长| V["Skill 原生问验证范围"]
-  M -->|快速| G{"高危操作?"}
-  V --> G
-  G -->|是/长任务| C["一次 Codex 只读方案指导（仅一次）"]
-  G -->|否| K["按项目情况推荐收尾审查（已注册时）"]
-  C --> K
-  K --> R["interaction_request(native) + interaction_submit 记录选择"]
-  R --> P["按需工作包 → 原生执行子 Agent"]
-  M -->|只调查| P
-  P --> E["证据/修订 → 主对话验收"]
-  E -->|任务开始选择收尾审查| X["收尾执行只读 codex-review"]
-  O -.->|无原生工具| F["MCP form/15s 或文本兜底"]
-  F -.-> R
+  M -->|标准 / 长任务| V["问验证范围"]
+  V --> L{"长任务?"}
+  L -->|是| G["问 codex_gate：packages / closure / none（推荐 packages）"]
+  L -->|否| R["已注册时问 codex_review：yes / no"]
+  G --> C["高危 / 长任务：一次 Codex 只读方案指导（推荐）"]
+  R --> C
+  C --> P["标准：主对话实现与验证"]
+  G --> W["长任务：侦察 / 实施 / 验证子 Agent"]
+  M -->|快速| Q["已注册可问 codex_review；高危再一次方案指导"]
+  Q --> F["主对话直接处理"]
+  M -->|只调查| D["只读分析（可选只读子 Agent）"]
+  P --> E["证据 / 修订 → 主对话验收"]
+  W --> RV{"packages?"}
+  RV -->|是| T["每包 review attempt：Codex 只读复核"]
+  RV -->|否| E
+  T --> E
+  F --> E
+  D --> E
+  E --> X["收尾：gate packages/closure 或 codex_review=yes → codex-review"]
+  P -.-> H["破坏性操作闸门（全模式，执行前 check）"]
+  W -.-> H
+  F -.-> H
+  X --> Z["主对话最终验收"]
 ```
 
-本对话模式：快速处理 / 标准执行 / 长任务 / 只调查，只给一个按风险、范围、成本动态决定的推荐。后续沿用本对话结果；新对话重新开始。标准/长任务首次确认验证范围，快速/只调查跳过。**高危操作或长任务在实现前推荐一次 Codex 只读方案指导（仅一次）**：用户确认后由主对话运行，brief 包含目标、计划改动、高危点、约束、验证和回滚，结果纳入方案并记录；Codex 不可用或用户拒绝时说明并继续，不重复启动。**收尾审查按项目情况推荐，多数不审查**；高风险（系统关键配置、删除关键数据、安全相关）、跨仓库或大范围改动、验证不足，或方案指导发现重大风险时推荐使用；只调查/未注册跳过。任务开始只记录审查选择，完成执行和已选验证后才运行一次；方案指导不替代收尾审查。已有明确用户授权可直接记录沿用。快速与只调查不强制初始化工作包。长任务下所有任务性查找、分析、实现和测试都派执行子 Agent，主对话只保留目标、决策、未决问题、下一步、证据路径和协调记录。
+本对话模式：快速处理 / 标准执行 / 长任务 / 只调查，只给一个按风险、范围、成本动态决定的推荐。后续沿用本对话结果；新对话重新开始。标准/长任务首次确认验证范围，快速/只调查跳过。**长任务在验证范围后确认 `codex_gate`**：`packages` = 每个工作包由主对话启动 Codex 只读复核并在收尾再审查（推荐），`closure` = 仅收尾审查，`none` = 不做 Codex 审查；推荐不是确认。**标准/快速保持原 `codex_review` yes/no**（仅 codex-review 注册已确认时），长任务不再问 `codex_review`。**高危操作或长任务在实现前推荐一次 Codex 只读方案指导（仅一次）**：用户确认后由主对话运行，brief 包含目标、计划改动、高危点、约束、验证和回滚，结果纳入方案并记录；Codex 不可用或用户拒绝时说明并继续，不重复启动；方案指导不替代收尾审查。
+
+长任务执行固定使用侦察者（`analyze`，只读）、实施者（`implement`，只改 `allowed_files`）、验证者（`test`，只跑命令）三类执行子 Agent；Codex 技术复核者不是子 Agent，只由主对话启动。调查阶段有 n 个独立只读子任务时起步 min(4, n) 个侦察者；实现阶段按 `allowed_files` 两两不相交取最大并行集合；默认并发上限 4，没有宿主并发证据时取 1。`packages` 包在 `REVIEW_READY` 前需要 review attempt 的 ACCEPT manifest 且 `review_subject` 当前，文件/定义/结果变化即 `REVIEW_STALE`。破坏性操作在**所有模式**都要先登记 `operation_gate_record`、执行前 `operation_gate_check` 为 `APPROVED`；REJECT 终态，Codex 不可用只能记 `UNAVAILABLE_OVERRIDE`。MCP 不执行、不拦截宿主命令，没有宿主 Hook 时是协议级约束。
 
 “不做测试”和“只记录方法”各自与其他验证操作互斥，均 NOT_RUN；危险操作独立确认。仅用户明确“不用问，直接做”可跳过模式选择，不能因此授权删除、擦除或烧录。超时只认可宿主可观测结果和事先告知的策略；本版服务只记录超时，不自动确认。
 
@@ -126,7 +138,7 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
 }
 ```
 
-同一对话的 `mode`/`verification`/`codex_review` 已确认后直接沿用，不再提问；后续验证/审查问题以已确认值作为 recommendation。只有用户显式说“使用长任务/只调查/快速处理/标准执行”才通过 `interaction_reopen(explicit_user_change=true)` 切换，显式切换走 text 提交、不弹表单；普通讨论不推断切换。ZCode 主路径是 Skill 原生提问；MCP form 仅在没有原生工具的宿主兜底。
+同一对话的 `mode`/`verification`/`codex_gate`/`codex_review` 已确认后直接沿用，不再提问；后续验证/复核问题以已确认值作为 recommendation。只有用户显式说“使用长任务/只调查/快速处理/标准执行”才通过 `interaction_reopen(explicit_user_change=true)` 切换，显式切换走 text 提交、不弹表单；普通讨论不推断切换。旧长会话没有 `codex_gate` 时，首次工作包操作或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次，不迁移旧 `codex_review`。ZCode 主路径是 Skill 原生提问；MCP form 仅在没有原生工具的宿主兜底。
 
 ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。`--host zcode` 默认 `SCS_QUESTION_CHANNEL=native`：Skill 用宿主原生 AskUserQuestion 主问，`session_open` 先返回 `workspace_scan` 与 `mode_options`，推荐项第一位并带扫描理由；ZCode 原生倒计时为 60 秒隐藏 + 5 分钟截止。MCP 只做 `session_open`/选择记录/`interaction_submit`/工作包/证据/视图，不默认驱动 form；要 MCP form 才显式 `--question-channel mcp`，`interaction_ask(timeout_seconds=15)` 是服务端截止、无动画倒计时、表单可能残留，仅作为没有原生工具的宿主兜底。无 form 或 modern 无回通道时问题保持 `WAITING_USER`，用同一 `question_id` 直接 `interaction_submit`。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
 
@@ -151,7 +163,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 ## 能力矩阵与验收层次
 
-记录日期 2026-11-11（ZCode 行更新）。“待验证”包括没有实际执行的能力；官方文档支持不等于本项目集成通过。
+记录日期 2026-11-11（ZCode 行更新）。“待验证”包括没有实际执行的能力；官方文档支持不等于本项目集成通过。表中的工具数是当时验证记录；3.0 当前为 38 个工具。
 
 | 客户端 | Skill 注入 | stdio 连接本服务 | 原生提问 | 本服务 MCP elicitation / 真实 UI |
 | --- | --- | --- | --- | --- |
@@ -169,7 +181,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 授权多个工作区时，可在 MCP 启动参数或安装命令中重复添加 `--allow-root /absolute/workspace`。现有 `--project-root` 保留为默认工作区。服务只在已配置的目录范围内处理项目，无法用对话参数扩大范围。
 
-仍是 **1 个 MCP 服务，现在提供 32 个工具**（21 个原有工具 + 11 个本机待办 `board_task_*` 工具）。新增视图工具和本机待办不需要再安装另一套 MCP 或 Obsidian 社区插件。
+仍是 **1 个 MCP 服务，现在提供 38 个工具**（27 个协作/状态工具 + 11 个本机待办 `board_task_*` 工具）。新增视图工具、本机待办、批量 attempt、`work_attempt_note`、`run_map` 与破坏性操作闸门都不需要再安装另一套 MCP 或 Obsidian 社区插件。
 
 每个项目选中的 docs-root 就是独立的 Obsidian 库根。默认 `00_doc → 00_docs → docs → doc`，都没有时使用 docs；视图在 `<docs-root>/agent/acceptance/`，与项目资料、记忆和证据保持同一文档根。
 
@@ -183,16 +195,67 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 每页 `manual:begin / manual:end` 标记之间可写手工批注，刷新原样保留。生成区域被修改、标记异常或目标文件不属于本生成器时拒绝覆盖。单文件原子替换和内容前置检查防止常见并发覆盖；服务进程之间串行，外部编辑器不受硬锁约束。中断后可重试刷新自身的部分生成结果。既有源记忆不被投影视图覆盖，旧目录记录只链接/标明库外位置，不迁移。
 
-“已完成子任务”表示已报告通过且本次核对证据未变；工作包仍需主对话最终验收。旧版只保留当前工作包的数据库升级时，仅回填实际当前修订；不虚构早期历史。迁移升级到 schema 3，原会话、工作包、证据保持不变；旧版程序不能读取更高 schema，升级前应备份状态，回滚时恢复对应备份。
+“已完成子任务”表示已报告通过且本次核对证据未变；工作包仍需主对话最终验收。旧版只保留当前工作包的数据库升级时，仅回填实际当前修订；不虚构早期历史。迁移升级到 schema 3，原会话、工作包、证据保持不变；旧版程序不能读取更高 schema，升级前应备份状态，回滚时恢复对应备份。**3.0 不改变 schema 3**：`codex_gate` 存 `questions` 行，破坏性闸门记录存 `events`，旧库无需迁移即可使用。
 
 工作包有终态：`COMPLETED`（主对话验收通过）和 `ABANDONED`（重复、被取代或放弃）。关闭必须带 `close_reason`，服务写入 `closed_at`、`closed_by_session` 和事件记录；关闭后不可修改，后续工作新建工作包。桌面管理器默认隐藏终态，可勾选“显示已关闭”；长期未更新的非终态显示“滞留 N 天”。
+
+## 长任务复核、执行角色与破坏性闸门（3.0.0）
+
+### codex_gate：仅长任务
+
+长任务在验证范围确认后问一次 `codex_gate`，推荐 `packages` 但必须用户明确提交：
+
+| 值 | 含义 | MCP 行为 |
+| --- | --- | --- |
+| `none` | 不做 Codex 复核或收尾审查 | 不设置 `review_required`；收尾不执行 |
+| `closure` | 仅收尾一次 Codex 只读审查 | 不设置 `review_required`；收尾按 `codex-review` 执行 |
+| `packages` | 每个工作包复核 + 收尾审查（推荐） | 新包 `review_required=true`；`REVIEW_READY`/`COMPLETED` 需要当前 subject 的 PASS ACCEPT review |
+
+标准执行和快速保持原 `codex_review` yes/no（仅注册已确认时）；长任务不再问 `codex_review`，MCP 返回 `SKIPPED/USE_CODEX_GATE`。只调查跳过。旧长会话没有 gate 时，首次创建/更新工作包或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次，不回退旧答案。
+
+### 三个执行子 Agent 角色 + Codex 技术复核者
+
+- **侦察者（analyze）**：只读检索、依赖/调用链/日志分析，产出结论和 `file:line`。
+- **实施者（implement）**：只改 `allowed_files`，记录改动和最小自检。
+- **验证者（test）**：只跑指定验证命令，记录命令/退出码/通过数/证据。
+- **Codex 技术复核者**：外部只读审查，不是宿主子 Agent；只由主对话启动，用于方案指导、包级复核和收尾审查。
+
+职责、边界、返回 schema、persona 模板见 [roles.md](single-conversation-subagent/references/roles.md)。扇出预算：调查阶段起步 min(4, 只读子任务数) 个侦察者；实现阶段按 `allowed_files` 两两不相交取最大并行集合；默认并发上限 4，无宿主并发证据时取 1。
+
+### 包级复核（review 子任务）
+
+`packages` 包应声明一个 `review` 子任务。其他子任务完成且无活动 attempt 后，单独 prepare review attempt 取得 `review_subject`；主对话启动 Codex 只读复核，证据是严格 JSON manifest + 原始最终消息。ACCEPT 记 PASS、REJECT 记 FAIL，两者都可落账，只有 ACCEPT 放行 `REVIEW_READY`。未声明 review 子任务时 `REVIEW_READY` 返回 `REVIEW_REQUIRED`；复核窗口内禁止其他 attempt；文件、定义或非 review 结果变化即 `REVIEW_STALE`，用新 review attempt 重审。`review` 不能用 `work_package_update(results=...)` 直接写。
+
+manifest 字段恰好：`verdict`、`session_id`、`model`、`subject_sha256`、`final_message_sha256`、`command`、`exit_code`（int 0）、`raw_path`；原始最终消息必须恰好一行 `结论: ACCEPT` 或 `结论: REJECT` 且与 verdict 一致。`review_subject` 覆盖修订定义、非 review 结果和 `allowed_files` 有界文件快照，排除 `.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 与 `<docs_root>/agent/evidence`，上限 500 文件/100 MB。
+
+### 批量、备注与运行地图
+
+- `work_attempt_prepare_many`：单包、单事务、全有或全无，成功后 version 不变；同批依赖按波次；review 单独准备。
+- `work_attempt_update_many`：单包当前修订、全有或全无、一次 version+1；`operation_id` 必填，重放先于版本检查。
+- `work_attempt_note`：追加审计备注，不改版本、不续租、不证明进程存活。
+- `run_map`：只读有界 JSON + Mermaid（包 ≤64、attempt ≤200、每 attempt note ≤3），不写文件。
+
+### 读租约
+
+3.0 只有 implement 默认对每个 scope 取独占写租约；analyze/test/review 默认不取租约。显式 `file:` + `read` 返回 `RESOURCE_READ_UNSUPPORTED`；旧包遗留 read 资源在 prepare 时过滤并返回 `READ_LEASE_SKIPPED` 警告。本版不提供共享文件读保护。
+
+### 破坏性操作闸门（全模式）
+
+删除/覆盖用户数据或系统关键配置、擦除/烧录、drop 数据库/表、不可逆 git、递归 `chmod`/`chown`、卸载关键包、`allowed_files` 外大范围改写等，先准备命令/`cwd`/目标/影响/备份/回滚/`baseline` →（需要时）Codex 只读预审 → `operation_gate_record` → 执行前 `operation_gate_check` 为 `APPROVED`，并保留用户独立确认。ACCEPT 需报告唯一结论 + `user_confirmed=true`；REJECT 对同 `operation_id`/digest 是终态；Codex 不可用只能记 `UNAVAILABLE_OVERRIDE`，不得伪记 ACCEPT。MCP 不执行、不拦截宿主命令；没有宿主 Hook 时是协议级约束（`PROTOCOL_ONLY`）。
+
+### 兼容性
+
+- **无 schema 变更**：`codex_gate` 存 `questions` 行，破坏性闸门记录存 `events`，`user_version=3`、`sessions` 表与九值 INSERT 不变；旧库/旧会话直接可用，无需迁移。
+- 旧长会话首次进入会补问一次 gate；旧包没有 `review_required` 按 false；旧 `test`/`analyze` 证据语义不变。
+- 桌面管理器版本检查仍为 1/2/3（worker 2/3），只改会话选择器：long 使用 gate 已确认或旧 `codex_review` 回退显示，其他模式不变。
+- **已知限制**：`closure`/`none` 的收尾审查是 Skill 规则，MCP 只强制 `packages` 的包级复核；无宿主 Hook 时闸门不能拦截真实命令；本版无共享读租约。
 
 ## 高危/长任务 Codex 方案指导（2.9.0）
 
 - **触发**：即将修改系统关键配置、删除/覆盖关键数据、做不可逆的系统级操作，或模式为长任务。
 - **频率**：同一任务/会话只做一次，在实现前完成；用户拒绝或 Codex 不可用时说明并继续，不反复询问。实施中范围根本变化按新任务处理或先向用户确认。
 - **方式**：主对话用只读 `codex exec -m gpt-6.1-sol -s read-only -C <项目根> -c model_reasoning_effort=high`，brief 覆盖目标、计划改动、高危点、约束、验证和回滚；结果纳入方案并记录到项目协作/证据。它不是子 Agent，也不能替代收尾审查。
-- **收尾审查推荐**：按项目情况决定，大多数普通/小型/已验证任务推荐不审查；高风险、跨仓库或大范围改动、验证不足，或方案指导发现重大风险时推荐使用。`codex_review` 现在接受 `recommendation=["yes"]` 或 `["no"]`，由 Skill 给出单个推荐，MCP 不再强制只推荐 no。
+- **收尾审查推荐**：按项目情况决定，大多数普通/小型/已验证任务推荐不审查；高风险、跨仓库或大范围改动、验证不足，或方案指导发现重大风险时推荐使用。2.9 的 `codex_review` 接受 `recommendation=["yes"]` 或 `["no"]`；3.0 起长任务改用 `codex_gate`，标准/快速仍用 `codex_review`。
 
 ## 本机任务看板与项目总览（2.8.0）
 
@@ -210,11 +273,11 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 - 每次执行先 `work_attempt_prepare` 原子占用完整资源集合并建立 attempt，成功后才启动宿主 Agent；返回 `attempt_id` 和 `evidence_dir`。
 - 生命周期 `PREPARED → LAUNCHING → RUNNING → DRAINING → ENDED`，另有 `UNKNOWN`；`UNKNOWN` 不释放资源、不自动重派。
 - 结果用 `work_attempt_update(state="ENDED", result=...)` 登记；主对话串行提交，`operation_id` 保证重试幂等。
-- 文件目录覆盖后代；R/R 可并行，R/W、W/W 冲突；资源集合原子获取；TTL 到期不等于进程停止。
+- 文件目录覆盖后代；R/W、W/W 冲突；3.0 起非 implement 默认不取文件读租约，详见 3.0.0 节；资源集合原子获取；TTL 到期不等于进程停止。
 - `REVIEW_READY` / `COMPLETED` / `ABANDONED` / 新修订 / handoff 前必须有静止屏障；有活动 attempt 时拒绝关闭或直接写结果。
 - 默认并发上限 4，无宿主并发证据时取 1；首版不支持跨项目联合调度和设备共享域。
 
-SQLite 升级到 schema 3：新增 `work_attempts`、`work_operations`，`leases` 增加 `mode/attempt_id/package_id`；旧库自动迁移，旧工作包不虚构历史 attempt。
+SQLite 升级到 schema 3：新增 `work_attempts`、`work_operations`，`leases` 增加 `mode/attempt_id/package_id`；旧库自动迁移，旧工作包不虚构历史 attempt。3.0 继续使用 schema 3，不新增迁移。
 
 完整用法、冲突恢复和数据边界见 [Obsidian 视图说明](single-conversation-subagent/references/obsidian.md)。当前实现不自动修改全局库注册列表，创建 .obsidian 不代表已注册或已打开；Obsidian GUI/URI 真正唤起仍需在本机手工验证。
 
@@ -222,15 +285,19 @@ SQLite 升级到 schema 3：新增 `work_attempts`、`work_operations`，`leases
 
 | 工具 | 用途 |
 | --- | --- |
-| session_open / session_get | 绑定任务项目根（配置工作区边界内），为项目建立独立 `<项目>/.scs`；返回 `question_channel`/`host`/`project_root`/`workspace_scan`/`mode_options`、已确认选择与未决问题 |
+| session_open / session_get | 绑定任务项目根（配置工作区边界内），为项目建立独立 `<项目>/.scs`；返回 `question_channel`/`host`/`project_root`/`workspace_scan`/`mode_options`、`codex_gate`/`intake` 投影、已确认选择与未决问题 |
 | interaction_request / interaction_submit / interaction_reopen | Skill 原生提问的记录/提交/显式重试；不是默认 UI；支持文本回退与幂等提交；`analysis` 显示在 display_text/原生记账 |
 | interaction_ask | 仅 `mcp` 兜底 channel 的 legacy form 服务端 `timeout_seconds`（默认 15s）；`analysis`/中文 title/选项注释/推荐标记/15s/question_id 显示在 form；超时返回 `TIMED_OUT` + 推荐项；modern/无 form 保持 `WAITING_USER`，同一 `question_id` 直接 submit；ZCode 不默认使用 |
 | diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
-| work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告；`COMPLETED`/`ABANDONED` 终态需 `close_reason` |
+| work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告；`packages` 包写入 `review_required`；review 结果须经 attempt；`COMPLETED`/`ABANDONED` 终态需 `close_reason` |
 | work_package_close | 本地管理器/操作员关闭滞留或重复工作包；从包内读取 owner session，仍校验版本、终态和原因，保留审计；`force=true` 用于确认过的游离/卡住包，绕过状态/证据/活动 attempt 检查并写 `PACKAGE_FORCE_CLOSED` |
-| work_attempt_prepare / update / list | 并发执行 attempt：原子占资源、生命周期与结果登记、查询；不创建 Agent |
-| evidence_verify | 文件、路径、非空、内容与测试结果结构验证；不替代验收 |
-| resource_acquire / release | 带 TTL/owner/token 的建议性文件/设备租约 |
+| work_attempt_prepare / update / list | 并发执行 attempt：原子占资源、生命周期与结果登记、查询；不创建 Agent；review 返回 `review_subject` |
+| work_attempt_prepare_many / update_many | 单包原子批量：prepare 全有或全无且不增版本；update 全有或全无且只增一次版本，review 单独运行 |
+| work_attempt_note | 追加 attempt 审计备注；不改版本、不续租、不证明存活 |
+| run_map | 只读有界运行地图：JSON + Mermaid，不写文件 |
+| operation_gate_record / check | 破坏性操作决定登记与执行前查询；协议级，不执行/不拦截宿主命令 |
+| evidence_verify | 文件、路径、非空、内容与测试/review manifest 结构验证；不替代验收 |
+| resource_acquire / release | 带 TTL/owner/token 的建议性写租约；3.0 不提供共享文件读租约 |
 | handoff_export / resume | 带摘要哈希的本地审计交接，不复制会话确认 |
 | project_view_refresh / info | Obsidian 项目视图、批注保护、自动刷新、只读检查与打开链接 |
 

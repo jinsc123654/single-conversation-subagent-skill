@@ -113,8 +113,12 @@ async def test_independent_stdio_obsidian_view_auto_refresh(mode, tmp_path):
         out = await call("project_view_refresh", session_id=sid, initialize_vault=True)
         assert out["view_initialized"] and out["local_config_present"]
         tools = await client.list_tools()
-        assert len(tools.tools) == 32  # 21 core tools + 11 board_task_* tools
-        assert {"board_task_list", "board_task_claim", "board_task_complete"} <= {tool.name for tool in tools.tools}
+        assert len(tools.tools) == 38  # 27 collaboration/state tools + 11 board_task_* tools
+        names = {tool.name for tool in tools.tools}
+        assert {"board_task_list", "board_task_claim", "board_task_complete"} <= names
+        assert {"work_attempt_prepare_many", "work_attempt_update_many",
+                "work_attempt_note", "run_map", "operation_gate_record",
+                "operation_gate_check"} <= names
         p = await call("work_package_create", session_id=sid, goal="View stdio probe", allowed_files=["src"], acceptance=["live view"], request_key="view",
             subtasks=[{"id":"T1", "kind":"analyze", "allowed_files":["src"], "acceptance":["view report"]}])
         assert p["view_update"]["status"] == "OK"
@@ -122,7 +126,8 @@ async def test_independent_stdio_obsidian_view_auto_refresh(mode, tmp_path):
         assert not (await call("project_view_info", session_id=sid))["snapshot_stale"]
         attempt = await call("work_attempt_prepare", session_id=sid, package_id=p["id"],
                              expected_version=p["version"], subtask_id="T1")
-        assert attempt["attempt"]["state"] == "PREPARED" and attempt["leases"]
+        # analyze takes no default lease in 3.0 (there is no shared read lease).
+        assert attempt["attempt"]["state"] == "PREPARED" and attempt["leases"] == []
         ended = await call("work_attempt_update", session_id=sid, attempt_id=attempt["attempt"]["id"],
                            expected_version=p["version"], state="ENDED", result={"status": "NOT_RUN"})
         assert ended["version"] == p["version"] + 1 and ended["task_status"] == "NOT_RUN"

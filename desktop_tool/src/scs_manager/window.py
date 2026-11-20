@@ -2049,9 +2049,23 @@ class MainWindow(QMainWindow):
         selected = self.sessions.currentData()
         self.sessions.clear()
         for s in data["sessions"]:
-            if s["mode"] and s["mode"] != "investigate" and (s["mode"] not in {"standard", "long"} or
-                s["verification"] and (s["review_registration"] != "registered" or s["codex_review"] is not None)):
-                self.sessions.addItem(f"{s['client']} · {s['mode']} · {s['id']}", s["id"])
+            if not s["mode"] or s["mode"] == "investigate":
+                continue
+            if s["mode"] == "long":
+                # New long sessions carry codex_gate; legacy rows without one
+                # stay visible through their old codex_review answer.
+                gate = s.get("codex_gate")
+                if not s["verification"] or (gate is None and s["codex_review"] is None):
+                    continue
+                suffix = f" · gate={gate}" if gate else ""
+                label = f"{s['client']} · long{suffix} · {s['id']}"
+            elif s["mode"] == "standard":
+                if not s["verification"] or (s["review_registration"] == "registered" and s["codex_review"] is None):
+                    continue
+                label = f"{s['client']} · standard · {s['id']}"
+            else:
+                label = f"{s['client']} · {s['mode']} · {s['id']}"
+            self.sessions.addItem(label, s["id"])
         index = self.sessions.findData(selected)
         if index >= 0:
             self.sessions.setCurrentIndex(index)

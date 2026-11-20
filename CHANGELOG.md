@@ -1,5 +1,41 @@
 # Changelog
 
+## 3.0.0 — 2026-11-20
+
+### 新增
+
+- 长任务 `codex_gate` 题（`none|closure|packages`，推荐 `packages`）：`packages` 每个工作包做 Codex 只读复核并在收尾再审查；`closure` 仅收尾审查；`none` 不做 Codex 审查。长任务不再问 `codex_review`；标准/快速保持原 yes/no；旧长会话没有 gate 时首次工作包操作或手动 `project_view_refresh` 补问一次。
+- `review` 子任务（仅长任务 `packages` 协议）：主对话启动 Codex 只读复核，证据是严格 JSON manifest + 原始最终消息；ACCEPT/REJECT 都可落账，只有 ACCEPT 映射 PASS。`review_subject` 冻结修订定义、非 review 结果和有界文件快照；`REVIEW_READY`/`COMPLETED`/`handoff_export` 重算，变化即 `REVIEW_STALE`；复核窗口内禁止其他 attempt。
+- 侦察者（analyze，只读）、实施者（implement，只改 `allowed_files`）、验证者（test，只跑命令）三个执行子 Agent 角色；Codex 技术复核者不是子 Agent，只由主对话启动。扇出预算：调查起步 min(4, 只读子任务数)，实现按 `allowed_files` 不相交并行，默认上限 4，无宿主并发证据取 1。
+- `work_attempt_prepare_many` / `work_attempt_update_many`：单包原子批量 prepare/update，全有或全无；update 一次只增一次版本，`operation_id` 重放先于版本检查。
+- `work_attempt_note`：追加 attempt 审计备注，不改版本、不续租、不证明存活；`run_map`：只读有界 JSON + Mermaid，不写文件。
+- `operation_gate_record` / `operation_gate_check`：破坏性操作闸门（全模式），绑定命令/cwd/目标/`baseline`；ACCEPT 需报告唯一结论 + 用户确认；REJECT 对同 `operation_id`/digest 是终态；`UNAVAILABLE_OVERRIDE` 仅 Codex 不可用；无宿主 Hook 时为协议级 `PROTOCOL_ONLY`。
+
+### 变更
+
+- 非 implement 默认不取文件读租约；显式 `file:` + `read` 返回 `RESOURCE_READ_UNSUPPORTED`；旧包遗留 read 资源在 prepare 时过滤并返回 `READ_LEASE_SKIPPED` 警告。
+- intake 统一：long 要求已确认 gate；standard 保持 verification + registered `codex_review`；quick/investigate 不变；未知旧 mode 不阻塞。
+- 文档同步：SKILL 开场/长任务/闸门，protocol 的 `codex_gate`/review/批量/地图/租约，mcp 工具与错误码，README 流程图与能力清单，新增 `references/roles.md`。
+
+### 未变
+
+- SQLite schema 3、`user_version=3`、`sessions` 表与九值 INSERT、桌面 schema 1/2/3 与 worker 2/3；无迁移。
+- 旧 test/analyze 证据语义与返回键；快速流程；工作包状态机、终态与 handoff 审计语义。
+
+### 兼容
+
+- 旧库/旧会话直接可用，无需迁移；旧长会话首次进入补问一次 gate；旧包缺少 `review_required` 按 false。
+- 桌面旧 fixture 没有 `questions` 表仍可读；long 会话选择器保留旧 `codex_review` 回退显示，standard/quick/investigate 规则不变。
+- 回滚只需回退源码与文档，无数据库降级步骤。
+
+### 已知限制
+
+- 无宿主 Hook 时破坏性闸门是协议级约束，不能拦截真实命令。
+- `closure`/`none` 的收尾审查是 Skill 规则；MCP 只强制 `packages` 的包级复核。
+- 本版不提供共享文件读租约，analyze/test/review 没有读保护。
+- `packages` 包若未声明 `review` 子任务，`REVIEW_READY` 返回 `REVIEW_REQUIRED`，需新修订补声明。
+- `docs/单对话subagent-两级协作协议.md` 是 2026-10-19 历史副本，未随 3.0 更新。
+
 ## 2.9.0 — 2026-11-19
 
 - 高危/长任务方案指导：修改系统关键配置、删除/覆盖关键数据、不可逆系统级操作或长任务，在实现前推荐一次 Codex 只读项目方案指导（仅一次）；主对话记录结果，不重复，不替代收尾审查。

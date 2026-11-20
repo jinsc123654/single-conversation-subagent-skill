@@ -11,6 +11,7 @@ import sqlite3
 from urllib.parse import quote
 
 from .errors import ScsError
+from .gate import Gate
 from .locks import Leases
 from .obsidian import ProjectView
 from .state import State
@@ -28,6 +29,7 @@ class Roots:
         self.works = {}
         self._leases = {}
         self._views = {}
+        self._gates = {}
 
     def resolve(self, project_root):
         root = Path(project_root or self.default_root).resolve()
@@ -109,6 +111,12 @@ class Roots:
         if root not in self._views:
             self._views[root] = ProjectView(self.states[root].store)
         return self._views[root]
+
+    def gate(self, session_id):
+        root = self._root(session_id)
+        if root not in self._gates:
+            self._gates[root] = Gate(self.states[root].store)
+        return self._gates[root]
 
     def default_state(self):
         return self.state(self.default_root)

@@ -323,9 +323,10 @@ class ProjectView:
         with self.store.transaction(True) as con:
             session = self.state._session(con, session_id)
             if not register:
-                if not session["mode"] or (session["mode"] in {"standard", "long"} and
-                        (not session["verification"] or (session["review_registration"] == "registered" and session["codex_review"] is None))):
-                    raise ScsError("INTAKE_REQUIRED", "Confirm this conversation's intake before creating project view files.")
+                intake = self.state.intake_status(con, session_id)
+                if not intake["ready"]:
+                    raise ScsError("INTAKE_REQUIRED", "Confirm this conversation's intake before creating project view files.",
+                                   {"reason": intake["reason"], "source": intake["source"], "policy": intake["policy"]})
                 if session["mode"] == "investigate":
                     raise ScsError("READ_ONLY_MODE", "Investigation mode can inspect project_view_info but cannot write a view.")
             docs, view, manifest_path = self._layout(con)

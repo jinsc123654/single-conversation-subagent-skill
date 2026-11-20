@@ -10,7 +10,7 @@ from .storage import Store, encode, now
 
 MODES = ("quick", "standard", "long", "investigate")
 VERIFICATION = ("smoke", "targeted", "full", "stability", "none", "method-only")
-KINDS = ("mode", "verification", "codex_review")
+KINDS = ("mode", "verification", "codex_gate", "codex_review")
 PENDING = ("REQUESTED", "WAITING_USER", "UNSUPPORTED", "FAILED")
 TERMINAL = ("CONFIRMED", "DECLINED", "CANCELLED", "TIMED_OUT")
 DESCRIPTIONS = {
@@ -28,6 +28,11 @@ DESCRIPTIONS = {
         "none": "不做测试，结果标 NOT_RUN",
         "method-only": "不执行测试，只记录命令/环境/预期，标 NOT_RUN",
     },
+    "codex_gate": {
+        "none": "不做 Codex 复核或收尾审查",
+        "closure": "仅收尾做一次 Codex 只读审查",
+        "packages": "每个工作包做 Codex 复核，收尾再做一次审查（推荐）",
+    },
     "codex_review": {
         "no": "收尾不追加 Codex 审查",
         "yes": "收尾用 codex-review 做只读独立审查",
@@ -39,6 +44,9 @@ OPTIONS = {
     "verification": [{"value": v, "label": label, "desc": DESCRIPTIONS["verification"][v]}
                      for v, label in zip(VERIFICATION,
         ("本轮冒烟", "收尾定向回归", "收尾全量回归", "收尾稳定性", "不做测试", "不做测试，记录方法"))],
+    "codex_gate": [{"value": v, "label": label, "desc": DESCRIPTIONS["codex_gate"][v]}
+                   for v, label in (("none", "不做 Codex 复核"), ("closure", "仅收尾审查"),
+                                    ("packages", "包级复核 + 收尾审查"))],
     "codex_review": [{"value": "no", "label": "不使用", "desc": DESCRIPTIONS["codex_review"]["no"]},
                      {"value": "yes", "label": "使用：收尾只读独立审查", "desc": DESCRIPTIONS["codex_review"]["yes"]}],
 }
@@ -69,6 +77,16 @@ def check_selection(kind: str, selected: list[str]) -> list[str]:
 
 
 class State:
+    """Explicit question state plus the single intake predicate.
+
+    ``codex_gate`` exists only as a question row for long-mode conversations;
+    no sessions column and no schema change are needed. Its answer is:
+    ``packages`` = per-work-package Codex review plus a closure review;
+    ``closure`` = only a closure review; ``none`` = no Codex review at all.
+    A recommendation is never written as a confirmed answer, and legacy long
+    sessions without a gate question are asked once instead of being migrated.
+    """
+
     def __init__(self, store: Store):
         self.store = store
 
@@ -77,6 +95,45 @@ class State:
         if row is None:
             raise ScsError("SESSION_NOT_FOUND", "Open or explicitly recover this conversation first.")
         return row
+
+    def _confirmed(self, con, session_id: str, kind: str) -> list[str] | None:
+        row = con.execute(
+            "SELECT answer FROM questions WHERE session_id=? AND kind=? AND current=1 AND state='CONFIRMED'",
+            (session_id, kind)).fetchone()
+        if row is None or not row["answer"]:
+            return None
+        return json.loads(row["answer"])
+
+    def intake_status(self, con, session_id: str) -> dict:
+        """One shared intake predicate for work packages, views and projections.
+
+        long -> a confirmed codex_gate is required; standard -> the existing
+        verification plus registered codex_review rule; quick/investigate have
+        no follow-up requirement. Older long sessions are asked once; this
+        function never invents a confirmed gate.
+        """
+        session = self._session(con, session_id)
+        if not session["mode"]:
+            return {"ready": False, "policy": None, "source": "not_required",
+                    "reason": "MODE_REQUIRED"}
+        if session["mode"] not in {"standard", "long"}:
+            # quick/investigate (and any unknown legacy value) have no follow-up
+            # requirement; this keeps old databases usable instead of deadlocking.
+            return {"ready": True, "policy": None, "source": "not_required", "reason": None}
+        if not session["verification"]:
+            return {"ready": False, "policy": None, "source": "verification",
+                    "reason": "VERIFICATION_REQUIRED"}
+        if session["mode"] == "long":
+            gate = self._confirmed(con, session_id, "codex_gate")
+            if gate:
+                return {"ready": True, "policy": gate[0], "source": "codex_gate", "reason": None}
+            return {"ready": False, "policy": None, "source": "codex_gate",
+                    "reason": "CODEX_GATE_REQUIRED"}
+        if session["review_registration"] == "registered" and session["codex_review"] is None:
+            return {"ready": False, "policy": None, "source": "codex_review",
+                    "reason": "CODEX_REVIEW_REQUIRED"}
+        policy = "closure" if session["codex_review"] else "none"
+        return {"ready": True, "policy": policy, "source": "codex_review", "reason": None}
 
     def open(self, project_root: str, client_name: str, conversation_id: str | None = None,
              review_registration: str = "unknown", explicit_skip: bool = False,
@@ -131,6 +188,7 @@ class State:
         with self.store.transaction() as con:
             session = dict(self._session(con, session_id))
             questions = [dict(r) for r in con.execute("SELECT * FROM questions WHERE session_id=? AND current=1 ORDER BY created_at", (session_id,))]
+            intake = self.intake_status(con, session_id)
         session.pop("identity")
         session["temporary"] = bool(session["temporary"])
         session["verification"] = json.loads(session["verification"]) if session["verification"] else None
@@ -138,9 +196,15 @@ class State:
         for q in questions:
             q["recommendation"] = json.loads(q["recommendation"])
             q["answer"] = json.loads(q["answer"]) if q["answer"] else None
+        # codex_gate is a projection of the current confirmed question row; a
+        # legacy long session without one stays null and is asked once.
+        gate = next((q["answer"][0] for q in questions
+                     if q["kind"] == "codex_gate" and q["state"] == "CONFIRMED" and q["answer"]), None)
+        session["codex_gate"] = gate
         return {"status": "OK", **session, "questions": questions,
                 "unresolved": [q["id"] for q in questions if q["state"] != "CONFIRMED"],
-                "question_states": {k: next((q["state"] for q in questions if q["kind"] == k), "NOT_ASKED") for k in KINDS}}
+                "question_states": {k: next((q["state"] for q in questions if q["kind"] == k), "NOT_ASKED") for k in KINDS},
+                "intake": intake}
 
     def question(self, session_id: str, question_id: str) -> dict:
         with self.store.transaction() as con:
@@ -150,12 +214,47 @@ class State:
                 raise ScsError("QUESTION_NOT_FOUND", "Question is not part of this conversation.")
             return dict(q)
 
+    def _retire_legacy_review_question(self, con, session_id: str) -> int:
+        """Retire a current codex_review row that long mode no longer asks.
+
+        Older versions stored a closure-only review question. If a long
+        conversation still has a WAITING_USER/DECLINED/TIMED_OUT row, the
+        pending check would return it and hide the codex_gate question forever.
+        Confirmed rows stay as history; they never block the pending check.
+        """
+        rows = con.execute(
+            "SELECT id FROM questions WHERE session_id=? AND kind='codex_review' "
+            "AND current=1 AND state != 'CONFIRMED'", (session_id,)).fetchall()
+        for row in rows:
+            con.execute("UPDATE questions SET current=0,updated_at=? WHERE id=?", (now(), row["id"]))
+            self.store.event(con, session_id, row["id"], "interaction_request",
+                             "SUPERSEDED", None, "LONG_MODE_USES_CODEX_GATE")
+        return len(rows)
+
     def request(self, session_id: str, kind: str, recommendation: list[str], channel: str) -> dict:
         if kind not in KINDS or channel not in {"auto", "native", "text"}:
             raise ScsError("INPUT_INVALID", "Unknown question kind or interaction channel.")
         recommendation = check_selection(kind, recommendation)
         with self.store.transaction(True) as con:
             s = self._session(con, session_id)
+            if s["mode"] == "long":
+                # Long mode asks codex_gate instead of codex_review. Retire a
+                # stale legacy row before any pending/reuse lookup.
+                self._retire_legacy_review_question(con, session_id)
+            if s["mode"] is not None:
+                # Mode applicability comes before question reuse and the pending
+                # check: a question that no longer applies must not shadow the
+                # current mode's flow or its gate.
+                if kind == "verification" and s["mode"] not in {"standard", "long"}:
+                    return {"status": "SKIPPED", "reason": "MODE_DOES_NOT_REQUIRE_QUESTION"}
+                if kind == "codex_gate" and s["mode"] != "long":
+                    return {"status": "SKIPPED", "reason": "MODE_DOES_NOT_REQUIRE_QUESTION"}
+                if kind == "codex_review" and s["mode"] not in {"quick", "standard", "long"}:
+                    return {"status": "SKIPPED", "reason": "MODE_DOES_NOT_REQUIRE_QUESTION"}
+                if kind == "codex_review" and s["mode"] == "long":
+                    # Long mode asks the single codex_gate question instead of
+                    # the legacy closure-only review question.
+                    return {"status": "SKIPPED", "reason": "USE_CODEX_GATE"}
             q = con.execute("SELECT * FROM questions WHERE session_id=? AND kind=? AND current=1", (session_id, kind)).fetchone()
             if q:
                 return {"created": False, **dict(q)}
@@ -171,19 +270,17 @@ class State:
                                 "For an ended question, reopen only on explicit user request."}
             if kind != "mode" and not s["mode"]:
                 raise ScsError("QUESTION_ORDER", "Confirm mode first.")
-            if kind == "verification" and s["mode"] not in {"standard", "long"}:
-                return {"status": "SKIPPED", "reason": "MODE_DOES_NOT_REQUIRE_QUESTION"}
-            if kind == "codex_review" and s["mode"] not in {"quick", "standard", "long"}:
-                return {"status": "SKIPPED", "reason": "MODE_DOES_NOT_REQUIRE_QUESTION"}
-            if kind == "mode" and s["mode"]:
-                return {"status": "ALREADY_CONFIRMED", "choice": [s["mode"]]}
+            if kind == "codex_gate" and not s["verification"]:
+                raise ScsError("QUESTION_ORDER", "Confirm verification scope first.")
             if kind == "codex_review":
-                if s["mode"] in {"standard", "long"} and not s["verification"]:
+                if s["mode"] == "standard" and not s["verification"]:
                     raise ScsError("QUESTION_ORDER", "Confirm verification scope first.")
                 if s["review_registration"] == "unknown":
                     return {"status": "SKIPPED", "reason": "CODEX_REVIEW_REGISTRATION_UNKNOWN"}
                 if s["review_registration"] == "unregistered":
                     return {"status": "SKIPPED", "reason": "CODEX_REVIEW_NOT_REGISTERED"}
+            if kind == "mode" and s["mode"]:
+                return {"status": "ALREADY_CONFIRMED", "choice": [s["mode"]]}
             qid = identifier("Q-")
             stamp = now()
             con.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -243,9 +340,13 @@ class State:
             con.execute("UPDATE questions SET state=?,answer=?,updated_at=? WHERE id=?", (target, answer, now(), question_id))
             if action == "accept":
                 selected = json.loads(answer)
-                column = {"mode": "mode", "verification": "verification", "codex_review": "codex_review"}[q["kind"]]
-                value = answer if q["kind"] == "verification" else (int(selected[0] == "yes") if q["kind"] == "codex_review" else selected[0])
-                con.execute(f"UPDATE sessions SET {column}=? WHERE id=?", (value, session_id))
+                # codex_gate has no sessions column: the confirmed question row
+                # is the only source and is projected by get().
+                column = {"mode": "mode", "verification": "verification",
+                          "codex_review": "codex_review"}.get(q["kind"])
+                if column:
+                    value = answer if q["kind"] == "verification" else (int(selected[0] == "yes") if q["kind"] == "codex_review" else selected[0])
+                    con.execute(f"UPDATE sessions SET {column}=? WHERE id=?", (value, session_id))
             self.store.event(con, session_id, question_id, "interaction_submit", codes[action],
                              codes[action] if action in {"error", "unsupported", "timeout"} else None)
         return {"status": target, "question_id": question_id, "choices": choices if action == "accept" else None,
@@ -269,7 +370,9 @@ class State:
                 raise ScsError("EXPLICIT_CHANGE_REQUIRED", "Reopening an active or confirmed question requires an explicit user change.")
             # Invalidate unfinished dependent questions when an earlier choice
             # changes. Already confirmed scopes remain this conversation's choices.
-            dependent = {"mode": ("verification", "codex_review"), "verification": ("codex_review",), "codex_review": ()}[kind]
+            dependent = {"mode": ("verification", "codex_gate", "codex_review"),
+                         "verification": ("codex_gate", "codex_review"),
+                         "codex_gate": ("codex_review",), "codex_review": ()}[kind]
             for child_kind in dependent:
                 child = con.execute("SELECT * FROM questions WHERE session_id=? AND kind=? AND current=1 AND state != 'CONFIRMED'",
                                     (session_id, child_kind)).fetchone()
@@ -277,7 +380,9 @@ class State:
                     con.execute("UPDATE questions SET current=0,updated_at=? WHERE id=?", (now(), child["id"]))
                     self.store.event(con, session_id, child["id"], "interaction_reopen", "SUPERSEDED")
             con.execute("UPDATE questions SET current=0,updated_at=? WHERE id=?", (now(), q["id"]))
-            column = {"mode": "mode", "verification": "verification", "codex_review": "codex_review"}[kind]
-            con.execute(f"UPDATE sessions SET {column}=NULL WHERE id=?", (session_id,))
+            column = {"mode": "mode", "verification": "verification",
+                      "codex_review": "codex_review"}.get(kind)
+            if column:
+                con.execute(f"UPDATE sessions SET {column}=NULL WHERE id=?", (session_id,))
             self.store.event(con, session_id, q["id"], "interaction_reopen", "SUPERSEDED")
         return {"status": "REOPENED", "previous_question_id": q["id"], "next": "interaction_request"}

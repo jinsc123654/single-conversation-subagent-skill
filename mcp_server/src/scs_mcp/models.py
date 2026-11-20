@@ -16,7 +16,7 @@ class ResourceSpec(BaseModel):
 class SubtaskDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     id: Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")]
-    kind: Literal["analyze", "implement", "test"]
+    kind: Literal["analyze", "implement", "test", "review"]
     allowed_files: Annotated[list[Nonempty], Field(min_length=1, max_length=100)]
     acceptance: Annotated[list[Nonempty], Field(min_length=1, max_length=100)]
     depends_on: list[Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")]] = Field(default_factory=list, max_length=100)
@@ -51,3 +51,10 @@ class AttemptResult(BaseModel):
     status: Literal["PASS", "FAIL", "BLOCKED", "NOT_RUN", "SUBSTITUTED"]
     evidence: list[EvidenceReference] = Field(default_factory=list)
     note: Nonempty | None = None
+
+
+class AttemptUpdateItem(BaseModel):
+    """One ENDED result in a homogeneous single-package batch."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    attempt_id: Annotated[str, Field(min_length=1, max_length=128)]
+    result: AttemptResult

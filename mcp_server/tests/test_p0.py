@@ -410,7 +410,8 @@ async def test_resume_temporary_session_and_correct_review_registration(tmp_path
         opened = await call(client, "session_open", **params)
         sid = opened["id"]
         assert opened["temporary"]
-        for kind, choice in (("mode", "long"), ("verification", "smoke")):
+        for kind, choice in (("mode", "long"), ("verification", "smoke"),
+                             ("codex_gate", "packages")):
             question = await call(client, "interaction_request", session_id=sid, kind=kind,
                                   recommendation=[choice], channel="text")
             result = await call(client, "interaction_submit", session_id=sid,
@@ -418,7 +419,7 @@ async def test_resume_temporary_session_and_correct_review_registration(tmp_path
             assert result["status"] == "CONFIRMED"
         skip = await call(client, "interaction_request", session_id=sid, kind="codex_review",
                           recommendation=["no"], channel="text")
-        assert skip == {"status": "SKIPPED", "reason": "CODEX_REVIEW_REGISTRATION_UNKNOWN"}
+        assert skip == {"status": "SKIPPED", "reason": "USE_CODEX_GATE"}
 
     async with Client(create_server(tmp_path, host="codex"), mode="legacy") as client:
         foreign = await call(client, "session_open", **params, resume_session_id=sid,
@@ -436,12 +437,16 @@ async def test_resume_temporary_session_and_correct_review_registration(tmp_path
                               review_registration="registered")
         assert restored["id"] == sid and restored["temporary"]
         assert restored["mode"] == "long" and restored["verification"] == ["smoke"]
-        assert restored["review_registration"] == "registered" and restored["codex_review"] is None
+        assert restored["codex_gate"] == "packages" and restored["codex_review"] is None
+        assert restored["review_registration"] == "registered"
         reopened = await call(client, "session_open", **params, resume_session_id=sid)
         assert reopened["review_registration"] == "registered"
-        question = await call(client, "interaction_request", session_id=sid, kind="codex_review",
-                              recommendation=["no"], channel="text")
-        assert question["question_id"] and question["kind"] == "codex_review"
+        question = await call(client, "interaction_request", session_id=sid, kind="codex_gate",
+                              recommendation=["packages"], channel="text")
+        assert question["status"] == "ALREADY_CONFIRMED" and question["choices"] == ["packages"]
+        review = await call(client, "interaction_request", session_id=sid, kind="codex_review",
+                            recommendation=["no"], channel="text")
+        assert review == {"status": "SKIPPED", "reason": "USE_CODEX_GATE"}
 
 
 async def test_native_intake_compact_and_returns_pending_verification(tmp_path):
@@ -463,8 +468,8 @@ async def test_native_intake_compact_and_returns_pending_verification(tmp_path):
         assert verification["options"][0]["value"] == "smoke"
         assert len(json.dumps(verification, ensure_ascii=False).encode()) < 1_500
 
-        review_args = {"session_id": sid, "kind": "codex_review", "recommendation": ["yes"]}
-        pending = await call("interaction_request", **review_args)
+        gate_args = {"session_id": sid, "kind": "codex_gate", "recommendation": ["packages"]}
+        pending = await call("interaction_request", **gate_args)
         assert pending["status"] == "QUESTION_PENDING"
         assert pending["question_id"] == verification["question_id"]
         assert pending["kind"] == "verification" and pending["state"] == "WAITING_USER"
@@ -472,12 +477,16 @@ async def test_native_intake_compact_and_returns_pending_verification(tmp_path):
         confirmation = await call("interaction_submit", session_id=sid, question_id=pending["question_id"],
                                   action="accept", choices=["smoke"], source="native")
         assert confirmation["status"] == "CONFIRMED"
-        review = await call("interaction_request", **review_args)
-        assert review["status"] == "NATIVE_QUESTION_REQUIRED"
-        assert review["kind"] == "codex_review"
-        assert review["recommendation"] == ["yes"]
+        gate = await call("interaction_request", **gate_args)
+        assert gate["status"] == "NATIVE_QUESTION_REQUIRED"
+        assert gate["kind"] == "codex_gate"
+        assert gate["recommendation"] == ["packages"]
+        # The recommended option is rendered first and marked as the default.
+        assert gate["options"][0]["value"] == "packages"
         restored = await call("session_open", project_root=str(tmp_path), resume_session_id=sid)
         assert restored["verification"] == ["smoke"]
+        assert restored["codex_gate"] is None
+        assert restored["intake"]["reason"] == "CODEX_GATE_REQUIRED"
         assert "workspace_scan" not in restored and "mode_options" not in restored
 
 
