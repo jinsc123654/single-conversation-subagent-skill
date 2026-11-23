@@ -1,6 +1,6 @@
 ---
 name: codex-review
-description: 让 Codex 以只读方式独立审查已完成的任务、未提交改动、指定修订或 commit，输出逐项缺陷判定与最终 ACCEPT/REJECT；审查模型固定为 GPT-6.1 Sol（`gpt-6.1-sol`）。用户说“让 Codex 审查/复核/看看”“Codex review”“独立审查这个改动/任务”“提交前 review”“验收前找第三方看一遍”时使用；也用于审查基线一致时的追问、补查与配额恢复续跑。
+description: 让 Codex 以只读方式独立审查已完成的任务、未提交改动、指定修订或 commit，输出逐项缺陷判定与最终 ACCEPT/REJECT；审查模型固定为 GPT-6.2 Sol（`gpt-6.2-sol`）。用户说“让 Codex 审查/复核/看看”“Codex review”“独立审查这个改动/任务”“提交前 review”“验收前找第三方看一遍”时使用；也用于审查基线一致时的追问、补查与配额恢复续跑。
 ---
 
 # Codex 独立审查
@@ -14,7 +14,7 @@ description: 让 Codex 以只读方式独立审查已完成的任务、未提交
 - 审查期间不改源码、不构建/烧录、不访问串口/板卡；只做只读检查（读文件、哈希、diff、grep），运行类回归由外部先跑好，缺的标 NOT_RUN。
 - 审查者只做审查，不再启动新的 Codex 会话；启动、校验与落档由编排者（主对话）完成。
 - 本流程不使用子 Agent 代审（既有约定：审查必须由 Codex 独立完成）；Codex 也不得再委派。
-- **审查模型固定为 GPT-6.1 Sol**（`gpt-6.1-sol`，2026-10-25 用户指定）。每次显式传 `-m gpt-6.1-sol`，不要依赖 `~/.codex/config.toml` 的本机默认模型（可能被改成别的，如 `gpt-6-astra`）；只有用户明确指名换模型时才换，并在报告里写明。
+- **审查模型固定为 GPT-6.2 Sol**（`gpt-6.2-sol`，2026-11-23 用户指定）。每次显式传 `-m gpt-6.2-sol`，不要依赖 `~/.codex/config.toml` 的本机默认模型（可能被改成别的，如 `gpt-6-astra`）；只有用户明确指名换模型时才换，并在报告里写明。
 
 ## 1. 确定审查对象
 
@@ -22,8 +22,8 @@ description: 让 Codex 以只读方式独立审查已完成的任务、未提交
 |---|---|---|
 | 审查当前改动 | 未提交工作树 | `git status --short`、`git diff --stat`、`git diff --cached --stat`、`git ls-files --others --exclude-standard` |
 | 审查某个修订（如 WP-xx/Rn） | 某个工作包/修订 | 读项目协作记忆与证据目录（esp32_epd：`docs/agent/AGENT_PROJECT.md`、`AGENT_COORDINATION.md` 对应节、上一轮审查报告、`docs/agent/evidence/WP-xx/`；其他项目按其文档约定） |
-| 审查 commit | 单个提交 | `git show --stat <sha>`；必要时 `codex exec review -m gpt-6.1-sol --commit <sha>` |
-| 审查相对分支 | 分支差异 | `git diff <base>...HEAD --stat`；必要时 `codex exec review -m gpt-6.1-sol --base <base>` |
+| 审查 commit | 单个提交 | `git show --stat <sha>`；必要时 `codex exec review -m gpt-6.2-sol --commit <sha>` |
+| 审查相对分支 | 分支差异 | `git diff <base>...HEAD --stat`；必要时 `codex exec review -m gpt-6.2-sol --base <base>` |
 
 先确认范围里混入了哪些**无关改动**（仓库常叠加多个工作包的未提交改动），在 brief 里明确列出“只看这些文件/接口”，否则 Codex 会把别的改动算进来。
 
@@ -57,20 +57,20 @@ Codex 不在 PATH，二进制：`/usr/lib/chatgpt/resources/codex`（ChatGPT 桌
 
 ```bash
 cd <repo> && cat <<'PROMPT' | /usr/lib/chatgpt/resources/codex exec \
-  -m gpt-6.1-sol -s read-only -C <repo> -c model_reasoning_effort="high" \
+  -m gpt-6.2-sol -s read-only -C <repo> -c model_reasoning_effort="high" \
   -o /tmp/codex-review-<topic>.md - 2>&1
 <brief>
 PROMPT
 ```
 
-- `-m gpt-6.1-sol` 是本技能固定的审查模型（GPT-6.1 Sol）；不传就吃 `~/.codex/config.toml` 的本机默认，可能不是 Sol。
+- `-m gpt-6.2-sol` 是本技能固定的审查模型（GPT-6.2 Sol）；不传就吃 `~/.codex/config.toml` 的本机默认，可能不是 Sol。
 - `model_reasoning_effort` 默认 `high`；该模型支持 low/medium/high/xhigh/max/ultra，配额紧时降到 `medium`，需要更深推理时升到 `xhigh`，并在报告里记下实际档位。
 - prompt 走 stdin（`-`）；`-o` 把 Codex 的最终消息单独落盘，便于提取结论。
 - 只读沙箱：仓库不可写，gcc/ASan 常因临时文件被拒；宿主回归先在外部跑好，把输出贴进 brief。
 - 预计超过 5 分钟用后台 Bash（输出重定向到 `/tmp/...log`），轮询；不要在前台一次等 10 分钟。
 - 不让 Codex 读无关大目录；它读得越多，越容易撞配额。
-- 启动头部会打印 `session id: ...` 与 `model: ...`：把 session id 记进报告头，供同一基线的追问续跑；先核对 `model: gpt-6.1-sol` 与实际推理档位，不符就停下重跑；若 `-o` 文件未生成，从 stdout 尾部提取最终消息。
-- 需要快速看 diff 时可用 `codex exec review -m gpt-6.1-sol --uncommitted` / `--commit` / `--base`；正式修订审查用自定义 brief，因为内置 review 不保证逐项格式。
+- 启动头部会打印 `session id: ...` 与 `model: ...`：把 session id 记进报告头，供同一基线的追问续跑；先核对 `model: gpt-6.2-sol` 与实际推理档位，不符就停下重跑；若 `-o` 文件未生成，从 stdout 尾部提取最终消息。
+- 需要快速看 diff 时可用 `codex exec review -m gpt-6.2-sol --uncommitted` / `--commit` / `--base`；正式修订审查用自定义 brief，因为内置 review 不保证逐项格式。
 
 ### 会话复用：基线一致才续跑，否则新开
 
@@ -80,7 +80,7 @@ PROMPT
 - **基线变化**：必须新开会话，brief 里引用上一轮报告路径与缺陷编号。旧会话记的是旧文件内容，续用会拿旧印象判新代码，把已修项误判成 NOT FIXED。新增文件被 glob/自动发现机制加载、依赖或配置变化、换了审查范围或验收标准，都算基线变化。
 - **审查期间有写入**：即使结束时哈希恢复原样，本次结论也标 **STALE**——报告可能混用了中间版本，不能当作该基线的验收结论；重审要新开会话。
 - **例外**：确认发生过上下文压缩、剩余窗口不足以完成下一步补查，或用户要求盲审（换一个没看过这版代码的审查者）时新开，并在报告里注明原因。窗口与终态上下文以当次实际值判断，不要把某个模型的数字写成通用阈值。
-- 续跑也显式传 `-m gpt-6.1-sol` 与 `-c model_reasoning_effort="high"`（`codex exec resume` 支持这两项；没有 `-s`/`-C`，沙箱与工作目录沿用原会话）。启动头核验实际 `model:` 与推理档位，不符就停。
+- 续跑也显式传 `-m gpt-6.2-sol` 与 `-c model_reasoning_effort="high"`（`codex exec resume` 支持这两项；没有 `-s`/`-C`，沙箱与工作目录沿用原会话）。启动头核验实际 `model:` 与推理档位，不符就停。
 - 报告头记 `session id` 与是否续跑；正式审查按 id 精确 resume，禁止用 `--last` 挑会话。
 
 ## 4. 验收 Codex 的输出
@@ -90,7 +90,7 @@ PROMPT
 - 如果输出含 `You've hit your usage limit`：本次调用标 **INCOMPLETE**，记录提示的重置时间、session id、原始日志与已完成内容；重置前不重试，不自动换模型/供应商。恢复后先按 §3「会话复用」核对基线：基线一致才续跑，基线变化按新修订新开，原会话不可恢复则新开并在报告里记失败原因。
   ```bash
   /usr/lib/chatgpt/resources/codex exec resume <session-id> \
-    -m gpt-6.1-sol -c model_reasoning_effort="high" \
+    -m gpt-6.2-sol -c model_reasoning_effort="high" \
     "继续完成 <topic> 审查并给出最终结论"
   ```
   续跑用新的 `-o` 文件名；只缩小读取清单，不能缩小原验收范围，缺口仍在就保持 INCOMPLETE。
@@ -105,7 +105,7 @@ PROMPT
   - 其他项目按其文档约定；没有约定时放 `docs/reviews/`。
 - 若审查期间基线变化（STALE），不要写成该修订的正式报告；保留原始日志与最终消息，在对话里标 STALE/INCOMPLETE，等版本冻结后重跑。
 - 用 Write/Edit 落文件，不用 Bash 重定向写源码/配置（本机 Mimosa 钩子会拦）。
-- 报告注明审查者=Codex（模型 `gpt-6.1-sol`、实际推理档位）、会话 id 与是否续跑、基线标识（WP/Rn 或对象 OID）、审查时源码哈希；不要把主对话的分析混进 Codex 的结论。
+- 报告注明审查者=Codex（模型 `gpt-6.2-sol`、实际推理档位）、会话 id 与是否续跑、基线标识（WP/Rn 或对象 OID）、审查时源码哈希；不要把主对话的分析混进 Codex 的结论。
 
 ## 常见坑
 
@@ -114,5 +114,5 @@ PROMPT
 - **锁被 stub**：如果回归脚本把锁替换成空实现，并发路径不会被覆盖；在 brief 里点名要求审查真实锁序。
 - **无关改动**：仓库常叠加多个工作包/主题的未提交改动，必须显式划界。
 - **结论伪造**：只认 Codex 最终消息里的结论行；主对话自己的代码核对只能作为“复核意见”，不能替代审查结论。
-- **模型漂移**：漏传 `-m` 或被本机配置覆盖时会退回默认模型（本机曾见 `gpt-6-astra`）；以日志头 `model:` 行为准，不是 `gpt-6.1-sol` 就重跑，不落正式报告。
+- **模型漂移**：漏传 `-m` 或被本机配置覆盖时会退回默认模型（本机曾见 `gpt-6-astra`）；以日志头 `model:` 行为准，不是 `gpt-6.2-sol` 就重跑，不落正式报告。
 - **会话混用**：同一工程 ≠ 同一会话。跨修订复用旧会话，会拿旧文件印象判新代码；判定看项目 + WP/Rn + 审查对象 + 只读清单 + 验收标准是否完全一致（见 §3「会话复用」）。

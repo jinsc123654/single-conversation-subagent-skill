@@ -71,7 +71,7 @@ bash install.sh --mode hybrid --check
 
 ## 另一个技能：codex-review
 
-本仓库同时管理 `codex-review/`：让 Codex 以只读方式独立审查任务、未提交改动、修订或 commit，输出逐项判定与最终 `ACCEPT/REJECT`；审查模型固定为 `gpt-6.1-sol`，含 brief 模板与会话复用规则（审查基线一致才 `codex exec resume`，基线变化新开会话）。
+本仓库同时管理 `codex-review/`：让 Codex 以只读方式独立审查任务、未提交改动、修订或 commit，输出逐项判定与最终 `ACCEPT/REJECT`；审查模型固定为 `gpt-6.2-sol`，含 brief 模板与会话复用规则（审查基线一致才 `codex exec resume`，基线变化新开会话）。
 
 ```bash
 bash install.sh --skill codex-review
@@ -254,7 +254,7 @@ manifest 字段恰好：`verdict`、`session_id`、`model`、`subject_sha256`、
 
 - **触发**：即将修改系统关键配置、删除/覆盖关键数据、做不可逆的系统级操作，或模式为长任务。
 - **频率**：同一任务/会话只做一次，在实现前完成；用户拒绝或 Codex 不可用时说明并继续，不反复询问。实施中范围根本变化按新任务处理或先向用户确认。
-- **方式**：主对话用只读 `codex exec -m gpt-6.1-sol -s read-only -C <项目根> -c model_reasoning_effort=high`，brief 覆盖目标、计划改动、高危点、约束、验证和回滚；结果纳入方案并记录到项目协作/证据。它不是子 Agent，也不能替代收尾审查。
+- **方式**：主对话用只读 `codex exec -m gpt-6.2-sol -s read-only -C <项目根> -c model_reasoning_effort=high`，brief 覆盖目标、计划改动、高危点、约束、验证和回滚；结果纳入方案并记录到项目协作/证据。它不是子 Agent，也不能替代收尾审查。
 - **收尾审查推荐**：按项目情况决定，大多数普通/小型/已验证任务推荐不审查；高风险、跨仓库或大范围改动、验证不足，或方案指导发现重大风险时推荐使用。2.9 的 `codex_review` 接受 `recommendation=["yes"]` 或 `["no"]`；3.0 起长任务改用 `codex_gate`，标准/快速仍用 `codex_review`。
 
 ## 本机任务看板与项目总览（2.8.0）

@@ -13,7 +13,7 @@ description: 单对话两级 Subagent 协作；首次选模式，开场确认验
 4. **开始实现、执行测试或派发前完成开场确认**。标准/长任务先问验证范围并确认写入。
    - **长任务复核策略（codex_gate）**：验证范围确认后问一次 `interaction_request(kind="codex_gate", recommendation=["packages"])`。`packages` = 每个工作包由主对话启动 Codex 只读复核，并在收尾再审查（推荐）；`closure` = 仅收尾审查；`none` = 不做 Codex 审查。推荐不是确认，必须等 `CONFIRMED`。旧长会话没有 gate 时，首次创建工作包/更新或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次即可，不回退旧 `codex_review`。
    - **标准/快速收尾审查（codex_review）**：保持原规则。codex-review 注册已确认时问一次 `interaction_request(kind="codex_review", recommendation=["yes"] 或 ["no"])`；只调查、未知或未注册跳过。长任务不再问 `codex_review`，MCP 返回 `SKIPPED/USE_CODEX_GATE`。
-   - **Codex 方案指导（仅一次）**：如果即将进行的是高危操作（修改系统关键配置、删除或覆盖关键数据、不可逆的系统级操作等），或模式为长任务，在实现前推荐使用 Codex 做一次只读项目方案指导。用宿主原生问答（没有原生工具时文本回退）问一次；用户同意后，主对话运行一次 `codex exec -m gpt-6.1-sol -s read-only -C <项目根> -c model_reasoning_effort=high`，brief 写清目标、计划改动、高危点、约束、验证和回滚，读取结果纳入方案，并记录到项目协作/证据。同一任务只做一次，不重复；Codex 不可用或用户拒绝时说明并继续。只调查不触发；快速/标准且非高危跳过。
+   - **Codex 方案指导（仅一次）**：如果即将进行的是高危操作（修改系统关键配置、删除或覆盖关键数据、不可逆的系统级操作等），或模式为长任务，在实现前推荐使用 Codex 做一次只读项目方案指导。用宿主原生问答（没有原生工具时文本回退）问一次；用户同意后，主对话运行一次 `codex exec -m gpt-6.2-sol -s read-only -C <项目根> -c model_reasoning_effort=high`，brief 写清目标、计划改动、高危点、约束、验证和回滚，读取结果纳入方案，并记录到项目协作/证据。同一任务只做一次，不重复；Codex 不可用或用户拒绝时说明并继续。只调查不触发；快速/标准且非高危跳过。
    - **收尾审查执行**：长任务 gate 为 `packages` 或 `closure`、或标准/快速 `codex_review` 为 `yes` 时，完成实现和所选验证后按 `codex-review` 执行一次；`none`/`no` 不执行。开场只记录选择。**方案指导与收尾审查是两件事，方案指导不替代收尾审查。**
 
 ## 逐题交互

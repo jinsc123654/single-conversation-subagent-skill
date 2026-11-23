@@ -133,7 +133,7 @@
 **启动方式**：主对话运行一次只读命令，brief 写明目标、范围、基线、验收、只读清单和证据目录：
 
 ```bash
-codex exec -m gpt-6.1-sol -s read-only -C <项目根> -c model_reasoning_effort=high "<brief>"
+codex exec -m gpt-6.2-sol -s read-only -C <项目根> -c model_reasoning_effort=high "<brief>"
 ```
 
 **包级复核 brief 必须包含**：工作包/修订、`review_subject`、允许文件、验收标准、非 review 子任务结果与证据索引、要求输出唯一结论行；最终消息和 manifest 由主对话写入 review attempt 的证据目录。manifest 的 `subject_sha256` 必须回带 prepare 返回的 `review_subject`，否则 `REVIEW_STALE`。

@@ -117,7 +117,7 @@ review manifest 是严格 JSON 对象，字段集恰好：
 {
   "verdict": "ACCEPT",
   "session_id": "codex-session-id",
-  "model": "gpt-6.1-sol",
+  "model": "gpt-6.2-sol",
   "subject_sha256": "<prepare 返回的 review_subject>",
   "final_message_sha256": "<raw final message 的 sha256>",
   "command": "codex exec ...",
