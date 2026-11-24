@@ -2,7 +2,14 @@
 
 ## ZCode 固定审阅员回执
 
-`SCS_NATIVE_REVIEW=1` 启用原生回执；用 `session_open.native_review` 核对。原有 `codex_gate=none|closure|packages`、`codex_review=no|yes` 和所有并行 attempt 接口保留。ZCode 把 `review_registration` 用于当前宿主有没有 `固定审阅员`。正式审查统一使用这个注册身份，策略确认时不另问审阅员路线。
+`SCS_NATIVE_REVIEW=1` 启用原生回执，用 `session_open.native_review` 核对。根据 ZCode 是否已注册 **固定审阅员** 填写 `review_registration`。原生问答和文本回退直接展示角色及选项，用下列字段和值提交。
+
+| 模式 | 界面问题 | 提交字段和值 |
+| --- | --- | --- |
+| 长任务 | 什么时候请固定审阅员审查？ | `codex_gate`，逐包并收尾 `packages` / 仅收尾 `closure` / 不做独立复核 `none` |
+| 标准或快速 | 收尾要请固定审阅员吗？ | `codex_review`，使用 `yes` / 不使用 `no` |
+
+长任务在确认后派 **方案顾问** 做一次开工前的只读方案指导，取得实际回执后拆包派发。
 
 - `work_attempt_prepare` 或 `work_attempt_prepare_many` 在原生模式返回 `agent_type`。执行角色按依赖、范围、资源派发。复核在其它 attempt 结束后单独 prepare；记录宿主真实返回的 `host_agent_id`。结果达到 `ENDED` 时提交其证据，按 `review_subject` 绑定 prepare 时冻结的对象。
 - 在返回的 `evidence_dir` 中保存 `final-message.md` 和 `manifest.json`。最终消息来自实际宿主结果，恰好一行 `结论: ACCEPT` 或 `结论: REJECT`。`manifest.json` 使用以下字段；`model` 用宿主观测到的 `provider/model` 或 `unobserved`。一个合法的 REJECT 对应 `FAIL`。
@@ -32,7 +39,7 @@
 
 对话给出项目目录时用该目录，否则用宿主提供的当前对话工作目录。传绝对路径并设置 `register_obsidian=true` 时，`session_open` 会在提问前初始化 docs-root 和总览，并登记给 PyQt。成功时返回 `obsidian.status=REGISTERED` 和绝对路径。登记失败时在 `obsidian` 返回错误，已打开的会话可继续使用。只有在项目元数据及本地索引写入获准时启用登记。
 
-1. `session_open(client_name=..., conversation_id="宿主真实对话ID", review_registration="registered|unregistered|unknown", project_root="任务项目根")`。先完成一次任务相关只读调查（目标目录/README/git status；不要只列目录就提问），不要检查 MCP 注册/配置/项目根，不读无关记忆；调查在绑定前完成，`session_open` 只调用一次。`project_root` 传任务项目根；服务端启动配置的根是允许的工作区边界，项目根必须是其子目录，服务端为该项目建独立 `<项目>/.scs`；省略时用配置根。`client_name` 可省略，服务端把配置 host 与 client_name 一起做结构化 SHA-256 命名空间（存储 `h<sha256>`，返回 `client_label` 供阅读），不同宿主同 ID 不共用会话。返回 `question_channel`（auto/native/mcp/text）、`host`、`project_root`、`codex_gate`（未确认为 null）和 `intake` 投影。仅未开始模式选择时附短 `workspace_scan` 和 `mode_options`。ID 未知时省略并保留返回 ID；不得伪造真实 ID、用项目路径当对话 ID。根据当前宿主会话的技能列表填写 review_registration，有 codex-review 时传 registered，明确不可用时传 unregistered，无法核实时传 unknown。
+1. `session_open(client_name=..., conversation_id="宿主真实对话ID", review_registration="registered|unregistered|unknown", project_root="任务项目根")`。先完成一次任务相关只读调查（目标目录/README/git status；不要只列目录就提问），不要检查 MCP 注册/配置/项目根，不读无关记忆；调查在绑定前完成，`session_open` 只调用一次。`project_root` 传任务项目根；服务端启动配置的根是允许的工作区边界，项目根必须是其子目录，服务端为该项目建独立 `<项目>/.scs`；省略时用配置根。`client_name` 可省略，服务端把配置 host 与 client_name 一起做结构化 SHA-256 命名空间（存储 `h<sha256>`，返回 `client_label` 供阅读），不同宿主同 ID 不共用会话。返回 `question_channel`（auto/native/mcp/text）、`host`、`project_root`、`codex_gate`（未确认为 null）和 `intake` 投影。仅未开始模式选择时附短 `workspace_scan` 和 `mode_options`。ID 未知时省略并保留返回 ID；不得伪造真实 ID、用项目路径当对话 ID。ZCode 核对注册的固定审阅员，通用宿主核对 codex-review。可用时传 registered，明确不可用时传 unregistered，无法核实时传 unknown。
 2. 按 `question_channel` 路由。`native`：用宿主原生 Ask/Question，没有时用文本；`text`：完整显示选项、推荐与 question_id，结束当轮等待；`mcp`：`interaction_ask(session_id=...,kind="mode",recommendation=["standard"],timeout_seconds=15,analysis="推荐 standard：范围小，先冒烟")`，仅 legacy stdio 的 back-channel 打开 MCP form，到点标记 `TIMED_OUT` 并返回 recommendation，不写 `CONFIRMED`；`auto`：form 可用则按 mcp，否则按 native/text。`analysis` 是 1-2 句推荐理由（≤600 字，不含隐私/凭据）；form 的选项值带中文注释（如 `quick — 快速处理`），并显示中文 title、分析、推荐标记、15s 截止和 question_id。
 3. `MODERN_NO_BACKCHANNEL`/`ELICITATION_UNSUPPORTED`/`TEXT_FALLBACK_REQUIRED`：问题保持 `WAITING_USER` 并带 `question_id`；显示完整选项与唯一推荐，用户明确回复后直接 `interaction_submit(...,action="accept",choices=[...],source="text"|"native")`。modern 无回通道只表示不能做服务端限时 form，不等于客户端完全不支持 elicitation。原生/文本路径不声称 15 秒；15 秒只用于 mcp form 路径。ZCode 原生 AskUserQuestion 是 60 秒隐藏 + 5 分钟截止。
 4. 需要显式 MCP 记账时，`interaction_request(...,channel="native")` 只登记，然后真实调用原生工具，再将用户明确答复以返回 `question_id` 提交；服务不越过宿主调用 UI。

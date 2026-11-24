@@ -21,10 +21,14 @@ TITLES = {
 }
 NATIVE_MESSAGES = {
     **MESSAGES,
-    "codex_gate": "请选择固定审阅员的复核范围：逐包及收尾、仅收尾或不做复核。请明确提交。",
-    "codex_review": "收尾是否由固定审阅员做一次只读独立审查？",
+    "codex_gate": "长任务什么时候请固定审阅员审查？",
+    "codex_review": "收尾要请固定审阅员做一次只读独立审查吗？",
 }
-NATIVE_TITLES = {**TITLES, "codex_gate": "请选择复核范围", "codex_review": "收尾是否使用固定审阅员"}
+NATIVE_TITLES = {
+    **TITLES,
+    "codex_gate": "固定审阅员的审查时机",
+    "codex_review": "收尾是否请固定审阅员",
+}
 
 
 def message_for(question: dict) -> str:
@@ -136,15 +140,19 @@ def describe(question: dict, reason: str | None = None, analysis: str | None = N
     recommendation = json.loads(question["recommendation"])
     ordered = _ordered(question, recommendation)
     recommended = [x for x in _options(question) if x["value"] in recommendation]
+    review_labels_only = question.get("native_review") and kind in ("codex_gate", "codex_review")
     labels = [
-        f"{x['value']}: {x['label']}" + ("（推荐）" if x["value"] in recommendation else "")
+        ("" if review_labels_only else f"{x['value']}: ") + x["label"]
+        + ("（推荐）" if x["value"] in recommendation else "")
         + (f" — {x['desc']}" if x.get("desc") else "")
         + (f"｜{_scan_reason(analysis)}" if x["value"] in recommendation and _scan_reason(analysis) else "")
         for x in ordered
     ]
     text = message_for(question)
     if recommended:
-        text += "\n推荐：" + "、".join(f"{x['label']}（{x['value']}）" for x in recommended)
+        text += "\n推荐：" + "、".join(
+            x["label"] if review_labels_only else f"{x['label']}（{x['value']}）" for x in recommended
+        )
     if analysis and analysis.strip():
         text += "\n" + analysis.strip()[:600]
     text += "\n" + "\n".join(labels)

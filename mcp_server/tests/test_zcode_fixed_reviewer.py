@@ -83,6 +83,33 @@ def test_parallel_attempts_and_fixed_reviewer_proof(zcode, tmp_path):
     assert work.update(sid, pid, finished["version"], "REVIEW_READY")["state"] == "REVIEW_READY"
 
 
+async def test_zcode_long_review_text_fallback_uses_display_labels(zcode):
+    async with Client(zcode, mode="legacy") as client:
+        async def call(tool, **args):
+            return (await client.call_tool(tool, args)).structured_content
+
+        opened = await call("session_open", conversation_id="long-text", review_registration="registered")
+        sid = opened["id"]
+        for kind, choice in (("mode", "long"), ("verification", "targeted")):
+            question = await call("interaction_request", session_id=sid, kind=kind,
+                                  recommendation=[choice], channel="text")
+            assert (await call("interaction_submit", session_id=sid, question_id=question["question_id"],
+                               action="accept", choices=[choice], source="text"))["status"] == "CONFIRMED"
+
+        question = await call("interaction_request", session_id=sid, kind="codex_gate",
+                              recommendation=["packages"], channel="text")
+        assert "长任务什么时候请固定审阅员审查？" in question["display_text"]
+        assert [(option["label"], option["value"]) for option in question["options"]] == [
+            ("包级复核 + 收尾审查", "packages"), ("不做独立复核", "none"), ("仅收尾审查", "closure"),
+        ]
+        for option in question["options"]:
+            assert option["label"] in question["display_text"]
+            assert option["value"] not in question["display_text"]
+        assert (await call("interaction_submit", session_id=sid, question_id=question["question_id"],
+                           action="accept", choices=["仅收尾审查"], source="text"))["status"] == "CONFIRMED"
+        assert (await call("session_get", session_id=sid))["codex_gate"] == "closure"
+
+
 async def test_main_questions_and_operation_gate_use_fixed_reviewer(zcode, tmp_path):
     async with Client(zcode, mode="legacy") as client:
         async def call(tool, **args):
@@ -94,7 +121,10 @@ async def test_main_questions_and_operation_gate_use_fixed_reviewer(zcode, tmp_p
         sid = opened["id"]
         question = await call("interaction_request", session_id=sid, kind="codex_review", recommendation=["yes"])
         assert question["status"] == "NATIVE_QUESTION_REQUIRED"
-        assert "固定审阅员" in question["display_text"]
+        assert "收尾要请固定审阅员" in question["display_text"]
+        assert [(option["label"], option["value"]) for option in question["options"]] == [
+            ("使用固定审阅员", "yes"), ("不使用", "no"),
+        ]
         assert (await call("interaction_submit", session_id=sid, question_id=question["question_id"],
                            action="accept", choices=["yes"], source="native"))["status"] == "CONFIRMED"
         assert (await call("session_get", session_id=sid))["codex_review"] is True
