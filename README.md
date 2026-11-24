@@ -67,7 +67,14 @@ bash install.sh --mode hybrid --check
 
 手动安装：复制 `single-conversation-subagent/` 到宿主实际的 skills 目录，再把 AGENTS.snippet.md 的标记块合入宿主读取的指令文件；无 bash/无 Python 也能使用纯 Skill。不要覆盖其他标记块或已有项目记忆。
 
-## ZCode 4 原生 Agent profiles
+## ZCode 4：安装 Skill 与六个专用 Agent
+
+本分支随源码一起分发 [角色设计与派发规则](single-conversation-subagent/references/roles.md)、[协作与等待规则](single-conversation-subagent/references/protocol.md)、[六个角色模板](zcode-agents/) 和安装器。**只复制 `SKILL.md` 不会注册 Agent**。要使用长任务的完整分工，先取回 `zcode-native-agents` 分支，再运行下面的安装命令。
+
+```bash
+git clone --branch zcode-native-agents https://github.com/jinsc123654/single-conversation-subagent-skill.git
+cd single-conversation-subagent-skill
+```
 
 可选安装：不加 `--with-zcode-agents` 不会创建或修改 Agent 配置。默认目标是 `~/.zcode/agents/`（与 `AGENT_HOME` 独立）；如需隔离或使用宿主支持的其他位置，用 `--zcode-agents-dir PATH`，不能放在本 Skill 或 MCP 运行时的受管目录内。安装器只新增缺失的同名文件，不覆盖普通文件、目录或符号链接，不跟随目标目录及其父目录的符号链接。安装要求目标文件系统支持硬链接及 `ln -T`；卸载不移除任何 Agent profiles。
 
@@ -77,13 +84,18 @@ bash install.sh --mode hybrid --check
 bash install.sh --with-zcode-agents
 ```
 
-为全部六个角色安装缺失的 profile（示例同时生成混合模式的 MCP 运行时）：
+完整安装时，先在 ZCode 配好可用的 GPT 和 DeepSeek 模型，替换下方两个 `provider-id/model-id` 占位符，再从仓库根目录执行。`/absolute/workspace` 换成允许 MCP 访问的工作区目录。
 
 ```bash
-bash install.sh --mode hybrid --project-root /absolute/workspace --with-zcode-agents \
-  --zcode-gpt-model new-provider-2/gpt-6.2-sol \
-  --zcode-deepseek-model new-provider-2/deepseek-v4.1-flash
+AGENT_HOME="$HOME/.zcode" bash install.sh --mode hybrid --with-default-rule \
+  --project-root /absolute/workspace --with-zcode-agents \
+  --zcode-gpt-model your-gpt-provider/your-gpt-model \
+  --zcode-deepseek-model your-deepseek-provider/your-deepseek-model
 ```
+
+1. 把 `$HOME/.zcode/mcp/single-conversation-subagent/zcode-example.json` 的服务条目合入 [ZCode MCP 配置](#客户端配置)，保留 `SCS_NATIVE_REVIEW=1`。
+2. 新开 ZCode 会话，在 **设置 → Agent 能力 → 子智能体 → 用户** 核对下表六个角色和模型。如果角色已存在，安装器会保留用户自己的设置，请在界面核对它们是否符合分工。
+3. 在聊天输入框的 `/` 菜单选择 `single-conversation-subagent`，或按安装后的用户规则开始任务。选「长任务」才自动派发专用角色；「标准执行」和「快速处理」使用 ZCode 自带流程。中文名称只用于识别和派发，任务、对话与回复语言按用户要求；正式审阅正文不限语言，但必须保留协议要求的固定结论行。
 
 | Profile ID（同名 `.md` 文件） | 模型 / 安装条件 | 工具 |
 | --- | --- | --- |
