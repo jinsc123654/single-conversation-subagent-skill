@@ -20,18 +20,20 @@
 - 主对话持久化证据；角色返回关键观察、日志出处或现成证据路径，不主动写证据文件到 `allowed_files` 以外。需日志文件时由主对话安排合规的输出并登记；验证命令不得借日志重定向扩大写权限。原生审阅员与 `方案顾问` 全程不落盘。
 - 报告自己启动的进程是否停止、设备是否释放；在实际静止后由主对话结束 attempt。非 implement 无默认文件租约，不假设有共享读保护。
 
-执行角色的最终消息用有界文本或 JSON（建议 ≤1–2 KB，不贴全量日志），至少包含以下字段：
+执行角色每轮只接受本轮授权。回执回显 `attempt_id`，默认目标 ≤2 KiB UTF-8，优先保留阻塞和高风险发现；装不下就用 `unexpanded` 列事项 ID、主题和证据定位。只有主对话为本轮点名事项、说明理由并给出 `reply_budget_bytes`（2049–8192），才按指定预算展开；下一轮恢复默认，不贴全量材料。详见[按需展开](protocol.md#子-agent-会话续用)。文本或 JSON 均可，字段示例如下：
 
 ```json
 {
   "status": "PASS|FAIL|BLOCKED|NOT_RUN|SUBSTITUTED",
   "role": "analyze|implement|test",
+  "attempt_id": "A-...",
   "actions": ["实际动作"],
   "changed_files": ["仅 implement，项目相对路径"],
   "commands": [{"command": "...", "exit_code": 0, "evidence": "<已有证据路径或 null>"}],
   "evidence": ["<已有证据路径或 file:line>"],
   "first_error": "首个异常或 null",
   "remaining": ["剩余问题/风险"],
+  "unexpanded": [{"id": "F2", "topic": "未展开事项", "evidence": "file:line"}],
   "resources": {"processes_stopped": true, "devices_released": [], "notes": ""}
 }
 ```

@@ -357,6 +357,13 @@ class Work:
         if host_agent_id is not None and (not isinstance(host_agent_id, str) or len(host_agent_id) > 256):
             raise ScsError("INPUT_INVALID", "host_agent_id must be a bounded host identifier.")
 
+    def _assert_host_idle(self, con, host_agent_id: str | None):
+        if not self.store.native_review or not host_agent_id:
+            return
+        active = con.execute("SELECT id FROM work_attempts WHERE host_agent_id=? AND state!='ENDED' LIMIT 1", (host_agent_id,)).fetchone()
+        if active:
+            raise ScsError("HOST_AGENT_ACTIVE", "This native agent already has an active attempt.")
+
     def _assert_review_window(self, con, row, data, task):
         """A review runs alone; other work waits until that review attempt ends."""
         package_id, revision = row["id"], row["revision"]
@@ -402,6 +409,7 @@ class Work:
         if active:
             raise ScsError("ATTEMPT_ACTIVE", "This subtask already has an active attempt.",
                            {"attempt_id": active["id"]})
+        self._assert_host_idle(con, host_agent_id)
         dependencies = []
         for dep_id in task.get("depends_on", []):
             dep_task = next((t for t in data["subtasks"] if t["id"] == dep_id), None)
@@ -641,6 +649,10 @@ class Work:
             if (task["kind"] == "review" and json.loads(attempt["input_snapshot"]).get("review_route") is not None
                     and attempt["host_agent_id"] and host != attempt["host_agent_id"]):
                 raise ScsError("REVIEW_AGENT_MISMATCH", "A native review's recorded host_agent_id cannot be replaced.")
+            if host != attempt["host_agent_id"]:
+                self._assert_host_idle(con, host)
+                if self.store.native_review and attempt["host_agent_id"]:
+                    raise ScsError("HOST_AGENT_MISMATCH", "An active native attempt cannot be rebound to another agent.")
             result_data = None
             if target == "ENDED":
                 if attempt["revision"] != row["revision"]:

@@ -1,8 +1,5 @@
 <!-- single-conversation-subagent begin -->
-项目根优先用用户明确指定的目录，否则用当前对话工作目录。按 Skill 调用 session_open(project_root=<绝对项目根>, register_obsidian=true) 建库并登记给 PyQt。MCP 工作区只决定授权范围；登记独立于工作模式和验证范围。ZCode stdio 使用 SCS_NATIVE_REVIEW=1；首次 session_open 前只核对当前宿主原生 `固定审阅员` / `继承审阅员` 的可派发性；重连或补登记用原 session_id 和项目绝对路径。
-首次任务四选一，先做少量只读调查，推荐一个模式。只有用户明确要求“不用问，直接做”才跳过为快速。适用的题由宿主逐题询问并提交真实回复，MCP 返回 CONFIRMED 后才进入下一题；QUESTION_PENDING 的适用题按原题号处理。标准/长任务开工前确认验证范围。标准/快速走 ZCode 内建流程，主对话直接处理，只在有用时用默认/内建 Agent；不问 SCS 复核时机、路由或方案指导，不因历史答案自动派审阅。只调查保持只读，按需用内建 Explore；不开专用角色流程。旧 MCP 若以复核 intake 阻塞可选 SCS 操作，说明并暂缓该操作，不为此补问、代填或绕过；见 SKILL.md。
-只有长任务自动编排六个专用角色。验证范围后确认 codex_gate（none|closure|packages，可复核时推荐 packages），不问 codex_review；启用复核或需要操作预审时，派发前确认适用的 review_route（gpt|inherit），沿用已确认选择，不自动换路由。长任务开工前可推荐一次只读方案指导，用户同意后由主对话派 `方案顾问`（固定 GPT），只给建议，不替代正式复核。长任务按 subagent_type 派 `查询侦察员`（固定 DeepSeek，analyze，只读）、`实施工程师`（继承模型，implement，只改 allowed_files）、`测试验证员`（固定 DeepSeek，test，只运行指定命令）；包级、收尾和操作预审仅由主对话按路由派原生只读 `固定审阅员`（gpt，固定 GPT）或 `继承审阅员`（inherit，继承模型）。不传模型覆盖、不使用外部复核工具。用户明确点名可在自动流程外手动调用专用角色，不切模式、不替代正式复核或闸门。长任务调查阶段有 n 个独立只读子任务时起步 min(4, n) 个 `查询侦察员`；实现按 allowed_files 两两不相交并行，默认上限 4，无宿主并发证据取 1。先 prepare 再派发，主对话持久化证据并串行登记；packages 包仅当前 subject 的原生 ACCEPT 放行 REVIEW_READY，复核窗口禁止其他 attempt，文件/定义/非 review 结果变化即 STALE。有活动 attempt 时不得 REVIEW_READY、COMPLETED、ABANDONED 或切修订。终态须写原因且不可改。
-破坏性操作闸门适用于所有模式；标准/快速遇到须走原生预审的操作，阻塞并说明须由用户明确切换长任务才走闸门，不自动升级、不绕过；只调查不执行。执行前必须 operation_gate_record 并以当前参数 operation_gate_check，只有 APPROVED 且保留用户独立确认才执行。ACCEPT 需当前 digest 的真实原生证据和唯一结论及用户确认，REJECT 对同 operation_id/digest 是终态；不可用只能记 UNAVAILABLE_OVERRIDE，不能放行。无宿主 Hook 时是协议级约束。纯 Skill 回退沿用相同模式边界与手工记录，无法确认当前闸门则不执行。见 SKILL.md 和 references/。
-docs-root 依次 00_doc/00_docs/docs/doc，均无建 docs；记忆与证据在其 agent/，WP 审查报告 04_test/report/。不迁移旧记录，SQLite 与手工 Markdown 恢复时显式核对，规则变更新对话加载。
-用户启用 Obsidian 管理时，以 docs-root 为独立库根；用 project_view_refresh / info 生成或检查 agent/acceptance/ 视图和打开链接，保留批注与既有配置，不自动注册全局库，不把子任务通过当最终验收。
+- 主对话首次处理任务时加载 `single-conversation-subagent` Skill，按其开场流程确认模式、绑定项目并在获准时登记给 PyQt；同一对话沿用已确认选择。子 Agent 只按派单执行，不做开场、不再委派。
+- 标准/快速用 ZCode 内建流程；标准先确认验证范围。只调查保持只读；仅长任务自动编排专用 Agent。详细流程按需查阅 Skill 的 `references/`。
+- 破坏性操作在所有模式下都受闸门约束：仅在用户明确选择长任务并独立确认操作、原生预审通过、执行前按当前参数检查为 `APPROVED` 时执行。无法核验就不执行，不自动升级或绕过。
 <!-- single-conversation-subagent end -->

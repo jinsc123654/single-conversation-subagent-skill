@@ -37,6 +37,8 @@ flowchart TD
 
 长任务由主对话直接派发侦察者（`analyze`，只读）、实施者（`implement`，只改 `allowed_files`）、验证者（`test`，只跑获准命令），以及需要时的原生只读复核者。调查阶段有 n 个独立只读子任务时起步 min(4, n) 个侦察者；实现阶段按 `allowed_files` 两两不相交取最大并行集合；默认并发上限 4，没有宿主并发证据时取 1。`packages` 包在 `REVIEW_READY` 前需要 review attempt 的 ACCEPT manifest 且 `review_subject` 当前，文件/定义/结果变化即 `REVIEW_STALE`。破坏性操作在**所有模式**都要先登记 `operation_gate_record`、执行前 `operation_gate_check` 为 `APPROVED`；REJECT 终态，复核不可用时不得伪记 ACCEPT。MCP 不执行、不拦截宿主命令，没有宿主 Hook 时是协议级约束。
 
+长任务的查询、实施和验证角色优先续用同一工作线的已完成原生 Agent，每轮仍独立登记 attempt 和证据。预计上下文超过 70% 时带有界摘要换新；窗口或状态不可信时不盲续。续用消息默认 ≤4 KiB，回执目标 ≤2 KiB；正式审阅仍独立新开。见[会话续用与上下文探针](single-conversation-subagent/references/protocol.md#子-agent-会话续用)。
+
 “不做测试”和“只记录方法”各自与其他验证操作互斥，均 NOT_RUN；危险操作独立确认。仅用户明确“不用问，直接做”可跳过模式选择，不能因此授权删除、擦除或烧录。超时只认可宿主可观测结果和事先告知的策略；本版服务只记录超时，不自动确认。
 
 ## 安装

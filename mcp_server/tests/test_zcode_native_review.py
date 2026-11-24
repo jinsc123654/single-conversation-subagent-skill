@@ -35,6 +35,32 @@ def long_intake(state, sid, route=None):
         confirm(state, sid, "review_route", route)
 
 
+def test_native_agent_can_only_hold_one_active_attempt(native):
+    state, sid = native
+    long_intake(state, sid, "gpt")
+    work = Work(state.store)
+    package = work.create(sid, "Reuse an idle native agent", ["src.py"], ["Inspected"], [
+        {"id": task, "kind": "analyze", "allowed_files": ["src.py"], "acceptance": ["Inspected"]}
+        for task in ("first", "next")
+    ], "reuse-native")
+    package_id, version = package["id"], package["version"]
+    host = "native-agent-1"
+    first = work.prepare_attempt(sid, package_id, version, "first", host)["attempt"]["id"]
+    with pytest.raises(ScsError) as err:
+        work.prepare_attempt(sid, package_id, version, "next", host)
+    assert err.value.code == "HOST_AGENT_ACTIVE"
+    second = work.prepare_attempt(sid, package_id, version, "next")["attempt"]["id"]
+    with pytest.raises(ScsError) as err:
+        work.update_attempt(sid, second, version, host_agent_id=host)
+    assert err.value.code == "HOST_AGENT_ACTIVE"
+    with pytest.raises(ScsError) as err:
+        work.update_attempt(sid, first, version, host_agent_id="native-agent-2")
+    assert err.value.code == "HOST_AGENT_MISMATCH"
+    ended = work.update_attempt(sid, first, version, "ENDED", {"status": "NOT_RUN"})
+    resumed = work.update_attempt(sid, second, ended["version"], "LAUNCHING", host_agent_id=host)
+    assert resumed["attempt"]["host_agent_id"] == host
+
+
 def review_package(work, sid):
     return work.create(sid, "Review a bounded change", ["src.py"], ["Reviewed"], [
         {"id": "review", "kind": "review", "allowed_files": ["src.py"], "acceptance": ["Reviewed"]},
