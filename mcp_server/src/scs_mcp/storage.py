@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS resumes(
 
 class Store:
     def __init__(self, root: str | Path, busy_timeout_ms: int = 3000):
+        self.native_review = os.environ.get("SCS_NATIVE_REVIEW") == "1"
         self.paths = Paths(root)
         self.root = self.paths.root
         self.timeout = busy_timeout_ms

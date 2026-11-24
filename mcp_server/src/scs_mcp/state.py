@@ -50,6 +50,18 @@ OPTIONS = {
     "codex_review": [{"value": "no", "label": "不使用", "desc": DESCRIPTIONS["codex_review"]["no"]},
                      {"value": "yes", "label": "使用：收尾只读独立审查", "desc": DESCRIPTIONS["codex_review"]["yes"]}],
 }
+NATIVE_OPTIONS = {
+    **OPTIONS,
+    "codex_gate": [
+        {"value": "none", "label": "不做独立复核", "desc": "不做包级复核或收尾审查"},
+        {"value": "closure", "label": "仅收尾审查", "desc": "由固定审阅员在收尾做一次只读审查"},
+        {"value": "packages", "label": "包级复核 + 收尾审查", "desc": "固定审阅员逐包审查并在收尾再审查"},
+    ],
+    "codex_review": [
+        {"value": "no", "label": "不使用", "desc": "收尾不追加独立审查"},
+        {"value": "yes", "label": "使用固定审阅员", "desc": "收尾启动独立只读审查"},
+    ],
+}
 
 
 def identifier(prefix: str) -> str:
@@ -58,7 +70,7 @@ def identifier(prefix: str) -> str:
 
 def _code(kind: str, value: str) -> str:
     """Accept either the stored code or the display label shown to users."""
-    for option in OPTIONS[kind]:
+    for option in OPTIONS[kind] + NATIVE_OPTIONS[kind]:
         if value == option["value"] or value == option["label"] or value.startswith(option["value"] + " — "):
             return option["value"]
     return value
@@ -187,7 +199,9 @@ class State:
     def get(self, session_id: str) -> dict:
         with self.store.transaction() as con:
             session = dict(self._session(con, session_id))
-            questions = [dict(r) for r in con.execute("SELECT * FROM questions WHERE session_id=? AND current=1 ORDER BY created_at", (session_id,))]
+            questions = [dict(r) for r in con.execute(
+                "SELECT * FROM questions WHERE session_id=? AND current=1 AND kind!='review_route' ORDER BY created_at",
+                (session_id,))]
             intake = self.intake_status(con, session_id)
         session.pop("identity")
         session["temporary"] = bool(session["temporary"])
@@ -201,7 +215,7 @@ class State:
         gate = next((q["answer"][0] for q in questions
                      if q["kind"] == "codex_gate" and q["state"] == "CONFIRMED" and q["answer"]), None)
         session["codex_gate"] = gate
-        return {"status": "OK", **session, "questions": questions,
+        return {"status": "OK", **session, "questions": questions, "native_review": self.store.native_review,
                 "unresolved": [q["id"] for q in questions if q["state"] != "CONFIRMED"],
                 "question_states": {k: next((q["state"] for q in questions if q["kind"] == k), "NOT_ASKED") for k in KINDS},
                 "intake": intake}
@@ -212,7 +226,10 @@ class State:
             q = con.execute("SELECT * FROM questions WHERE id=? AND session_id=?", (question_id, session_id)).fetchone()
             if q is None:
                 raise ScsError("QUESTION_NOT_FOUND", "Question is not part of this conversation.")
-            return dict(q)
+            return self.render_question(q)
+
+    def render_question(self, q) -> dict:
+        return {**dict(q), "native_review": self.store.native_review}
 
     def _retire_legacy_review_question(self, con, session_id: str) -> int:
         """Retire a current codex_review row that long mode no longer asks.
@@ -258,9 +275,10 @@ class State:
             q = con.execute("SELECT * FROM questions WHERE session_id=? AND kind=? AND current=1", (session_id, kind)).fetchone()
             if q:
                 return {"created": False, **dict(q)}
-            # Return the current question so the host can finish it without opening another UI.
+            # The experimental route selector remains as history, but no longer blocks intake.
             pending = con.execute(
-                "SELECT id,kind,state FROM questions WHERE session_id=? AND current=1 AND state != 'CONFIRMED'",
+                "SELECT id,kind,state FROM questions WHERE session_id=? AND current=1 "
+                "AND state != 'CONFIRMED' AND kind!='review_route'",
                 (session_id,),
             ).fetchone()
             if pending:
@@ -330,7 +348,7 @@ class State:
             q = con.execute("SELECT * FROM questions WHERE id=? AND session_id=?", (question_id, session_id)).fetchone()
             if q is None:
                 raise ScsError("QUESTION_NOT_FOUND", "Question is not part of this conversation.")
-            if not q["current"]:
+            if not q["current"] or q["kind"] not in KINDS:
                 raise ScsError("LATE_REPLY", "A reply for a replaced question is isolated.")
             answer = encode(check_selection(q["kind"], choices or [])) if action == "accept" else None
             if q["state"] in TERMINAL:

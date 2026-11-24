@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
 
-from .state import OPTIONS
+from .state import NATIVE_OPTIONS, OPTIONS
 
 MESSAGES = {
     "mode": "请选择本对话执行模式。唯一推荐项只是界面默认值，须明确提交。",
@@ -19,6 +19,20 @@ TITLES = {
     "codex_gate": "请选择长任务 Codex 复核策略",
     "codex_review": "收尾是否使用 codex-review",
 }
+NATIVE_MESSAGES = {
+    **MESSAGES,
+    "codex_gate": "请选择固定审阅员的复核范围：逐包及收尾、仅收尾或不做复核。请明确提交。",
+    "codex_review": "收尾是否由固定审阅员做一次只读独立审查？",
+}
+NATIVE_TITLES = {**TITLES, "codex_gate": "请选择复核范围", "codex_review": "收尾是否使用固定审阅员"}
+
+
+def message_for(question: dict) -> str:
+    return (NATIVE_MESSAGES if question.get("native_review") else MESSAGES)[question["kind"]]
+
+
+def _options(question: dict) -> list[dict]:
+    return (NATIVE_OPTIONS if question.get("native_review") else OPTIONS)[question["kind"]]
 
 
 def supports_form(capabilities) -> bool:
@@ -26,10 +40,9 @@ def supports_form(capabilities) -> bool:
     return elicitation is not None and (elicitation.form is not None or elicitation.url is None)
 
 
-def _ordered(kind: str, recommendation: list[str]) -> list[dict]:
+def _ordered(question: dict, recommendation: list[str]) -> list[dict]:
     """Recommended options first so the form itself leads with the recommendation."""
-    return ([x for x in OPTIONS[kind] if x["value"] in recommendation]
-            + [x for x in OPTIONS[kind] if x["value"] not in recommendation])
+    return sorted(_options(question), key=lambda option: option["value"] not in recommendation)
 
 
 def _scan_reason(analysis: str | None) -> str:
@@ -51,17 +64,16 @@ def choice_code(kind: str, value):
     """Map a form label or code back to option codes."""
     if isinstance(value, list):
         return [choice_code(kind, item) for item in value]
-    for option in OPTIONS[kind]:
+    for option in OPTIONS[kind] + NATIVE_OPTIONS[kind]:
         if value == option["value"] or value == option["label"] or (isinstance(value, str) and value.startswith(option["value"] + " — ")):
             return option["value"]
     return value
 
 
 def _prompt(question: dict, analysis: str | None, timeout_seconds: float | None) -> str:
-    kind = question["kind"]
     recommendation = json.loads(question["recommendation"])
-    prompt = MESSAGES[kind]
-    recommended = [x for x in OPTIONS[kind] if x["value"] in recommendation]
+    prompt = message_for(question)
+    recommended = [x for x in _options(question) if x["value"] in recommendation]
     if recommended:
         prompt += "\n推荐：" + "、".join(f"{x['label']}（{x['value']}）" for x in recommended)
     if analysis and analysis.strip():
@@ -77,7 +89,8 @@ def _prompt(question: dict, analysis: str | None, timeout_seconds: float | None)
 def schema_for(question: dict, analysis: str | None = None, timeout_seconds: float | None = None) -> type[BaseModel]:
     kind = question["kind"]
     recommended = json.loads(question["recommendation"])
-    ordered = _ordered(kind, recommended)
+    ordered = _ordered(question, recommended)
+    title = (NATIVE_TITLES if question.get("native_review") else TITLES)[kind]
     is_multi = kind == "verification"
     enum = Literal.__getitem__(tuple(_display(x, recommended, analysis) for x in ordered))
     default = (
@@ -89,7 +102,7 @@ def schema_for(question: dict, analysis: str | None = None, timeout_seconds: flo
     def alias_codes(value):
         def one(item):
             if isinstance(item, str):
-                for option in OPTIONS[kind]:
+                for option in _options(question):
                     if item == option["value"]:
                         return _display(option, recommended, analysis)
             return item
@@ -97,10 +110,10 @@ def schema_for(question: dict, analysis: str | None = None, timeout_seconds: flo
 
     # Keep the answer REQUIRED even though the UI receives a default. An accepted
     # empty object cannot silently confirm a recommendation through Pydantic defaults.
-    field = Field(..., title=TITLES[kind], description=_prompt(question, analysis, timeout_seconds),
+    field = Field(..., title=title, description=_prompt(question, analysis, timeout_seconds),
                   json_schema_extra={"default": default})
     return create_model("Choice_" + question["id"].replace("-", "_"),
-                        __config__=ConfigDict(extra="forbid", strict=True, title=TITLES[kind]),
+                        __config__=ConfigDict(extra="forbid", strict=True, title=title),
                         __validators__={"alias_codes": field_validator("choice", mode="before")(alias_codes)},
                         choice=(list[enum] if is_multi else enum, field))
 
@@ -108,12 +121,12 @@ def schema_for(question: dict, analysis: str | None = None, timeout_seconds: flo
 def native_question(question: dict, analysis: str | None, *, already_pending: bool = False) -> dict:
     kind = question["kind"]
     recommendation = json.loads(question["recommendation"])
-    prompt = MESSAGES[kind]
+    prompt = message_for(question)
     if analysis:
         prompt += "\n" + analysis
     return {"status": "WAITING_USER" if already_pending else "NATIVE_QUESTION_REQUIRED",
             "question_id": question["id"], "kind": kind, "state": question["state"],
-            "options": _ordered(kind, recommendation), "recommendation": recommendation,
+            "options": _ordered(question, recommendation), "recommendation": recommendation,
             "display_text": prompt}
 
 
@@ -121,15 +134,15 @@ def describe(question: dict, reason: str | None = None, analysis: str | None = N
              timeout_seconds: float | None = None) -> dict:
     kind = question["kind"]
     recommendation = json.loads(question["recommendation"])
-    ordered = _ordered(kind, recommendation)
-    recommended = [x for x in OPTIONS[kind] if x["value"] in recommendation]
+    ordered = _ordered(question, recommendation)
+    recommended = [x for x in _options(question) if x["value"] in recommendation]
     labels = [
         f"{x['value']}: {x['label']}" + ("（推荐）" if x["value"] in recommendation else "")
         + (f" — {x['desc']}" if x.get("desc") else "")
         + (f"｜{_scan_reason(analysis)}" if x["value"] in recommendation and _scan_reason(analysis) else "")
         for x in ordered
     ]
-    text = MESSAGES[kind]
+    text = message_for(question)
     if recommended:
         text += "\n推荐：" + "、".join(f"{x['label']}（{x['value']}）" for x in recommended)
     if analysis and analysis.strip():

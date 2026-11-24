@@ -1,5 +1,29 @@
 # MCP 用法与恢复
 
+## ZCode 固定审阅员回执
+
+`SCS_NATIVE_REVIEW=1` 启用原生回执；用 `session_open.native_review` 核对。原有 `codex_gate=none|closure|packages`、`codex_review=no|yes` 和所有并行 attempt 接口保留。ZCode 把 `review_registration` 用于当前宿主有没有 `固定审阅员`。正式审查统一使用这个注册身份，策略确认时不另问审阅员路线。
+
+- `work_attempt_prepare` 或 `work_attempt_prepare_many` 在原生模式返回 `agent_type`。执行角色按依赖、范围、资源派发。复核在其它 attempt 结束后单独 prepare；记录宿主真实返回的 `host_agent_id`。结果达到 `ENDED` 时提交其证据，按 `review_subject` 绑定 prepare 时冻结的对象。
+- 在返回的 `evidence_dir` 中保存 `final-message.md` 和 `manifest.json`。最终消息来自实际宿主结果，恰好一行 `结论: ACCEPT` 或 `结论: REJECT`。`manifest.json` 使用以下字段；`model` 用宿主观测到的 `provider/model` 或 `unobserved`。一个合法的 REJECT 对应 `FAIL`。
+
+```json
+{
+  "schema_version": 2,
+  "review_subject": "<prepare 返回的 64 位十六进制哈希>",
+  "agent_type": "固定审阅员",
+  "agent_id": "<ZCode 真实 Agent ID>",
+  "model": "unobserved",
+  "status": "completed",
+  "verdict": "ACCEPT",
+  "final_message": {"path": "final-message.md", "sha256": "<原文 sha256>"}
+}
+```
+
+- 操作预审先用精确命令和范围调用 `operation_gate_check` 获取 `operation_digest`。同一回执结构用 `operation_digest` 替换 `review_subject`，`final_message.path` 用项目相对路径。将它作为 `operation_gate_record.review_receipt` 提交。只有 `APPROVED` 且有独立用户确认才执行。主对话核对真实角色、实际完成和原件，MCP 校验结构、身份绑定和哈希。
+- 收尾审查由主对话按已选策略单独派发，原样留存宿主回执和最终消息。已经存档的 Codex 回执可查看；当前 native `packages` 放行和预审授权要求固定审阅员回执。下面的 Codex JSON 和命令说明供通用宿主使用。
+
+
 纯 Skill 无 Python/MCP 依赖。混合模式只在工具可见时使用；可见不代表模型一定调用，也不证明 UI 显示。服务无原生 Agent 调度工具。
 
 启动：`python -m scs_mcp --project-root /absolute/project`。仅 stdio；项目根是启动时明确允许的边界，工具不能换根。状态为该根下 `.scs/state.sqlite3`，SQLite WAL，schema 3，busy timeout 3 秒。3.0 不新增 schema：`codex_gate` 存 `questions` 行，破坏性闸门记录存 `events`，旧库直接可用。只支持本地单用户项目；不提供认证或跨用户服务。
@@ -52,7 +76,7 @@
 - quick/investigate（及未知旧 mode）：无额外要求。
 - 推荐理由一句话，最多 160 字；首次用 `workspace_scan` 辅助判断范围，不把扫描全文回传到每道题。
 
-Codex 方案指导不是 MCP question，也不进入 `codex_review`/`codex_gate` 记录；同一任务只做一次，结果由主对话写入项目协作/证据。
+ZCode 长任务必须先取得一次 `方案顾问` 的真实回执，再拆包派发。主对话将结果写入项目协作记录；`codex_review` 和 `codex_gate` 记录的都是正式审查策略。其他宿主的方案指导保留原行为。
 
 ## 恢复会话与补登记
 

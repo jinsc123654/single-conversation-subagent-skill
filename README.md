@@ -1,5 +1,35 @@
 # single-conversation-subagent 3.0.0
 
+这个分支从 `main` 建立，沿用四种执行模式、验证选择、工作包以及复核频率。ZCode 的变更集中在宿主角色派发和复核来源。长任务先由 `方案顾问` 做一次只读指导，再拆包并按依赖与资源并行。`固定审阅员` 负责逐包、收尾及高风险操作预审。
+
+## ZCode 使用
+
+已有 ZCode 角色时，同步新分支的 Skill，并让已注册 MCP 指向本分支的代码或安装器生成的 launcher。ZCode MCP 配置应带 `SCS_HOST=zcode` 和 `SCS_NATIVE_REVIEW=1`。`session_open` 返回 `native_review=true` 表示固定审阅员回执校验已启用。旧聊天或项目自动记忆如果仍写着另一套开场协议，请更新相应记忆项，再开新对话验证。
+
+```bash
+AGENT_HOME="$HOME/.zcode" bash install.sh --host zcode --mode hybrid \
+  --with-default-rule --project-root "$HOME"
+```
+
+ZCode 示例在 `~/.zcode/mcp/single-conversation-subagent/zcode-example.json`；合并单个 MCP 条目。要补装缺少的角色，加 `--with-zcode-agents`，并用 `--zcode-gpt-model`、`--zcode-deepseek-model` 指定自己已配置的 `provider/model`。现有角色配置优先。安装器有 `--zcode-agents-dir` 和可选 `--zcode-gpt-thought-level`、`--zcode-deepseek-thought-level`。六个角色模板保存在 `zcode-agents/`。角色协议、固定审阅员回执和旧证据兼容方式见 [MCP 用法](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
+
+```mermaid
+flowchart TD
+  A["确认长任务、验证与复核策略"] --> B["方案顾问一次只读指导"]
+  B --> C{"收到方案指导？"}
+  C -->|尚未完成| D["等待或处理阻塞"]
+  C -->|已完成| E["主对话定方案和拆工作包"]
+  E --> F["执行角色按依赖与资源并行"]
+  F --> G{"到达已选复核节点？"}
+  G -->|需要复核| H["固定审阅员独立审查"]
+  G -->|无需复核| I["进入下一包或验收"]
+  H -->|通过| I
+  H -->|退回| E
+```
+
+下面的 Codex 审查示例适用于非 ZCode 的通用流程。ZCode 的 `codex_gate`、`codex_review` 保留原 API 名称，界面和执行使用 `固定审阅员`。
+
+
 单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。3.0 为长任务增加 `codex_gate` 包级复核、侦察/实施/验证三角色与扇出预算，并把破坏性操作闸门扩展到所有模式。
 
 ZCode 默认 `SCS_QUESTION_CHANNEL=native`：Skill 用宿主原生 AskUserQuestion 问四选一/验证/`codex_gate`/`codex_review`；MCP 的 `session_open(project_root=<任务项目根>)` 返回 `workspace_scan`/`mode_options`/`project_root`/`codex_gate`/`intake`，为任务项目建设独立 `<项目>/.scs` 并记录选择。MCP form/15 秒只作为没有原生提问工具宿主的兜底，不默认使用。推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认；原生/文本路径不声称 15 秒。

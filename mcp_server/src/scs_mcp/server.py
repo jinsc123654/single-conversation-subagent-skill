@@ -16,7 +16,7 @@ from . import __version__
 from .board import Board, BoardError
 from .errors import ScsError
 from .models import AttemptResult, AttemptUpdateItem, SubtaskDefinition, SubtaskResult, WorkPackageDefinition
-from .interaction import MESSAGES, choice_code, describe, native_question, schema_for, supports_form
+from .interaction import choice_code, describe, message_for, native_question, schema_for, supports_form
 from .obsidian import ProjectView
 from .roots import Roots
 from .project_index import publish
@@ -202,6 +202,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             q = state.request(session_id, kind, recommendation, channel)
         if "id" not in q:
             return q
+        q = state.render_question(q)
         if q["state"] == "CONFIRMED":
             return {"status": "ALREADY_CONFIRMED", "question_id": q["id"], "choices": json.loads(q["answer"])}
         if q["state"] in {"DECLINED", "CANCELLED", "TIMED_OUT"}:
@@ -218,6 +219,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             return result
         if q["state"] == "REQUESTED":
             claimed, q = state.claim(session_id, q["id"])
+            q = state.render_question(q)
             if not claimed:
                 if q["state"] == "CONFIRMED":
                     return {"status": "ALREADY_CONFIRMED", "question_id": q["id"], "choices": json.loads(q["answer"])}
@@ -239,7 +241,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             analysis = f"分析：{analysis}"
         elif q["kind"] == "mode":
             analysis = f"扫描：{scan_workspace(state.store.root)[:150]}"
-        message = MESSAGES[q["kind"]] + " question_id=" + q["id"]
+        message = message_for(q) + " question_id=" + q["id"]
         if analysis:
             message += "\n" + analysis
         if timeout and timeout > 0:
@@ -540,7 +542,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
                                     verdict: Literal["ACCEPT", "REJECT", "UNAVAILABLE_OVERRIDE"],
                                     user_confirmed: bool, report_path: str | None = None,
                                     reason: str | None = None,
-                                    baseline: dict[str, Any] | None = None) -> dict[str, Any]:
+                                    baseline: dict[str, Any] | None = None,
+                                    review_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
         """Record a destructive-operation decision bound to its exact operation.
 
         This is a protocol-level ledger, not an execution hook: MCP neither runs
@@ -549,9 +552,11 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         ({"head": sha} or {"files": {path: sha256}}). ACCEPT/REJECT need a
         project-local UTF-8 report whose body has exactly one final conclusion
         line ``结论: ACCEPT`` or ``结论: REJECT`` (bold allowed); ACCEPT also
-        needs user_confirmed=true. REJECT is terminal for the same
+        needs user_confirmed=true. When native_review is enabled, also supply
+        a fixed reviewer schema_version=2 receipt for this operation_digest;
+        its final_message.path can supply the report path. REJECT is terminal for the same
         operation_id/digest; a later ACCEPT returns GATE_REJECTED.
-        UNAVAILABLE_OVERRIDE is only for unavailable Codex: it requires
+        UNAVAILABLE_OVERRIDE is only for an unavailable reviewer: it requires
         user_confirmed=true and a reason of at least 10 characters, may omit the
         report, and is never reported as APPROVED. Same operation_id, digest and
         verdict returns the original record; a different digest returns
@@ -560,7 +565,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         """
         return roots.gate(session_id).record(
             session_id, operation_id, command, cwd, targets, impact, backup, rollback,
-            verdict, user_confirmed, report_path, reason, baseline)
+            verdict, user_confirmed, report_path, reason, baseline, review_receipt)
 
     @mcp.tool(structured_output=True)
     async def operation_gate_check(session_id: str, operation_id: str,

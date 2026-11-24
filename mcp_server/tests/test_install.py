@@ -104,3 +104,23 @@ def test_runtime_child_symlink_rejected_before_install(tmp_path):
     assert install(tmp_path, "--mode", "hybrid", "--python", sys.executable).returncode != 0
     assert list(outside.iterdir()) == []
     assert not (home / "skills").exists()
+
+
+def test_zcode_installs_missing_agents_and_preserves_existing_models(tmp_path):
+    home = tmp_path / "agent-home"
+    agents = tmp_path / "zcode-agents"
+    agents.mkdir()
+    existing = agents / "固定审阅员.md"
+    existing.write_text('---\nname: "固定审阅员"\nmodel: "local/existing"\n---\n', encoding="utf-8")
+    args = ("--host", "zcode", "--mode", "hybrid", "--python", sys.executable,
+            "--project-root", str(tmp_path), "--with-zcode-agents", "--zcode-agents-dir", str(agents),
+            "--zcode-gpt-model", "local/gpt", "--zcode-deepseek-model", "local/deepseek")
+    result = install(tmp_path, *args)
+    assert result.returncode == 0, result.stderr
+    assert {p.stem for p in agents.glob("*.md")} == {
+        "固定审阅员", "方案顾问", "继承审阅员", "查询侦察员", "实施工程师", "测试验证员"}
+    assert 'model: "local/existing"' in existing.read_text()
+    advisor = (agents / "方案顾问.md").read_text()
+    assert 'model: "local/gpt"' in advisor and "长任务在确认验证与复核策略后派发一次" in advisor
+    example = json.loads((home / "mcp/single-conversation-subagent/zcode-example.json").read_text())
+    assert example["mcp"]["servers"]["single-conversation-subagent"]["env"]["SCS_NATIVE_REVIEW"] == "1"

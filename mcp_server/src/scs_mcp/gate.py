@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from .errors import ScsError
+from .evidence import native_review_receipt, verify_native_final
 from .storage import Store, encode, now
 
 GATE_TOOL = "operation_gate"
@@ -238,7 +239,8 @@ class Gate:
     def record(self, session_id: str, operation_id: str, command: str, cwd: str,
                targets: list[str], impact: str, backup: str, rollback: str,
                verdict: str, user_confirmed: bool, report_path: str | None = None,
-               reason: str | None = None, baseline: dict | None = None) -> dict:
+               reason: str | None = None, baseline: dict | None = None,
+               review_receipt: dict | None = None) -> dict:
         operation_id = self._operation_id(operation_id)
         if verdict not in VERDICTS:
             raise _invalid("verdict must be ACCEPT, REJECT or UNAVAILABLE_OVERRIDE.")
@@ -255,7 +257,10 @@ class Gate:
         reason = self._reason(reason)
         baseline = self._baseline(baseline)
         needs_report = verdict in {"ACCEPT", "REJECT"}
-        report_path = self._report_path(report_path, required=needs_report)
+        native = self.store.native_review
+        if review_receipt is not None and (not native or not needs_report):
+            raise _invalid("review_receipt is only accepted for native ACCEPT and REJECT.")
+        report_path = self._report_path(report_path, required=needs_report and not native)
         digest = self._digest(command, cwd, targets, baseline)
         with self.store.transaction(True) as con:
             self._session(con, session_id)
@@ -266,8 +271,27 @@ class Gate:
                                    "operation_id was already recorded with another command, cwd, targets or baseline.")
                 if verdict != "REJECT" and any(record["verdict"] == "REJECT" for record in records):
                     raise ScsError("GATE_REJECTED", "This operation and digest were rejected; a rejection is terminal.")
-                same = next((record for record in reversed(records) if record["verdict"] == verdict), None)
+                if verdict == "REJECT":
+                    terminal = next((record for record in reversed(records) if record["verdict"] == "REJECT"), None)
+                    if terminal is not None:
+                        return self._record_response(terminal, idempotent=True)
+                if not native and needs_report and any("review_receipt" in record for record in records):
+                    raise ScsError("NATIVE_REVIEW_DISABLED", "This operation already uses native review receipts.")
+            if native and needs_report:
+                review_receipt = native_review_receipt(review_receipt, "operation_digest", digest)
+                if verdict != review_receipt["verdict"]:
+                    raise _invalid("The receipt verdict does not match the requested operation verdict.")
+                final = review_receipt["final_message"]
+                final_path = self._report_path(final["path"], required=True)
+                if report_path is not None and report_path != final_path:
+                    raise _invalid("report_path must match review_receipt.final_message.path when supplied.")
+                report_path = final_path
+            if records:
+                same = next((record for record in reversed(records) if record["verdict"] == verdict
+                             and (not native or not needs_report or "review_receipt" in record)), None)
                 if same is not None:
+                    if native and needs_report and same.get("review_receipt") != review_receipt:
+                        raise ScsError("OPERATION_CONFLICT", "The recorded native receipt differs from this request.")
                     # A replay returns the original record without re-reading
                     # the report file, but the required confirmation fields
                     # must still be present and valid.
@@ -286,7 +310,11 @@ class Gate:
             if needs_report:
                 if verdict == "ACCEPT" and not user_confirmed:
                     raise _invalid("ACCEPT requires user_confirmed=true.")
-                report_sha256 = self._report_digest(report_path, verdict)
+                if native:
+                    report_sha256 = review_receipt["final_message"]["sha256"]
+                    verify_native_final(self.store, report_path, report_sha256, verdict)
+                else:
+                    report_sha256 = self._report_digest(report_path, verdict)
             else:
                 if not user_confirmed:
                     raise _invalid("UNAVAILABLE_OVERRIDE requires user_confirmed=true.")
@@ -314,6 +342,8 @@ class Gate:
                 "at": at,
                 "protocol_only": True,
             }
+            if review_receipt is not None:
+                summary["review_receipt"] = review_receipt
             encoded = encode(summary)
             if len(encoded.encode("utf-8")) > MAX_EVENT_BYTES:
                 raise _invalid("The gate record exceeds the 16 KB event limit; "
@@ -331,7 +361,14 @@ class Gate:
             self._session(con, session_id)
             records = self._find(con, session_id, operation_id)
         if not records:
-            return self._missing(operation_id)
+            missing = self._missing(operation_id)
+            if self.store.native_review and command is not None and cwd is not None and targets is not None:
+                if (not isinstance(command, str) or not command.strip()
+                        or len(command) > 4000 or "\x00" in command):
+                    raise _invalid("command must be a non-empty command line or argv string (max 4000 characters).")
+                missing["operation_digest"] = self._digest(command, self._cwd(cwd), self._targets(targets),
+                                                           self._baseline(baseline))
+            return missing
         digests = {record["operation_digest"] for record in records}
         if len(digests) != 1:
             return self._stale(operation_id, None, None, ["RECORD_CONFLICT"], record=records[-1])
@@ -392,6 +429,19 @@ class Gate:
         accept = next((record for record in reversed(records)
                        if record["verdict"] == "ACCEPT" and record.get("user_confirmed") is True), None)
         if accept is not None:
+            # Approval must be validated by the backend that recorded it.
+            if self.store.native_review or "review_receipt" in accept:
+                if not self.store.native_review:
+                    return self._stale(operation_id, stored_digest, computed, ["NATIVE_REVIEW_DISABLED"], record=accept)
+                try:
+                    receipt = native_review_receipt(accept.get("review_receipt"), "operation_digest",
+                                                    stored_digest)
+                    final = receipt["final_message"]
+                    if (receipt["verdict"] != "ACCEPT" or final["sha256"] != accept.get("report_sha256")
+                            or self._report_path(final["path"], required=True) != accept.get("report_path")):
+                        raise _invalid("The stored review receipt does not match the approval.")
+                except ScsError:
+                    return self._stale(operation_id, stored_digest, computed, ["REVIEW_RECEIPT_INVALID"], record=accept)
             return self._check_response("APPROVED", accept, reasons)
         override = next((record for record in reversed(records)
                          if record["verdict"] == "UNAVAILABLE_OVERRIDE"), None)
@@ -405,7 +455,7 @@ class Gate:
 
     @staticmethod
     def _record_response(record: dict, *, idempotent: bool) -> dict:
-        return {
+        result = {
             "status": "OK",
             "recorded": not idempotent,
             "idempotent": idempotent,
@@ -430,6 +480,10 @@ class Gate:
             "execution_intercepted": False,
             "message": "Decision recorded. MCP does not execute or intercept host commands.",
         }
+        if "review_receipt" in record:
+            result.update(review_receipt=record["review_receipt"],
+                          execution_provenance="STRUCTURAL_RECEIPT_ONLY_HOST_NOT_AUTHENTICATED")
+        return result
 
     @staticmethod
     def _missing(operation_id: str) -> dict:
