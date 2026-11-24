@@ -1,39 +1,48 @@
 ---
 name: single-conversation-subagent
-description: ZCode 单对话协作；首次选模式，仅长任务自动编排专用 Agent 和原生复核；支持原生提问、MCP 状态和文本回退。
+description: 按任务使用 ZCode 原生 Agent 身份；日常任务直接处理，长任务合并开场确认并编排执行与独立复核。
 ---
 
-主对话负责用户交互、阶段记忆、`Agent` 派发、证据持久化和最终验收；子 Agent 不再委派。MCP 记录交互、状态和证据，不调度 Agent。ZCode stdio 服务配置 `SCS_NATIVE_REVIEW=1`；只使用当前宿主的原生 Agent，不启动外部 Codex，不加载外部复核技能或工具。
+主对话负责用户交互、派发、证据和验收；MCP 只校验和记账，子 Agent 只按派单执行。ZCode stdio 使用 `SCS_NATIVE_REVIEW=1`；不调用外部 Codex、复核技能或工具。
 
-## 开场
+**常规流程只用本页和宿主工具 schema。** 待查找的 SCS 工具按阶段一次选齐（开场、建包/派单）；已可调用就不再查找。不搜索 SCS 源码、安装目录或角色文件来确认工具和角色；以宿主注册表和实际工具返回为准。`references/` 只在兼容、恢复、闸门或确有未覆盖问题时定点查阅，不是开场清单。子 Agent 的角色契约已随角色配置加载；不要让子 Agent 再加载此 Skill 或查阅 SCS 协作协议。若任务本身研究 SCS，只读派单明确给出的目标文件。
 
-1. 先做足以推荐模式的少量只读调查。项目根用用户明确指定的目录，否则用当前对话工作目录，不上溯 Git 根。核对当前 ZCode `Agent` 可派发的 `固定审阅员` / `继承审阅员`：至少一个已确认可用才传 `registered`，明确都不可用传 `unregistered`，不能核实传 `unknown`。`方案顾问` 的可派发性不计入复核登记；角色定义文件、已装外部技能也不能证明当前宿主可派发。
-2. `session_open` 传项目绝对路径、宿主真实 conversation_id（有才传）和已核实的 `review_registration`。项目元数据和索引可写时传 `register_obsidian=true`，建库并登记给 PyQt。核对返回的 `native_review` 已启用；已有选择直接沿用。保留 session_id 和原 client_name；同一会话重连或补登记时用 `resume_session_id` 和原项目根恢复。MCP 不可用或未启用原生复核时按下文纯 Skill 回退，不提交旧式复核证据。
-3. 首次问快速处理 / 标准执行 / 长任务 / 只调查，按范围和风险推荐一个。任何首条任务在实现前先完成四选一，只有用户明确说“不用问，直接做”时跳过为快速。只在用户明确要求切换时才用 `interaction_reopen(explicit_user_change=true)` 后记录新选择；不自动升为长任务。
-4. **开始实现、执行测试或派发前完成适用的开场确认**。标准/长任务先问验证范围并确认写入；快速/只调查不问验证范围。只有长任务进入下面的专用角色流程。标准/快速/只调查不发起 SCS 的 `codex_review`、`codex_gate`、`review_route` 或方案指导问题，不因已登记角色、历史选择或旧 MCP intake 自动补问或派发。
-   - **长任务复核时机（`codex_gate`）**：验证范围后问一次。`packages` = 每包复核且收尾再审（有可用角色时推荐）；`closure` = 只在收尾审；`none` = 不做包级或收尾审查。角色不可用时说明并推荐 `none`，不把 `closure` 当替代。推荐不算确认。旧长会话无 gate 时，首次工作包操作或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次，不从兼容字段 `codex_review` 推断；新流程不问该旧题。
-   - **长任务复核路由（`review_route`）**：gate 为 `packages`/`closure` 时，在派发前用 `interaction_request(kind="review_route", channel="native")` 确认 `gpt`（派发 `固定审阅员`，固定 GPT）或 `inherit`（派发 `继承审阅员`，`model: inherit`）。两者可用时推荐 `gpt`，但不默认确认；现有路由沿用，不覆盖模型、不自动切换。已选路由不可用时说明并阻塞受影响步骤，等待用户显式改选或恢复角色。
-   - **长任务只读方案指导（可选，仅一次）**：开工前推荐一次，另用宿主原生问答取得同意（无工具则文本）；brief 包括目标、计划改动、风险、约束、验证和回滚。由主对话单独调用 `Agent(subagent_type="方案顾问")`（固定 GPT），只给建议、不出正式判定，不参与包级、收尾或操作预审，也不依赖或改变 `review_route`。主对话记录原始结果并纳入方案；拒绝或不可用则说明，不反复询问、不改派正式审阅员，也不解除其他复核或操作闸门。
-   - **长任务收尾审查**：按 `codex_gate` 选择，实现和所选验证完成后由主对话派同一已确认路由一次；开场只记录选择。`none` 不审。未实际完成、缺证据或 REJECT 均不能报告审查通过。
+## 开场与 Agent 身份
 
-## 逐题交互
+1. 优先采用用户已明确指定的模式、角色和范围。清楚的小改动直接快速处理，清楚的只读请求直接调查，其余范围明确的日常改动用标准执行。长任务须用户明确选择。只有模式选择会实质改变范围、授权或协作方式且无法从请求判断时，才问一次四选一。沿用本对话已选模式，显式变更才重开。
+2. 日常任务按需要直接用 `Agent(subagent_type=...)`，无需先开 MCP 会话或查工具。只读调查可用 `查询侦察员`；标准执行若能独立派单，可用 `查询侦察员`、`实施工程师` 或 `测试验证员`。快速处理通常由主对话完成。用户点名且角色可用时直接用该身份，任务权限不因角色改变。使用宿主已注册的角色名，不覆盖模型；缺少点名角色则报告。标准执行说明打算做的验证；高成本、占用设备或范围不明确时才单独确认。普通验证不用另弹窗。
+3. 长任务或需要持久化协作记录时，直接调用已可见的 `session_open`。项目根用用户指定目录或当前工作目录，保留真实 conversation_id 和原 client_name。初次绑定且模式已经明确、schema 支持时传 `initial_mode`；续接用 `resume_session_id`，核对返回的状态，沿用已保存的选择。`review_registration` 依据宿主已注册的正式审阅员，未知就传 `unknown`；到复核时再核实。需要项目视图且相关写入获准时再登记 Obsidian，常规开场不创建视图。
+4. 长任务只用一张卡片确认验证范围和复核策略；用户已给出的选项直接记录，已确认的值直接沿用。选择 `packages`（每包与收尾复核）、`closure`（仅收尾）或 `none`。默认推荐按任务风险说明；推荐、取消或超时均不入库为确认。卡片答复写入成功后可派发执行角色。审阅员的 GPT／继承路线在首次实际复核之前确定，适用于包级、收尾和操作预审；已有明确偏好且角色可用时直接记录或沿用，不重复问。复核要求与路由冲突时，只阻塞相应复核和依赖它的放行，无须挡住独立的执行任务。
+5. 用户明确要求只读方案指导时，才调用 `Agent(subagent_type="方案顾问")`。给出目标、计划、风险、约束和回滚。顾问只给建议，不作为正式审阅或操作预审。
 
-- ZCode 默认使用原生提问。`interaction_request(channel="native")` 返回 `NATIVE_QUESTION_REQUIRED` 时，调用宿主原生问答，展示 `display_text` 和 `options`，推荐置顶并标明。等真实回复后用原 `question_id` 调 `interaction_submit`；**看到 `CONFIRMED` 才请求下一题**。没有原生问答工具时，用同一题走文本回退。
-- 文本路径：展示完整 `display_text`，结束当轮等待明确回复，再用同一题号提交。每题只用一路；`QUESTION_PENDING` 的适用题按返回的原题处理。标准/快速/只调查若遇到旧 MCP 未决复核题，不展示、不代填，按下文兼容处理。取消、拒绝、失败、超时和默认推荐均不确认选择；需要重试终态题时按用户明确要求重开。
-- MCP form 只用于配置为 mcp 或 auto 且支持表单的回退；只有 `interaction_ask` 声明服务端 15 秒。原生/文本不套用该期限。详见 [MCP 用法](references/mcp.md)。
-- 推荐理由一句话，最多 160 字。首次用 `workspace_scan` 辅助判断，不在每题复述。压缩时保留会话 ID、根、确认选择、待答题号、工作包修订、下一步和证据路径。
+## 提问与答复记录
+
+- ZCode 4 的 `session_open`、`interaction_request`、`interaction_record`、`interaction_submit` 已标记常驻；schema 可见就直接调用。旧宿主确实未曝光时，一次搜索当阶段所需工具。模式确需询问且已绑定会话，用 `interaction_request(kind="mode", channel="mcp")`。首次实际复核缺路线，用 `interaction_request(kind="review_route", channel="mcp")`。收到 `CONFIRMED` 后直接使用，不另提交。旧工具没有 `mcp` 参数时用 `native`；配置为 `text` 时用文本。
+- 长任务缺验证和复核策略时，一次原生 `AskUserQuestion` 传两个 `questions`。验证题多选，常用项用 `smoke`（冒烟）、`targeted`（定向）、`none`（不测试）、`method-only`（只记录方法）；在题干说明 `full`、`stability` 或自定义组合可通过自填明确选择。`none`、`method-only` 各自排除其他验证项。策略题用三个策略值单选。缺一项时只问该项；宿主无原生卡片或配置为文本时，在同一条消息给出缺项并等待明确回复。
+- 原生卡片收到实际答复后，用 `interaction_record(session_id, selections={verification:[...], codex_gate:...}, source="native")` 一次写入；用户已用消息明确给出的项目用 `source="text"`，只提交明确回答。不要为合并卡片逐题调用 `interaction_request`。已有待答题号时用原题的 `interaction_submit`；变更已确认选择须 `interaction_reopen(explicit_user_change=true)`，再记录新答复。旧版没有 `interaction_record` 时，卡片答复按验证、策略的顺序用既有接口保存，不再弹一次。旧版返回 `INTAKE_REQUIRED` 且原因是 `REVIEW_ROUTE_REQUIRED` 时，仅在受影响的协作操作前确认路线。紧凑理由以一句话为限。
+- MCP 单选返回 `NATIVE_QUESTION_REQUIRED` 或可回退的 `TEXT_FALLBACK_REQUIRED` 且仍待答时，用原题号、题干和选项改走原生或文本。取消、拒绝、超时、失败和推荐值均不确认。不要用同一道题并行打开两个 UI。
 
 ## 长任务执行
 
 任务性查找、分析、实现和测试都派执行子 Agent；主对话仅协调、制备有界复核输入、持久化证据并核对关键证据。角色中文名仅是派发 ID，不限制主会话、派单或子 Agent 的回复语言；自然语言按用户要求和任务需要选择，机器校验的证据字段和结论标记保持原格式。
 
-- **三执行角色**：`analyze` → `Agent(subagent_type="查询侦察员")`（固定 DeepSeek，只读）；`implement` → `Agent(subagent_type="实施工程师")`（继承模型，只改 `allowed_files`）；`test` → `Agent(subagent_type="测试验证员")`（固定 DeepSeek，只运行指定验证命令）。不传模型覆盖。授权、提示模板和返回格式见 [角色](references/roles.md)。没有真实原生角色就标 `BLOCKED`，不以通用 Agent 假冒、不静默改为主对话执行。
-- **扇出预算**：n 个独立只读子任务起步 min(4, n) 个 `查询侦察员`；实现按 `allowed_files` 两两不相交取最大并行集合。默认上限 4，无宿主并发证据取 1。依赖、资源和版本以 MCP 校验为准；同文件/设备串行。
-- **先占后派**：`work_attempt_prepare` 或单包原子 `work_attempt_prepare_many` 成功后才派 Agent，依赖分波次。由主对话串行 `work_attempt_update` / `work_attempt_update_many` 登记结果，用 `operation_id` 幂等重试。`work_attempt_note` 不改版本、不续租、不证明存活；`run_map` 查看有界 JSON/Mermaid。
+- **角色**：`analyze` → `查询侦察员`（只读）；`implement` → `实施工程师`（仅编辑 `allowed_files`，不运行命令）；`test` → `测试验证员`（只在授权 `cwd` 跑指定命令）。用 `Agent(subagent_type=...)`，不覆盖模型。没有对应角色就标 `BLOCKED`，不假冒或静默改由主对话执行。
+- **扇出**：独立侦察起步 min(4, n)，实施取文件范围不相交的最大并行集合；默认上限 4，无宿主并发证据取 1。依赖分波次，同文件/设备串行。
+
+### 建包、派单、落证据
+
+1. `work_package_create(session_id, goal, allowed_files, acceptance, request_key, subtasks=[{id,kind,allowed_files,acceptance,depends_on?}])`。范围用项目相对路径，不用 glob。保留返回的包 ID、revision、version；`work_package_update(session_id, package_id, expected_version, state="IN_PROGRESS")` 开工。
+2. 先 `work_attempt_prepare(session_id, package_id, expected_version, subtask_id)`，再派对应 Agent。并发可用同包原子 `work_attempt_prepare_many`，传 `subtask_ids`；prepare 不改版本。只记录宿主实际返回的任务 ID 与 Agent ID，不猜、不混用。
+3. 派单只给本轮数据：`WP/R/subtask/attempt_id | 项目根、实际 cwd、基线 | 目标和验收 | 允许/禁止范围 | 候选文件或证据的具体路径/行号 | 命令及日志路径（若适用）`。已知入口直接给文件；测试只给实际命令和预期，不要求重新找入口。审阅给有界 diff/哈希、当前 subject、证据路径和待核验项；允许在授权范围补查，不能因缺证据而默认接受。不要把宿主默认 cwd 当作授权 cwd。
+4. 执行角色回显 `attempt_id`、状态、实际动作与关键 `file:line` / 输出；实施附改动文件，测试附实际命令、cwd、退出码和通过/失败数，遇阻附首个异常及资源状态。主对话把实际回执写入返回的 `evidence_dir`，计算 SHA-256。分析/实施可用 Markdown；测试 `PASS` 需 JSON `{"command":"实际命令","exit_code":0,"passed":1}`（`passed` 填实际正整数），可另存 Markdown 给人读。
+5. 核对终态与证据后串行 `work_attempt_update(session_id, attempt_id, expected_version, state="ENDED", host_agent_id, result={status,evidence:[{path,sha256}]}, operation_id)`，用项目相对证据路径。提交会校验证据，无需对同一份证据另跑 `evidence_verify`（需要独立检查时才用）。更新成功取返回的 version；版本冲突先重读。非 review 的并行结果可用 `work_attempt_update_many(session_id, updates=[{attempt_id,result}], operation_id, expected_version)`。原载荷重试复用 `operation_id`。
+
+### 续用、复核与关闭
+
 - **执行会话优先复用**：长任务的查询、实施、验证，在同一工作流与授权范围内优先用 `SendMessage` 续用已结束的原 Agent；每轮先 prepare 一个新 attempt，只发增量和本轮授权。已核验的预计占用超过 70% 才按容量换新；上下文不可核验、宿主不支持续用或身份/权限不匹配时安全回退。正式审阅仍独立新开。执行回执默认简短；有未展开事项时按[续用与有界回传](references/protocol.md#子-agent-会话续用)点名补取，不默认放宽。
 - **后台等待**：保留宿主任务 ID 与 attempt 的对应关系，优先接收完成通知。先推进独立工作；依赖结果时保持等待。经过合理间隔仍未收到通知，或会话恢复后，用原任务 ID 做一次非阻塞状态核对。若仍在运行，隔一段时间再查，只在状态有实质变化时更新用户。查询超时仍按等待处理；只有查不到可靠状态才记 `UNKNOWN`，不得据此结束 attempt、释放资源或重派。详见 [调度](references/protocol.md#调度)。
-- **包级复核**：`packages` 包声明一个 `review` 子任务。其余子任务完成且无活动 attempt 后，单独 prepare 并按 `input_snapshot` 锁定的 `review_route` 派只读 `固定审阅员`（`gpt`）或 `继承审阅员`（`inherit`）。主对话准备有界 diff/哈希和证据索引，保存 Agent 原始最终消息及 [原生 v2 manifest](references/mcp.md#review-子任务与证据)，以真实 `host_agent_id` 单独 `ENDED`。ACCEPT 记 `PASS`，REJECT 记 `FAIL`；只有当前 subject 的 ACCEPT 放行。复核窗口禁止其他 attempt；文件、定义或非 review 结果变化即 `REVIEW_STALE`，用新 attempt 重审。不能用 `work_package_update(results=...)` 直接写 `review`。
-- **静止与终态**：有活动 attempt 时不得 `REVIEW_READY`、`COMPLETED`、`ABANDONED`、切修订或 handoff。验收通过用 `COMPLETED`，重复/被取代用 `ABANDONED`；终态必须写 `close_reason`，且不可修改。
+- **包级复核**：`packages` 包声明一个 `review` 子任务。其余子任务完成且无活动 attempt 后，先确认适用的审阅员路线，再单独 prepare 并按 `input_snapshot` 锁定的 `review_route` 派只读 `固定审阅员`（`gpt`）或 `继承审阅员`（`inherit`）。原样保存 Agent 最终消息为 `final-message.md`，以真实 `host_agent_id` 单独 `ENDED`，证据引用 `manifest.json`。原生 v2 manifest 只含 `schema_version:2`、`review_subject`（prepare 值）、`agent_type`（中文派发 ID）、`agent_id`（真实完成 ID）、`model`（宿主可观测值或 `unobserved`）、`status:"completed"`（有真实完成才填）、`verdict`、`final_message:{path:"final-message.md",sha256}`。原文须恰好一行 `结论: ACCEPT` 或 `结论: REJECT`，不补写、不改稿。ACCEPT 记 `PASS`，REJECT 记 `FAIL`；只有当前 subject 的 ACCEPT 放行。复核窗口禁止其他 attempt；文件、定义或非 review 结果变化即 `REVIEW_STALE`，用新 attempt 重审。不能用 `work_package_update(results=...)` 直接写 `review`。
+- **静止与终态**：有活动 attempt 时不得 `REVIEW_READY`、`COMPLETED`、`ABANDONED`、切修订或 handoff。核对所选验证、复核及证据后，用 `work_package_update` 先置 `REVIEW_READY` 再置 `COMPLETED`，重复/被取代用 `ABANDONED`；每次传当前 `expected_version`，终态带 `close_reason` 且不可修改。
 
 ## 破坏性操作闸门（全模式）
 
@@ -41,18 +50,10 @@ description: ZCode 单对话协作；首次选模式，仅长任务自动编排�
 
 长任务中，主对话冻结命令、`cwd`、目标、影响、备份、回滚和基线，准备有界输入和 `operation_digest`；由确认路由的原生 Reviewer 只读预审（无路由时单独确认，即使 `codex_gate=none` 也不免除），主对话落证据并 `operation_gate_record`。执行前以实际参数 `operation_gate_check`；只有 `APPROVED` 且保留用户独立确认才执行。ACCEPT 需当前 digest 的原生证据、唯一结论及 `user_confirmed=true`；REJECT 对同 `operation_id`/digest 是终态。复核不可用只能如实记 `UNAVAILABLE_OVERRIDE`（用户确认及理由），不是放行。MCP 不执行或拦截命令；无宿主 Hook 时是协议级约束。普通代码编辑、证据写入、视图刷新不触发。详见 [完整协议](references/protocol.md#破坏性操作闸门)。
 
-## 执行、收尾与纯 Skill 回退
+## 收尾与纯 Skill 回退
 
-- **快速/标准**：回到 ZCode 内建执行流程，由主对话直接处理，只在有用时使用默认/内建 Agent；标准仍须先确认验证范围。无需 SCS 工作包或专用角色，也不跑 SCS 收尾审查。
-- **只调查**：保持只读，按需用 ZCode 内建 `Explore`，不自动派 `查询侦察员`。
-- **长任务**：按长任务章节委派。
+按真实执行结果报告验证和证据，未执行标 `NOT_RUN`。长任务选了 `packages` 或 `closure` 时，在实现和所选验证结束后，用已确认路线独立收尾一次；缺路线此时询问。未实际完成、缺证据或 REJECT 均不能报告复核通过。主对话核对证据后验收。
 
-**手动调用**：仅用户明确点名时，可在自动流程外手动调用可用的专用角色；仍遵守当前模式的读写与授权限制，不因此切换模式、启动 SCS 复核问答或替代正式复核/闸门。
-
-未选测试标 `NOT_RUN`；不做测试与只记录方法互斥，均不标 PASS。不贴全量日志；主对话核对证据后验收，复核 ACCEPT 不等于最终验收。
-
-**旧 MCP 兼容**：短模式的可选工作包、手动 `project_view_refresh` 等若被 `INTAKE_REQUIRED` 的旧复核缺项阻塞，说明并暂缓该 SCS 操作，不代填、不修改记录、不关闭原生保护；已有视图可用只读 `project_view_info`。若旧未决复核题阻塞标准的 `verification` 记账，用宿主原生问答或文本取得真实的验证范围确认，明确记为手工记录而非 MCP `CONFIRMED`；未确认仍不开工。内建流程不等同于放行任何破坏性操作。
-
-**纯 Skill 回退**：MCP 不可用时用宿主原生问答或文本逐题确认适用项；保持相同模式边界（标准/快速仍用内建执行，标准仍确认验证，只调查仍只读，只有长任务自动用专用角色）。长任务在 Markdown 手工记录选择、工作包、attempt、静止窗口和原始证据；复核路由不变。需要的角色、实际完成证据或完整复核基线不可用时标 `BLOCKED`/`NOT_RUN`，不伪造通过。即使已切换长任务，不能登记并取得当前 `APPROVED` 的破坏性操作仍不执行。恢复 MCP 前显式核对 SQLite 与手工记录，不自动覆盖或迁移。
+MCP 无法使用时，日常原生 Agent 仍可直接执行已授权的工作；长任务仍可用原生卡片或文本合并确认，将实际派发 ID、范围、结果和证据写入手工记录。无法取得必要角色或可核验结果时标 `BLOCKED` 或 `NOT_RUN`。恢复 MCP 前显式核对手工记录和 SQLite。破坏性操作仍须取得当前操作的 `APPROVED` 与用户独立确认。
 
 docs-root 优先 00_doc / 00_docs / docs / doc，均无则 docs。项目与协作记忆、证据在其 agent/，审查报告在 04_test/report/。MCP 初始化缺失记录，主对话维护审查记录；PyQt 可打开已登记库，详见 [Obsidian 视图](references/obsidian.md)。

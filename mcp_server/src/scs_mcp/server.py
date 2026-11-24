@@ -15,12 +15,12 @@ from pydantic import BaseModel
 from . import __version__
 from .board import Board, BoardError
 from .errors import ScsError
-from .models import AttemptResult, AttemptUpdateItem, SubtaskDefinition, SubtaskResult, WorkPackageDefinition
+from .models import AttemptResult, AttemptUpdateItem, IntakeChoices, SubtaskDefinition, SubtaskResult, WorkPackageDefinition
 from .interaction import choice_code, describe, message_for, native_question, schema_for, supports_form
 from .obsidian import ProjectView
 from .roots import Roots
 from .project_index import publish
-from .state import OPTIONS
+from .state import NATIVE_OPTIONS, OPTIONS
 from .storage import Store
 from .work import Work
 from .workspace import scan_workspace
@@ -111,6 +111,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
     display_host = re.sub(r"[^\w .-]", "_", raw_host)[:32] or "generic"
     roots = Roots(project_root, allowed_roots, allow_session_lookup=allow_session_lookup)
     mcp = SafeServer(roots)
+    # ZCode 4 reads this per-tool metadata before deciding whether to defer it.
+    intake_meta = {"anthropic/alwaysLoad": True} if raw_host.lower() == "zcode" else None
+
     def check_board_scope(task_project_root: str) -> None:
         if not task_project_root:
             return
@@ -129,11 +132,12 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         except BoardError as exc:
             raise ScsError(exc.code, exc.message, exc.details) from None
 
-    @mcp.tool(structured_output=True)
+    @mcp.tool(structured_output=True, meta=intake_meta)
     async def session_open(project_root: str | None = None, client_name: str | None = None, conversation_id: str | None = None,
                      review_registration: Literal["registered", "unregistered", "unknown"] = "unknown",
                      explicit_skip: bool = False, register_obsidian: bool = False,
-                     resume_session_id: str | None = None) -> dict[str, Any]:
+                     resume_session_id: str | None = None,
+                     initial_mode: Literal["quick", "standard", "long", "investigate"] | None = None) -> dict[str, Any]:
         """Bind a host conversation to its project root and report the host question channel.
 
         project_root defaults to the server's configured workspace root; pass the
@@ -143,14 +147,17 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         with the same conversation ID cannot reuse one session; the stored client
         label is h<sha256 prefix>. review_registration is host registry evidence,
         not a guess. explicit_skip attests that the user explicitly said no
-        questions; it authorizes no destructive operation. register_obsidian
+        questions. With the native backend, initial_mode sets the mode on a
+        fresh session when the request is unambiguous; use long only when the
+        user explicitly selected it. Existing modes and replies are preserved.
+        Neither field authorizes destructive operations. register_obsidian
         initializes this project's docs vault and publishes it to the desktop
         manager before intake. Supply project_root explicitly (user-named project
         or current conversation working directory) and use this only when the
         project metadata and local index writes are authorized. To recover an
         existing session, pass resume_session_id and its absolute project_root
         with the original client_name (or omit it as before). Omit conversation_id
-        and explicit_skip when resuming. A known review_registration updates the
+        explicit_skip and initial_mode when resuming. A known review_registration updates the
         original session without changing its confirmed choices. Long sessions
         derive codex_gate from their question row (none|closure|packages); old
         long sessions without one are asked once and are not migrated.
@@ -164,7 +171,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         resolved_client = "h" + namespace
         root, _, result = roots.open(
             project_root, resolved_client, conversation_id, review_registration, explicit_skip,
-            resume_session_id=resume_session_id,
+            resume_session_id=resume_session_id, initial_mode=initial_mode,
         )
         result["question_channel"] = question_channel
         result["host"] = display_host
@@ -172,7 +179,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         result["project_root"] = str(root)
         if result["mode"] is None and not result["questions"]:
             result["workspace_scan"] = scan_workspace(root)[:320]
-            result["mode_options"] = OPTIONS["mode"]
+            result["mode_options"] = (NATIVE_OPTIONS if result["native_review"] else OPTIONS)["mode"]
         if register_obsidian:
             try:
                 view = roots.views(result["id"]).refresh(result["id"], register=True)
@@ -254,16 +261,16 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         if timeout and timeout > 0:
             message += (f"\n{timeout:g} 秒未选择不确认路线。" if kind == "review_route"
                         else f"\n{timeout:g} 秒未选择按推荐项继续。")
-        return Elicit(message, schema_for(q, analysis, timeout))
+        return Elicit(message, schema_for(q, analysis, timeout, include_default=channel != "mcp"))
 
     # Local closure annotations are deliberately evaluated (no future annotations):
     # SDK get_type_hints must see this exact resolver object, not an unresolved name.
-    @mcp.tool(structured_output=True)
+    @mcp.tool(structured_output=True, meta=intake_meta)
     async def interaction_request(
         session_id: str, kind: Literal["mode", "verification", "codex_gate", "codex_review", "review_route"],
         recommendation: list[str],
         answer: Annotated[ElicitationResult[BaseModel], Resolve(prepare)],
-        channel: Literal["auto", "native", "text"] = "auto",
+        channel: Literal["auto", "mcp", "native", "text"] = "auto",
         question_id: str | None = None,
         analysis: str | None = None,
     ) -> dict[str, Any]:
@@ -274,8 +281,10 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         codex_gate=[none|closure|packages] (long mode only; packages is the
         recommendation, never an implicit confirmation), codex_review=[no|yes]
         (quick/standard; long returns SKIPPED/USE_CODEX_GATE).
-        channel=auto follows SCS_QUESTION_CHANNEL; use channel=native/text only
-        for an explicit route. analysis is a short rationale shown with the
+        channel=auto follows SCS_QUESTION_CHANNEL. channel=mcp opens a form in
+        the same tool call when supported, without preselecting the recommendation.
+        channel=native/text registers a question for the caller to display.
+        analysis is a short rationale shown with the
         question (no secrets). Never open two channels at once. question_id pins
         a known question during a resumed call.
         """
@@ -360,7 +369,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             return state.submit(session_id, qid, "accept", choices, "mcp")
         return state.submit(session_id, qid, answer.action, None, "mcp")
 
-    @mcp.tool(structured_output=True)
+    @mcp.tool(structured_output=True, meta=intake_meta)
     async def interaction_submit(session_id: str, question_id: str,
                            action: Literal["accept", "decline", "cancel", "timeout", "unsupported", "error"],
                            choices: list[str] | None = None, source: Literal["text", "native"] = "text",
@@ -371,6 +380,20 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         choice. cancel/decline require an explicit reopen before another choice.
         """
         return roots.for_session(session_id).submit(session_id, question_id, action, choices, source, observed_timeout)
+
+    @mcp.tool(structured_output=True, meta=intake_meta)
+    async def interaction_record(session_id: str, selections: IntakeChoices,
+                                 source: Literal["native", "text"]) -> dict[str, Any]:
+        """Save explicit choices already made in a bundled native card or user message.
+
+        Pass only actual answers. For a long-task card, submit verification and
+        codex_gate together. A reply with an existing question ID goes through
+        interaction_submit. Identical retries are safe; changing saved answers
+        requires an explicit reopen. This tool does not authorize operations.
+        """
+        choices = {kind: value if isinstance(value, list) else [value]
+                   for kind, value in selections.model_dump(exclude_none=True).items()}
+        return roots.for_session(session_id).record_intake(session_id, choices, source)
 
     @mcp.tool(structured_output=True)
     async def interaction_reopen(session_id: str, kind: Literal["mode", "verification", "codex_gate", "codex_review", "review_route"],

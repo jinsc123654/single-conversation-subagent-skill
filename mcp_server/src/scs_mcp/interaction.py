@@ -91,7 +91,8 @@ def _prompt(question: dict, analysis: str | None, timeout_seconds: float | None)
     return prompt
 
 
-def schema_for(question: dict, analysis: str | None = None, timeout_seconds: float | None = None) -> type[BaseModel]:
+def schema_for(question: dict, analysis: str | None = None, timeout_seconds: float | None = None,
+               *, include_default: bool = True) -> type[BaseModel]:
     kind = question["kind"]
     recommended = json.loads(question["recommendation"])
     ordered = _ordered(question, recommended)
@@ -116,7 +117,7 @@ def schema_for(question: dict, analysis: str | None = None, timeout_seconds: flo
     # Keep the answer REQUIRED even though the UI receives a default. An accepted
     # empty object cannot silently confirm a recommendation through Pydantic defaults.
     field = Field(..., title=title, description=_prompt(question, analysis, timeout_seconds),
-                  json_schema_extra={"default": default})
+                  json_schema_extra={"default": default} if include_default else None)
     return create_model("Choice_" + question["id"].replace("-", "_"),
                         __config__=ConfigDict(extra="forbid", strict=True, title=title),
                         __validators__={"alias_codes": field_validator("choice", mode="before")(alias_codes)},

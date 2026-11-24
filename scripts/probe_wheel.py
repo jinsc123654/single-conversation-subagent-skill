@@ -11,7 +11,7 @@ from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_TOOL_COUNT = 38
+EXPECTED_TOOL_COUNT = 39
 
 
 def expected_version() -> str:

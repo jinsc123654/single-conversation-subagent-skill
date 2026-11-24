@@ -113,7 +113,7 @@ async def test_independent_stdio_obsidian_view_auto_refresh(mode, tmp_path):
         out = await call("project_view_refresh", session_id=sid, initialize_vault=True)
         assert out["view_initialized"] and out["local_config_present"]
         tools = await client.list_tools()
-        assert len(tools.tools) == 38  # 27 collaboration/state tools + 11 board_task_* tools
+        assert len(tools.tools) == 39  # 28 collaboration/state tools + 11 board_task_* tools
         names = {tool.name for tool in tools.tools}
         assert {"board_task_list", "board_task_claim", "board_task_complete"} <= names
         assert {"work_attempt_prepare_many", "work_attempt_update_many",

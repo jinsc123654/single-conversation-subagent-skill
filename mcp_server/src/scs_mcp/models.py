@@ -7,6 +7,15 @@ from pydantic import BaseModel, ConfigDict, Field
 Nonempty = Annotated[str, Field(min_length=1, max_length=2000)]
 
 
+class IntakeChoices(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    mode: Literal["quick", "standard", "long", "investigate"] | None = None
+    verification: Annotated[list[Literal["smoke", "targeted", "full", "stability", "none", "method-only"]],
+                            Field(min_length=1, max_length=6)] | None = None
+    codex_gate: Literal["none", "closure", "packages"] | None = None
+    review_route: Literal["gpt", "inherit"] | None = None
+
+
 class ResourceSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     resource: Annotated[str, Field(min_length=1, max_length=512)]

@@ -44,11 +44,11 @@ class Roots:
         return self.states[root]
 
     def open(self, project_root, client_name, conversation_id, review_registration, explicit_skip,
-             *, resume_session_id=None):
+             *, resume_session_id=None, initial_mode=None):
         root = self.resolve(project_root)
         state = self.state(root)
         result = state.open(str(root), client_name, conversation_id, review_registration, explicit_skip,
-                            resume_session_id=resume_session_id)
+                            resume_session_id=resume_session_id, initial_mode=initial_mode)
         self.sessions[result["id"]] = root
         return root, state, result
 

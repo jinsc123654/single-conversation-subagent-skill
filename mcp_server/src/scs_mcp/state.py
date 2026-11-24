@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import uuid
+from contextlib import nullcontext
 
 from .errors import ScsError
 from .storage import Store, encode, now
@@ -57,6 +58,10 @@ OPTIONS = {
 }
 NATIVE_OPTIONS = {
     **OPTIONS,
+    "mode": [
+        {**option, "desc": "计划后实现与验证，按需选择验证范围"} if option["value"] == "standard" else option
+        for option in OPTIONS["mode"]
+    ],
     "codex_gate": [
         {"value": "none", "label": "不做独立复核", "desc": "不做包级复核或收尾审查"},
         {"value": "closure", "label": "仅收尾审查", "desc": "仅收尾做一次只读独立审查"},
@@ -151,15 +156,12 @@ class State:
         native = self.store.native_review
 
         def ready(policy: str | None, source: str) -> dict:
-            if native and policy in {"closure", "packages"} and not self.review_route(con, session_id):
-                return {"ready": False, "policy": policy, "source": "review_route",
-                        "reason": "REVIEW_ROUTE_REQUIRED"}
             return {"ready": True, "policy": policy, "source": source, "reason": None}
 
         if not mode:
             return {"ready": False, "policy": None, "source": "not_required",
                     "reason": "MODE_REQUIRED"}
-        if mode not in {"standard", "long"}:
+        if mode not in {"standard", "long"} or (native and mode == "standard"):
             return ready(None, "not_required")
         if not session["verification"]:
             return {"ready": False, "policy": None, "source": "verification",
@@ -170,8 +172,6 @@ class State:
                 return ready(gate[0], "codex_gate")
             return {"ready": False, "policy": None, "source": "codex_gate",
                     "reason": "CODEX_GATE_REQUIRED"}
-        if native:
-            return ready(None, "not_required")
         if session["review_registration"] == "registered" and session["codex_review"] is None:
             return {"ready": False, "policy": None, "source": "codex_review",
                     "reason": "CODEX_REVIEW_REQUIRED"}
@@ -179,7 +179,7 @@ class State:
 
     def open(self, project_root: str, client_name: str, conversation_id: str | None = None,
              review_registration: str = "unknown", explicit_skip: bool = False,
-             *, resume_session_id: str | None = None) -> dict:
+             *, resume_session_id: str | None = None, initial_mode: str | None = None) -> dict:
         from pathlib import Path
         if ".." in Path(project_root).parts or Path(project_root).resolve() != self.store.root:
             raise ScsError("PROJECT_MISMATCH", "Session root must match the server's configured project root.")
@@ -187,8 +187,10 @@ class State:
             raise ScsError("INPUT_INVALID", "Supply a short client name and known registration state.")
         if conversation_id is not None and (not conversation_id.strip() or len(conversation_id) > 1024):
             raise ScsError("INPUT_INVALID", "Conversation ID must be a nonempty host-provided identifier.")
-        if resume_session_id is not None and (conversation_id is not None or explicit_skip):
-            raise ScsError("INPUT_INVALID", "Omit conversation_id and explicit_skip when resuming an existing session.")
+        if initial_mode is not None and (not self.store.native_review or initial_mode not in MODES or explicit_skip):
+            raise ScsError("INPUT_INVALID", "initial_mode requires native review and cannot be combined with explicit_skip.")
+        if resume_session_id is not None and (conversation_id is not None or explicit_skip or initial_mode is not None):
+            raise ScsError("INPUT_INVALID", "Omit conversation_id, explicit_skip and initial_mode when resuming a session.")
         temporary = conversation_id is None
         with self.store.transaction(True) as con:
             if resume_session_id is not None:
@@ -207,8 +209,9 @@ class State:
             if row is None:
                 con.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?,?)",
                             (sid, identity, client_name, temporary, review_registration,
-                             "quick" if explicit_skip else None, None, None, now()))
-                self.store.event(con, sid, None, "session_open", "EXPLICIT_SKIP" if explicit_skip else "SESSION_OPENED")
+                             "quick" if explicit_skip else initial_mode, None, None, now()))
+                event = "INITIAL_MODE_SELECTED" if initial_mode is not None else "SESSION_OPENED"
+                self.store.event(con, sid, None, "session_open", "EXPLICIT_SKIP" if explicit_skip else event)
             else:
                 if resume_session_id is not None:
                     self.store.event(con, sid, None, "session_open", "SESSION_RESUMED")
@@ -300,11 +303,11 @@ class State:
                              "SUPERSEDED", None, "LONG_MODE_USES_CODEX_GATE")
         return len(rows)
 
-    def request(self, session_id: str, kind: str, recommendation: list[str], channel: str) -> dict:
-        if kind not in KINDS or channel not in {"auto", "native", "text"}:
+    def request(self, session_id: str, kind: str, recommendation: list[str], channel: str, *, connection=None) -> dict:
+        if kind not in KINDS or channel not in {"auto", "mcp", "native", "text"}:
             raise ScsError("INPUT_INVALID", "Unknown question kind or interaction channel.")
         recommendation = check_selection(kind, recommendation)
-        with self.store.transaction(True) as con:
+        with (self.store.transaction(True) if connection is None else nullcontext(connection)) as con:
             s = self._session(con, session_id)
             if kind == "review_route" and not self.store.native_review:
                 return {"status": "SKIPPED", "reason": "NATIVE_REVIEW_DISABLED"}
@@ -404,7 +407,7 @@ class State:
         return self.question(session_id, question_id)
 
     def submit(self, session_id: str, question_id: str, action: str, choices: list[str] | None = None,
-               source: str = "text", observed_timeout: bool = False) -> dict:
+               source: str = "text", observed_timeout: bool = False, *, connection=None) -> dict:
         if action not in {"accept", "decline", "cancel", "timeout", "unsupported", "error"} or source not in {"native", "mcp", "text"}:
             raise ScsError("INPUT_INVALID", "Unknown action or reply source.")
         if action == "timeout" and not observed_timeout:
@@ -414,7 +417,7 @@ class State:
         target = {"accept": "CONFIRMED", "decline": "DECLINED", "cancel": "CANCELLED", "timeout": "TIMED_OUT", "unsupported": "UNSUPPORTED", "error": "FAILED"}[action]
         codes = {"accept": "USER_CONFIRMED", "decline": "USER_DECLINED", "cancel": "USER_CANCELLED",
                  "timeout": "HOST_OBSERVED_TIMEOUT", "unsupported": "ELICITATION_UNSUPPORTED", "error": "RPC_ERROR"}
-        with self.store.transaction(True) as con:
+        with (self.store.transaction(True) if connection is None else nullcontext(connection)) as con:
             session = self._session(con, session_id)
             q = con.execute("SELECT * FROM questions WHERE id=? AND session_id=?", (question_id, session_id)).fetchone()
             if q is None:
@@ -450,6 +453,36 @@ class State:
                              codes[action] if action in {"error", "unsupported", "timeout"} else None)
         return {"status": target, "question_id": question_id, "choices": choices if action == "accept" else None,
                 "error_code": codes[action], "source": source, "destructive_operations_authorized": False}
+
+    def record_intake(self, session_id: str, selections: dict[str, list[str]], source: str) -> dict:
+        """Save answers collected by the host in one transaction, in prerequisite order."""
+        if not self.store.native_review:
+            raise ScsError("NATIVE_REVIEW_DISABLED", "Batched intake requires the native review backend.")
+        if not selections or source not in {"native", "text"} or selections.keys() - (set(KINDS) - {"codex_review"}):
+            raise ScsError("INPUT_INVALID", "Supply actual native or text answers for at least one supported question.")
+        recorded = {}
+        with self.store.transaction(True) as con:
+            for kind in KINDS:
+                if kind not in selections:
+                    continue
+                choices = check_selection(kind, selections[kind])
+                q = self.request(session_id, kind, choices, source, connection=con)
+                if q.get("created"):
+                    recorded[kind] = self.submit(session_id, q["id"], "accept", choices, source, connection=con)
+                elif q.get("status") == "ALREADY_CONFIRMED" or q.get("state") == "CONFIRMED":
+                    existing = q["choice"] if q.get("status") == "ALREADY_CONFIRMED" else json.loads(q["answer"])
+                    if choices != existing:
+                        raise ScsError("REPLY_CONFLICT", "Explicitly reopen this question before changing a saved answer.",
+                                       {"kind": kind})
+                    recorded[kind] = {"status": "ALREADY_CONFIRMED", "choices": existing, "question_id": q.get("id")}
+                else:
+                    code = "QUESTION_NOT_APPLICABLE" if q.get("status") == "SKIPPED" else "QUESTION_PENDING"
+                    raise ScsError(code, "An existing question requires its original reply path or an explicit reopen.",
+                                   {"kind": q.get("kind", kind), "question_id": q.get("id", q.get("question_id")),
+                                    "state": q.get("state"), "reason": q.get("reason")})
+            intake = self.intake_status(con, session_id)
+        return {"status": "CONFIRMED", "answers": recorded, "intake": intake,
+                "destructive_operations_authorized": False}
 
     def reopen(self, session_id: str, kind: str, explicit_user_change: bool = False) -> dict:
         if kind not in KINDS:

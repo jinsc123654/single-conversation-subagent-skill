@@ -6,27 +6,23 @@ ZCode stdio 服务配置环境 `SCS_HOST=zcode`、`SCS_QUESTION_CHANNEL=native`�
 
 ## 初次交互
 
-对话给出项目目录时用该目录，否则用宿主提供的当前对话工作目录。传绝对路径并设置 `register_obsidian=true` 时，`session_open` 会在提问前初始化 docs-root 和总览，并登记给 PyQt。成功时返回 `obsidian.status=REGISTERED` 和绝对路径。登记失败时在 `obsidian` 返回错误，已打开的会话可继续使用。只有在项目元数据及本地索引写入获准时启用登记。
+日常任务可直接使用宿主 Agent。长任务或明确需要持久化协作状态时，使用 `session_open(project_root=<任务项目根>, conversation_id=<真实对话 ID>)`。项目根位于配置允许的工作区内。`client_name` 可省略；跨宿主或不同 client_name 使用独立命名空间。宿主未提供对话 ID 时省略该字段，保留返回的 `session_id` 用于续接。
 
-1. `session_open(client_name=..., conversation_id="宿主真实对话ID", review_registration="registered|unregistered|unknown", project_root="任务项目根")`。先完成一次任务相关只读调查（目标目录/README/git status；不要只列目录就提问），不要检查 MCP 注册/配置/项目根，不读无关记忆；调查在绑定前完成，`session_open` 只调用一次。`project_root` 传任务项目根；服务端启动配置的根是允许的工作区边界，项目根必须是其子目录，服务端为该项目建独立 `<项目>/.scs`；省略时用配置根。`client_name` 可省略，服务端把配置 host 与 client_name 一起做结构化 SHA-256 命名空间（存储 `h<sha256>`，返回 `client_label` 供阅读），不同宿主同 ID 不共用会话。返回 `question_channel`（auto/native/mcp/text）、`host`、`project_root`、`codex_gate`（未确认为 null）和 `intake` 投影。仅未开始模式选择时附短 `workspace_scan` 和 `mode_options`。ID 未知时省略并保留返回 ID；不得伪造真实 ID、用项目路径当对话 ID。仅依据当前 ZCode `Agent` 可派发角色填写 `review_registration`：确认 `固定审阅员` 或 `继承审阅员` 至少一个可用则 `registered`，明确都不可用则 `unregistered`，无法核实则 `unknown`。`方案顾问` 不计入登记；不能以磁盘角色文件、外部技能或工具来确认。核对 `native_review` 启用；`review_route` 返回确认值或未确认值。
-2. 按 `question_channel` 路由。`native`：用宿主原生 Ask/Question，没有时用文本；`text`：完整显示选项、推荐与 question_id，结束当轮等待；`mcp`：`interaction_ask(session_id=...,kind="mode",recommendation=["standard"],timeout_seconds=15,analysis="推荐 standard：范围小，先冒烟")`，仅 legacy stdio 的 back-channel 打开 MCP form，到点标记 `TIMED_OUT` 并返回 recommendation，不写 `CONFIRMED`；`auto`：form 可用则按 mcp，否则按 native/text。`analysis` 是 1-2 句推荐理由（≤600 字，不含隐私/凭据）；form 的选项值带中文注释（如 `quick — 快速处理`），并显示中文 title、分析、推荐标记、15s 截止和 question_id。
-3. `MODERN_NO_BACKCHANNEL`/`ELICITATION_UNSUPPORTED`/`TEXT_FALLBACK_REQUIRED`：问题保持 `WAITING_USER` 并带 `question_id`；显示完整选项与唯一推荐，用户明确回复后直接 `interaction_submit(...,action="accept",choices=[...],source="text"|"native")`。modern 无回通道只表示不能做服务端限时 form，不等于客户端完全不支持 elicitation。原生/文本路径不声称 15 秒；15 秒只用于 mcp form 路径。ZCode 原生 AskUserQuestion 是 60 秒隐藏 + 5 分钟截止。
-4. 需要显式 MCP 记账时，`interaction_request(...,channel="native")` 只登记，然后真实调用原生工具，再将用户明确答复以返回 `question_id` 提交；服务不越过宿主调用 UI。
-5. TEXT_FALLBACK_REQUIRED：显示 display_text 中完整选项与唯一推荐，结束当轮等回复；再 `interaction_submit(session_id=...,question_id=...,action="accept",choices=["long"],source="text")`。不把文本当原生弹窗成功。
-6. `session_get` 读取已确认选择、`codex_gate`、`intake` 与未决问题。同题重复 request 不弹第二个 UI，已确认直接返回 ALREADY_CONFIRMED。同一对话沿用当前模式适用的已确认选择，不重复提问；历史 `codex_review` 不触发派发；只有用户显式说“使用长任务/只调查/快速处理/标准执行”才 `interaction_reopen(kind="mode", explicit_user_change=true)`，随后 `interaction_request(channel="text", recommendation=[新模式])` → `interaction_submit(accept)`，不弹表单。`mcp` 15s 超时后模型继续，表单仍由宿主持有，提示用户稍后忽略，不重复提交。
-
-模式值 `quick/standard/long/investigate`。推荐是单元素列表。仅首次进入 standard/long 后请求 verification，值为 `smoke/targeted/full/stability/none/method-only`，支持多选；推荐只有一个列表组合。`none` 和 `method-only` 各自排除所有其他项。冒烟本轮，定向/全量/稳定性收尾；用户指定预算、资源、方法写入协调记录。危险操作不在此表单授权范围。
+1. 在 ZCode 4 中，`session_open`、`interaction_request`、`interaction_record`、`interaction_submit` 使用逐工具的 `anthropic/alwaysLoad` 元数据。已经可见时直接调用。新会话模式明确时传 `initial_mode`；长任务须用户明确选择。`initial_mode` 不改变已有记录，不与 `explicit_skip` 一起使用。Obsidian 登记只在需要且获准时启用。
+2. 不明确的模式及首次正式复核前缺失的审阅员，可用 `interaction_request(...,channel="mcp")`。MCP 表单可用时，同一次调用保存单选答复；退回原生或文本时用原 `question_id` 提交。`interaction_ask` 的 15 秒是独立的服务端截止时间。
+3. 长任务卡片确认验证范围和复核策略后，用一次 `interaction_record(session_id=..., selections={"verification":["smoke","targeted"],"codex_gate":"packages"}, source="native")` 写入。已有明确文本答复时用 `source="text"`；可只传未记录的项，也可传 `mode` 或 `review_route`。批次原子保存，同一答复重试幂等。已有待答题号通过 `interaction_submit` 完成；已确认答案的变更通过 `interaction_reopen`。
+4. `session_get` 返回已确认选择、待答题号、`review_route` 和 `intake`。模式变更须用户明确要求；reopen 后使用 `interaction_record` 保存明确文本答复。只有实际答复可以写入 `CONFIRMED`。
 
 ## 问题顺序、复核时机与 intake
 
-Skill 顺序：`mode` → `verification`（仅 standard/long）→ `codex_gate`（仅 long）→ 长任务适用时确认 `review_route`。`codex_review` 保留为旧服务/历史会话的存储/API 字段，新 Skill 不请求该题。
-
-| 模式 | 验证范围 | 后续流程 |
+| 模式 | 验证范围 | 使用 ZCode Agent |
 | --- | --- | --- |
-| quick | 不问 | ZCode 内建流程，按需用默认/内建 Agent；无 SCS 复核题 |
-| standard | 必问 | ZCode 内建流程，按需用默认/内建 Agent；无 SCS 复核题 |
-| long | 必问 | `codex_gate` none/closure/packages；只在此模式自动编排专用角色 |
-| investigate | 不问 | 只读，按需用内建 `Explore`；无 SCS 复核题 |
+| quick | 按任务范围直接处理 | 主对话处理，按用户请求使用指定角色 |
+| standard | 说明验证计划，按成本和范围决定是否询问 | 按需直接使用侦察、实施或验证角色 |
+| long | 一张卡片确认验证和 `codex_gate` | 走工作包、执行角色和所选独立复核 |
+| investigate | 只读 | 按需直接使用 `查询侦察员` |
+
+验证值为 `smoke/targeted/full/stability/none/method-only`；`none` 和 `method-only` 各自排除其他项。`codex_review` 保留为旧服务字段。`intake.ready` 表示当前模式可进入执行阶段，原生长任务需要验证和复核策略。审阅员路线可在实际复核前补记。
 
 `codex_gate` 值：
 
@@ -38,19 +34,17 @@ Skill 顺序：`mode` → `verification`（仅 standard/long）→ `codex_gate`�
 
 - 推荐不是确认。原生 Reviewer 不可派发时说明限制并推荐 `none`，不把 `closure` 当替代。long 的 `codex_review` 返回 `SKIPPED/USE_CODEX_GATE`。
 - 旧长会话缺 gate 时，`session_get.codex_gate=null`，`intake.ready=false`、`reason=CODEX_GATE_REQUIRED`；创建/更新或手动 `project_view_refresh` 可返回 `INTAKE_REQUIRED`。补问当前缺项，不迁移旧 `codex_review` 或自动确认。
-- long 的 gate 为 `packages`/`closure` 时，派发前 `interaction_request(kind="review_route", channel="native", recommendation=["gpt"] 或 ["inherit"])`；真实选项提交后等 `CONFIRMED`。协议值 `gpt` → `Agent(subagent_type="固定审阅员")`（固定 GPT），`inherit` → `Agent(subagent_type="继承审阅员")`（`model: inherit`）。已确认值复用；角色不可用不自动换路由。均可派发时推荐 `gpt`，仍须明确确认。旧长会话的适用路由缺失时同样补问，`intake.source=review_route`、`reason=REVIEW_ROUTE_REQUIRED`。
-- `intake` 投影含 `ready`/`policy`/`source`/`reason`。旧服务可能仍在 `standard` 或已登记 Reviewer 的 `quick` 投影 `CODEX_REVIEW_REQUIRED`，或因历史 `codex_review=yes` 投影 `REVIEW_ROUTE_REQUIRED`。这些会阻塞可选 SCS 工作包或手动 `project_view_refresh`。说明并暂缓被挡的 SCS 操作，必要时用只读 `project_view_info` 查看已有视图；不补问、不代填、不修改记录或关掉原生保护。普通短模式任务继续走内建流程，闸门操作仍阻塞。
-- `QUESTION_PENDING` 的适用题用原 `question_id`。若标准的 `verification` 记账被旧未决复核题阻塞，用宿主原生问答或文本取得真实验证范围确认，明确仅作手工记录，不宣称 MCP `CONFIRMED`；未确认时不开工。
-- 长任务的可选指导经用户同意后每任务至多一次，单独调用 `Agent(subagent_type="方案顾问")`（固定 GPT），只给建议，不出正式判定、不依赖或改变 `review_route`，也不提交复核证据。长任务操作预审沿用确认的 `review_route`；无路由时用同一个问题单独确认。指导同意和破坏性操作的用户独立确认不记作 `codex_review`/`codex_gate`，也不解除任何正式闸门。
-- 推荐理由一句话，最多 160 字；首次用 `workspace_scan`，不把扫描全文回传到每道题。
+- 第一次正式包级复核、收尾复核或操作预审前，确认 `review_route`。`gpt` 派 `固定审阅员`，`inherit` 派 `继承审阅员`。已有明确路线沿用，角色不可用时暂缓该复核和依赖它的放行。准备原生审查 attempt 或登记操作预审仍要求真实路线；缺项返回 `REVIEW_ROUTE_REQUIRED`。普通工作包、执行 attempt 和视图在验证和复核策略已确定后可先开始。
+- 在旧服务上，`INTAKE_REQUIRED` 仍可能要求提前确认 `review_route`。核对原因，仅为受影响的操作补回适用项。旧版 `standard` 可能要求验证范围才允许创建协作记录，日常 Agent 委派可继续按任务权限使用宿主。
+- `方案顾问` 由用户明确请求时独立派发，只给建议。破坏性操作仍要求独立用户确认、真实原生预审及当前 `APPROVED`。
 
 ## 恢复会话与补登记
 
-传 `session_open(project_root=<原项目绝对路径>, resume_session_id=<原session_id>, review_registration="registered")`，沿用首次调用的 client_name（原来省略则仍省略）。省略 conversation_id 和 explicit_skip。只在当前宿主确认至少一个合格原生 Reviewer 可派发时补登记为 registered；unknown 保留已有确定状态。服务恢复同一会话 ID 和选项；项目或宿主不匹配返回 SESSION_NOT_FOUND。此路径也用于 MCP 进程重启后的临时会话重连。恢复不改变已确认的时机或路由，也不将其复制到新对话。
+传 `session_open(project_root=<原项目绝对路径>, resume_session_id=<原session_id>, review_registration="registered")`，沿用首次调用的 client_name（原来省略则仍省略）。省略 conversation_id、explicit_skip 和 initial_mode。只在当前宿主确认至少一个合格原生 Reviewer 可派发时补登记为 registered；unknown 保留已有确定状态。服务恢复同一会话 ID 和选项；项目或宿主不匹配返回 SESSION_NOT_FOUND。此路径也用于 MCP 进程重启后的临时会话重连。恢复不改变已确认的时机或路由，也不将其复制到新对话。
 
 ## 问题与故障
 
-逐题等待 `interaction_submit` 返回 `CONFIRMED` 再请求下一道适用题。`QUESTION_PENDING` 返回原题号、类型和状态；适用题使用真实答复提交原题，旧服务的不适用复核题按上文兼容规则处理。仅长任务确认复核时机和适用路由；已启用的收尾审查在实现和所选验证结束后才派发。方案指导、包级复核和操作预审各按自己的时机执行。
+旧版逐题接口以 `interaction_submit` 返回 `CONFIRMED` 作为完成回执。`QUESTION_PENDING` 返回原题号、类型和状态；适用题使用真实答复提交原题，旧服务的不适用复核题按上文兼容规则处理。仅长任务确认复核时机和适用路由；已启用的收尾审查在实现和所选验证结束后才派发。方案指导、包级复核和操作预审各按自己的时机执行。
 
 `interaction_submit` 接受 accept/decline/cancel/timeout/unsupported/error。accept 必须有明确合法选择。timeout 需要宿主可观测超时回执 `observed_timeout=true`，仍不自动选项；`interaction_ask` 的服务端截止时间即该回执，超时返回推荐项供主对话继续，不写 `CONFIRMED`。RPC 超时提交 error，不能填 timeout。decline/cancel/timeout 保持终态未确认。
 
@@ -58,7 +52,7 @@ Skill 顺序：`mode` → `verification`（仅 standard/long）→ `codex_gate`�
 
 服务可能观察 REQUESTED/WAITING_USER，不能证明已渲染；统一 UI_NOT_OBSERVABLE，真实接受回执只证明客户端提交了内容。模型可能未调用工具，客户端也可能自动生成答案；最终应以宿主实际用户交互记录核对。
 
-`diagnostics_check(session_id=...)`：版本、DB quick_check、工具注册（当前 38 个）、协议、声明能力、最近 30 条脱敏事件。SKILL_NOT_LOADED 需宿主加载证据；TOOL_NOT_CALLED 需宿主调用日志。RPC_ERROR 与 ELICITATION_UNSUPPORTED 可在服务观察；用户取消/拒绝/接受分别 USER_CANCELLED/USER_DECLINED/USER_CONFIRMED。stdout 仅协议；默认错误日志 stderr，不启用 SDK 调试日志以免写入调用输入。
+`diagnostics_check(session_id=...)`：版本、DB quick_check、工具注册（当前 39 个）、协议、声明能力、最近 30 条脱敏事件。SKILL_NOT_LOADED 需宿主加载证据；TOOL_NOT_CALLED 需宿主调用日志。RPC_ERROR 与 ELICITATION_UNSUPPORTED 可在服务观察；用户取消/拒绝/接受分别 USER_CANCELLED/USER_DECLINED/USER_CONFIRMED。stdout 仅协议；默认错误日志 stderr，不启用 SDK 调试日志以免写入调用输入。
 
 ## 工作包、证据与租约
 
@@ -198,7 +192,7 @@ operation_gate_check(
 
 SQLite 是结构化状态源；AGENT_PROJECT.md、AGENT_COORDINATION.md 是主对话维护的可审查记忆，evidence 是原始证据，04_test/report/ 是审查报告。服务仅创建缺失记忆文件，所有变更返回 record_sync_required；主对话将修订、结果、证据索引和 handoff 追加到既有记录，发现用户编辑冲突时停止并核对。
 
-MCP 断开：纯 Skill 用原生/文本逐题确认适用项，保持相同模式边界。标准仍确认验证，标准/快速用内建执行，只调查只读；只有长任务自动编排专用角色并手工维护工作包、修订、attempt、静止窗口和原始证据。缺真实角色、完整基线或证据时不标 PASS；无可核对的当前 `APPROVED` 不执行破坏性操作，即使已切到长任务。MCP 恢复：核对 session_get/work_package_get 与手工记录，显式决定以何者为准，必要时建新修订逐项录入，不自动导入或覆盖用户改动。项目移动后 canonical 根变化时先备份，再显式恢复可审查的定义和证据，不复制旧会话确认。
+MCP 断开时，日常任务仍按权限使用宿主原生 Agent；长任务用原生卡片或文本合并确认，并手工维护任务、修订、证据和真实派发 ID。正式审阅和操作闸门仍要求可核验的结果；没有当前 `APPROVED` 时不得执行破坏性操作。恢复时核对 `session_get`、`work_package_get` 与手工记录，再显式选择如何录入。项目迁移后按 canonical 根恢复可审查的定义和证据，旧会话确认不复制。
 
 ## 错误码速查
 
@@ -235,4 +229,4 @@ MCP 断开：纯 Skill 用原生/文本逐题确认适用项，保持相同模�
 
 ## Obsidian 项目视图
 
-新增 project_view_refresh / project_view_info；当前仍是单个 MCP 服务、38 个工具（27 个协作/状态工具 + 11 个本机看板工具）。`interaction_ask` 提供 legacy form 的服务端超时。生成、自动刷新、首次打开、批注保留与升级边界见 [obsidian.md](obsidian.md)。`run_map` 不写视图文件；需要查看运行地图时直接读工具返回的 JSON/Mermaid。
+新增 project_view_refresh / project_view_info；当前仍是单个 MCP 服务、39 个工具（28 个协作/状态工具 + 11 个本机看板工具）。`interaction_ask` 提供 legacy form 的服务端超时。生成、自动刷新、首次打开、批注保留与升级边界见 [obsidian.md](obsidian.md)。`run_map` 不写视图文件；需要查看运行地图时直接读工具返回的 JSON/Mermaid。

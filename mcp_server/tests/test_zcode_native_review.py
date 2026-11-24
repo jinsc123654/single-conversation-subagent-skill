@@ -81,7 +81,7 @@ def receipt(subject_key, digest, agent_type, final_path, final_sha, verdict="ACC
             "verdict": verdict, "final_message": {"path": final_path, "sha256": final_sha}}
 
 
-def test_native_long_intake_waits_for_verification_timing_and_real_route(native):
+def test_native_long_intake_defers_route_until_review_prepare(native):
     state, sid = native
     assert state.request(sid, "codex_review", ["yes"], "native")["status"] == "SKIPPED"
     confirm(state, sid, "mode", "long")
@@ -94,18 +94,23 @@ def test_native_long_intake_waits_for_verification_timing_and_real_route(native)
     assert state.request(sid, "codex_review", ["yes"], "native")["status"] == "SKIPPED"
     snap = state.get(sid)
     assert snap["codex_review"] is None and snap["codex_gate"] == "closure"
-    assert snap["intake"] == {"ready": False, "policy": "closure", "source": "review_route",
-                              "reason": "REVIEW_ROUTE_REQUIRED"}
+    assert snap["intake"] == {"ready": True, "policy": "closure", "source": "codex_gate", "reason": None}
     q = state.request(sid, "review_route", ["gpt"], "native")
     shown = native_question(state.question(sid, q["id"]), None)
     assert [(item["value"], item["desc"]) for item in shown["options"]] == [
         ("gpt", "由宿主启动 固定审阅员"), ("inherit", "由宿主启动 继承审阅员")]
+    work = Work(state.store)
+    execution = work.create(sid, "Inspect change", ["src.py"], ["Inspected"], [
+        {"id": "scan", "kind": "analyze", "allowed_files": ["src.py"], "acceptance": ["Inspected"]},
+    ], "scan-native")
+    assert work.prepare_attempt(sid, execution["id"], execution["version"], "scan")["attempt"]["state"] == "PREPARED"
+    package = review_package(work, sid)
     with pytest.raises(ScsError) as err:
-        review_package(Work(state.store), sid)
-    assert err.value.code == "INTAKE_REQUIRED"
+        work.prepare_attempt(sid, package["id"], package["version"], "review")
+    assert err.value.code == "REVIEW_ROUTE_REQUIRED"
     assert state.submit(sid, q["id"], "timeout", observed_timeout=True)["status"] == "TIMED_OUT"
     assert state.get(sid)["review_route"] is None
-    assert not state.get(sid)["intake"]["ready"]
+    assert state.get(sid)["intake"]["ready"]
     state.reopen(sid, "review_route")
     with pytest.raises(ScsError) as err:
         state.submit(sid, q["id"], "accept", ["gpt"])
@@ -113,6 +118,8 @@ def test_native_long_intake_waits_for_verification_timing_and_real_route(native)
     confirm(state, sid, "review_route", "inherit")
     assert state.get(sid)["review_route"] == "inherit"
     assert state.get(sid)["intake"]["ready"]
+    attempt = work.prepare_attempt(sid, package["id"], package["version"], "review")
+    assert attempt["agent_type"] == "继承审阅员"
 
 
 @pytest.mark.parametrize("mode", ["quick", "investigate", "standard"])
@@ -123,7 +130,7 @@ def test_native_short_intake_never_asks_special_review(native, mode):
     for kind, choice in [("codex_review", "yes"), ("review_route", "gpt"), ("codex_gate", "packages")]:
         assert state.request(sid, kind, [choice], "native")["status"] == "SKIPPED"
     if mode == "standard":
-        assert state.get(sid)["intake"]["reason"] == "VERIFICATION_REQUIRED"
+        assert state.get(sid)["intake"]["ready"]
         confirm(state, sid, "verification", "targeted")
     else:
         assert state.request(sid, "verification", ["targeted"], "native")["status"] == "SKIPPED"
@@ -161,9 +168,57 @@ def test_stale_native_review_question_is_inert_in_short_mode(native, kind, choic
     state.reopen(sid, "mode", explicit_user_change=True)
     confirm(state, sid, "mode", "long")
     confirm(state, sid, "codex_gate", "packages")
-    assert state.get(sid)["intake"]["reason"] == "REVIEW_ROUTE_REQUIRED"
+    assert state.get(sid)["intake"]["ready"] and state.get(sid)["review_route"] is None
     q = state.request(sid, "review_route", ["gpt"], "native")
     assert q["created"] and q["id"] != "old-review"
+
+
+def test_bundled_answers_rollback_and_preserve_existing_prompt(native):
+    state, sid = native
+    confirm(state, sid, "mode", "long")
+    with pytest.raises(ScsError) as err:
+        state.record_intake(sid, {"verification": ["smoke"], "codex_gate": ["invalid"]}, "native")
+    assert err.value.code == "CHOICE_INVALID"
+    assert state.get(sid)["question_states"]["verification"] == "NOT_ASKED"
+
+    q = state.request(sid, "verification", ["full"], "native")
+    state.claim(sid, q["id"])
+    with pytest.raises(ScsError) as err:
+        state.record_intake(sid, {"verification": ["smoke"], "codex_gate": ["packages"]}, "native")
+    assert err.value.code == "QUESTION_PENDING"
+    assert err.value.details["question_id"] == q["id"]
+    assert state.question(sid, q["id"])["state"] == "WAITING_USER"
+
+
+async def test_zcode_opening_tools_and_bundled_intake(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCS_NATIVE_REVIEW", "1")
+    async with Client(create_server(tmp_path, question_channel="native", host="zcode"), mode="legacy") as client:
+        tools = (await client.list_tools()).tools
+        assert len(tools) == 39
+        visible = {tool.name for tool in tools if (tool.meta or {}).get("anthropic/alwaysLoad")}
+        assert visible == {"session_open", "interaction_request", "interaction_submit", "interaction_record"}
+
+        async def call(name, **args):
+            return (await client.call_tool(name, args)).structured_content
+
+        opened = await call("session_open", conversation_id="long-card", initial_mode="long")
+        sid = opened["id"]
+        assert opened["mode"] == "long" and not opened["questions"]
+        reopened = await call("session_open", conversation_id="long-card", initial_mode="quick")
+        assert reopened["id"] == sid and reopened["mode"] == "long"
+
+        choices = {"verification": ["targeted", "smoke"], "codex_gate": "packages"}
+        result = await call("interaction_record", session_id=sid, selections=choices, source="native")
+        assert result["status"] == "CONFIRMED" and result["intake"]["ready"]
+        assert result["answers"]["verification"]["choices"] == ["smoke", "targeted"]
+        retry = await call("interaction_record", session_id=sid, selections=choices, source="native")
+        assert retry["answers"]["codex_gate"]["status"] == "ALREADY_CONFIRMED"
+        conflict = await call("interaction_record", session_id=sid, selections={"codex_gate": "none"}, source="text")
+        assert conflict["error_code"] == "REPLY_CONFLICT"
+        assert (await call("session_get", session_id=sid))["review_route"] is None
+
+        standard = await call("session_open", conversation_id="standard", initial_mode="standard")
+        assert standard["intake"]["ready"] and standard["verification"] is None
 
 
 @pytest.mark.parametrize(("route", "agent_type", "english"), [

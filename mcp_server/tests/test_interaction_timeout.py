@@ -9,6 +9,8 @@ from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 from mcp.types import ElicitResult
 
+from scs_mcp.server import create_server
+
 SRC = str(Path(__file__).parents[1] / "src")
 
 
@@ -155,6 +157,59 @@ async def test_native_channel_keeps_question_for_submit(tmp_path):
         assert data["question_id"]
         submitted = await submit_mode(client, opened["id"], data["question_id"])
         assert submitted["status"] == "CONFIRMED"
+
+
+async def test_explicit_mcp_channel_confirms_in_one_call_on_native_server(tmp_path):
+    forms = []
+
+    async def choose(_context, params):
+        forms.append(params.requested_schema)
+        return ElicitResult(action="accept", content={"choice": "standard"})
+
+    server = create_server(tmp_path, question_channel="native", host="zcode")
+    async with Client(server, mode="legacy", elicitation_callback=choose) as client:
+        opened = await open_session(client)
+        assert opened["question_channel"] == "native"
+        args = {"session_id": opened["id"], "kind": "mode", "recommendation": ["quick"], "channel": "mcp"}
+        result = (await client.call_tool("interaction_request", args)).structured_content
+        assert result["status"] == "CONFIRMED"
+        assert result["choices"] == ["standard"]
+
+        repeated = (await client.call_tool("interaction_request", args)).structured_content
+        assert repeated["status"] == "ALREADY_CONFIRMED"
+        assert len(forms) == 1
+        assert forms[0]["required"] == ["choice"]
+        field = forms[0]["properties"]["choice"]
+        assert field["enum"][0].startswith("quick — ")
+        assert "default" not in field
+
+        verification = (await client.call_tool("interaction_request", {
+            "session_id": opened["id"], "kind": "verification", "recommendation": ["smoke"], "channel": "native",
+        })).structured_content
+        assert verification["status"] == "NATIVE_QUESTION_REQUIRED"
+        reply = (await client.call_tool("interaction_submit", {
+            "session_id": opened["id"], "question_id": verification["question_id"],
+            "action": "accept", "choices": ["smoke", "targeted"], "source": "native",
+        })).structured_content
+        assert reply["choices"] == ["smoke", "targeted"]
+        assert len(forms) == 1
+
+
+async def test_explicit_mcp_channel_without_form_preserves_question_for_native(tmp_path):
+    server = create_server(tmp_path, question_channel="native", host="zcode")
+    async with Client(server, mode="legacy") as client:
+        opened = await open_session(client)
+        result = (await client.call_tool("interaction_request", {
+            "session_id": opened["id"], "kind": "mode", "recommendation": ["quick"], "channel": "mcp",
+        })).structured_content
+        assert result["status"] == "TEXT_FALLBACK_REQUIRED"
+        assert result["state"] == "WAITING_USER"
+        assert result["fallback_reason"] == "ELICITATION_UNSUPPORTED"
+        reply = (await client.call_tool("interaction_submit", {
+            "session_id": opened["id"], "question_id": result["question_id"],
+            "action": "accept", "choices": ["quick"], "source": "native",
+        })).structured_content
+        assert reply["status"] == "CONFIRMED"
 
 
 async def test_text_channel_keeps_question_for_submit(tmp_path):
