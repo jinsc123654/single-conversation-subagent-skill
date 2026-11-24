@@ -111,7 +111,14 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
     display_host = re.sub(r"[^\w .-]", "_", raw_host)[:32] or "generic"
     roots = Roots(project_root, allowed_roots, allow_session_lookup=allow_session_lookup)
     mcp = SafeServer(roots)
-    board = Board(board_dir)
+    def check_board_scope(task_project_root: str) -> None:
+        if not task_project_root:
+            return
+        if not isinstance(task_project_root, str) or not Path(task_project_root).is_absolute():
+            raise ScsError("PROJECT_MISMATCH", "Project must be inside the configured workspace root.")
+        roots.resolve(task_project_root)
+
+    board = Board(board_dir, scope_check=check_board_scope)
 
     def board_root(value: str) -> str:
         return str(roots.resolve(value or roots.default_root))
@@ -431,11 +438,13 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         pending, active or blocked package. operation_id makes a retry return
         the original receipt.
         """
+        replayed: list[bool] = []
         result = roots.work(session_id).update(session_id, package_id, expected_version, state,
                              [r.model_dump() for r in results] if results is not None else None,
                              new_revision, close_reason,
-                             definition.model_dump() if definition is not None else None, operation_id)
-        return refresh_enabled_view(session_id, result)
+                             definition.model_dump() if definition is not None else None, operation_id,
+                             _replayed=replayed)
+        return finish_idempotent_view(session_id, operation_id, "work_package_update", result, replayed)
 
     @mcp.tool(structured_output=True)
     async def work_attempt_prepare(session_id: str, package_id: str, expected_version: int,
@@ -471,10 +480,11 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         A native review manifest is a v2 receipt and its agent_id must match
         host_agent_id. operation_id makes retries idempotent.
         """
+        replayed: list[bool] = []
         updated = roots.work(session_id).update_attempt(session_id, attempt_id, expected_version,
                                                         state, result.model_dump() if result is not None else None,
-                                                        host_agent_id, operation_id)
-        return refresh_enabled_view(session_id, updated)
+                                                        host_agent_id, operation_id, _replayed=replayed)
+        return finish_idempotent_view(session_id, operation_id, "work_attempt_update", updated, replayed)
 
     @mcp.tool(structured_output=True)
     async def work_attempt_prepare_many(session_id: str, package_id: str, expected_version: int,
@@ -495,18 +505,23 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
 
     @mcp.tool(structured_output=True)
     async def work_attempt_update_many(session_id: str, updates: list[AttemptUpdateItem],
-                                       operation_id: str) -> dict[str, Any]:
+                                       operation_id: str,
+                                       expected_version: int | None = None) -> dict[str, Any]:
         """End several attempts of one package atomically; all succeed or none do.
 
         Each update is {attempt_id,result} with an ENDED result (no lifecycle
         state). All attempts must belong to the same package and current
         revision. One successful batch increments the package version exactly
-        once. A review result must be ended alone. Reusing operation_id with the
-        same payload returns the original receipt before any version check.
+        once. Supply expected_version for optimistic concurrency control
+        (VERSION_CONFLICT on mismatch). A review result must be ended alone.
+        Reusing operation_id with the same payload returns the original receipt
+        before any version check.
         """
+        replayed: list[bool] = []
         result = roots.work(session_id).update_attempts(
-            session_id, [item.model_dump() for item in updates], operation_id)
-        return refresh_enabled_view(session_id, result)
+            session_id, [item.model_dump() for item in updates], operation_id,
+            expected_version=expected_version, _replayed=replayed)
+        return finish_idempotent_view(session_id, operation_id, "work_attempt_update_many", result, replayed)
 
     @mcp.tool(structured_output=True)
     async def work_attempt_list(session_id: str, package_id: str, revision: int | None = None) -> dict[str, Any]:
@@ -670,6 +685,17 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         """Read-only project-local work package. A resource grants no mutation or execution permissions."""
         _, _, snapshot = roots.package(package_id)
         return json.dumps(snapshot, ensure_ascii=False)
+
+    def finish_idempotent_view(session_id, operation_id, tool, result, replayed):
+        if replayed:
+            return result
+        updated = refresh_enabled_view(session_id, result)
+        if operation_id and "view_update" in updated:
+            try:
+                roots.work(session_id)._record_view_update(session_id, operation_id, tool, updated)
+            except Exception:
+                pass
+        return updated
 
     def refresh_enabled_view(session_id, result):
         # The work mutation already committed. A projection conflict must not turn

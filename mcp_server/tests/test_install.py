@@ -101,6 +101,53 @@ def test_hybrid_real_runtime_and_examples(tmp_path):
     assert not (root / ".scs").exists()  # --version/check never creates project state
 
 
+@pytest.mark.parametrize("published", [False, True], ids=["before-publish", "after-publish"])
+def test_bootstrap_cleanup_on_term_at_python_path_publish(tmp_path, published):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    bootstrap = bin_dir / "bootstrap-python"
+    bootstrap.write_text('''#!/bin/bash
+if [ "$1" = -m ] && [ "$2" = venv ]; then
+  mkdir -p "$3/bin"
+  printf '%s\\n' '#!/bin/bash' \
+    'if [[ "$1" = -m && "$2" = pip ]]; then exit 0; fi' \
+    'if [[ "$1" = -c && "$2" == *"print(sys.executable)"* ]]; then printf "%s\\n" "$0"; exit 0; fi' \
+    'exec "$REAL_PYTHON" "$@"' > "$3/bin/python"
+  chmod +x "$3/bin/python"
+  exit
+fi
+if [[ "$1" = -c && "$2" == *importlib.metadata* ]]; then exit 1; fi
+exec "$REAL_PYTHON" "$@"
+''')
+    bootstrap.chmod(0o755)
+    mv = bin_dir / "mv"
+    mv.write_text('''#!/bin/bash
+if [[ "${@: -1}" == */python-path ]]; then
+  if [ "$PUBLISHED" = 1 ]; then "$REAL_MV" "$@" || exit; fi
+  kill -TERM "$PPID"
+  exit
+fi
+exec "$REAL_MV" "$@"
+''')
+    mv.chmod(0o755)
+    result = install(tmp_path, "--mode", "hybrid", "--python", str(bootstrap), env={
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "REAL_MV": "/usr/bin/mv",
+        "REAL_PYTHON": sys.executable, "PUBLISHED": str(int(published)),
+    })
+    assert result.returncode == 143, (result.stdout, result.stderr)
+    runtime = tmp_path / "agent-home/mcp/single-conversation-subagent"
+    assert not list(runtime.glob(".scs-stage.*"))
+    python_path = runtime / "python-path"
+    if published:
+        python = Path(python_path.read_text().strip())
+        assert python.is_file()
+        assert list(runtime.glob("venv.*")) == [python.parent.parent]
+        assert install(tmp_path, "--mode", "hybrid", "--check", env={"REAL_PYTHON": sys.executable}).returncode == 0
+    else:
+        assert not python_path.exists()
+        assert not list(runtime.glob("venv.*"))
+
+
 def test_runtime_child_symlink_rejected_before_install(tmp_path):
     home = tmp_path / "agent-home"
     runtime = home / "mcp/single-conversation-subagent"

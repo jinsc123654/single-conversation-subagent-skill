@@ -287,3 +287,91 @@ class WindowTests(unittest.TestCase):
             self.window.open_obsidian();self.wait_idle()
         self.assertFalse(self.window.last_error,self.window.last_error)
         self.assertIn('首次配置已自动准备',self.window.status.text())
+
+    def test_sessions_combo_shows_zcode_standard_and_long_review_route(self):
+        with sqlite3.connect(self.root / '.scs/state.sqlite3') as con:
+            con.executescript('''
+                CREATE TABLE questions(
+                    id TEXT PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT NOT NULL,
+                    current INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL,
+                    channel TEXT NOT NULL, recommendation TEXT NOT NULL, answer TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+            ''')
+            con.execute(
+                'INSERT INTO sessions VALUES(?,?,?,?,?,?,?)',
+                ('S-zcode-std', 'zcode', 'standard', '["targeted"]', None, 'registered', '2026-11-20T01:00:00Z'),
+            )
+            con.execute(
+                'INSERT INTO sessions VALUES(?,?,?,?,?,?,?)',
+                ('S-std-unverified', 'zcode', 'standard', None, None, 'registered', '2026-11-20T01:30:00Z'),
+            )
+            con.execute(
+                'INSERT INTO sessions VALUES(?,?,?,?,?,?,?)',
+                ('S-long-gpt', 'zcode', 'long', '["targeted"]', None, 'registered', '2026-11-20T02:00:00Z'),
+            )
+            con.execute(
+                'INSERT INTO sessions VALUES(?,?,?,?,?,?,?)',
+                ('S-long-inherit', 'zcode', 'long', '["full"]', None, 'registered', '2026-11-20T03:00:00Z'),
+            )
+            con.execute(
+                'INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)',
+                ('Q-g1', 'S-long-gpt', 'codex_gate', 1, 'CONFIRMED', 'native', '["packages"]', '["packages"]',
+                 '2026-11-20T02:00:01Z', '2026-11-20T02:00:02Z'),
+            )
+            con.execute(
+                'INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)',
+                ('Q-r1', 'S-long-gpt', 'review_route', 1, 'CONFIRMED', 'native', '["gpt"]', '["gpt"]',
+                 '2026-11-20T02:00:03Z', '2026-11-20T02:00:04Z'),
+            )
+            con.execute(
+                'INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)',
+                ('Q-g2', 'S-long-inherit', 'codex_gate', 1, 'CONFIRMED', 'native', '["closure"]', '["closure"]',
+                 '2026-11-20T03:00:01Z', '2026-11-20T03:00:02Z'),
+            )
+            con.execute(
+                'INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)',
+                ('Q-r2', 'S-long-inherit', 'review_route', 1, 'CONFIRMED', 'native', '["inherit"]', '["inherit"]',
+                 '2026-11-20T03:00:03Z', '2026-11-20T03:00:04Z'),
+            )
+        self.load()
+        items = {self.window.sessions.itemData(i): self.window.sessions.itemText(i)
+                 for i in range(self.window.sessions.count())}
+        self.assertIn('session-one', items)
+        self.assertIn('S-zcode-std', items)
+        self.assertNotIn('S-std-unverified', items)
+        self.assertIn('S-long-gpt', items)
+        self.assertIn('gate=packages · route=gpt', items['S-long-gpt'])
+        self.assertIn('S-long-inherit', items)
+        self.assertIn('gate=closure · route=inherit', items['S-long-inherit'])
+
+    def test_standard_session_distinguishes_zcode_from_legacy_pending_review(self):
+        zcode_hash = 'h' + hashlib.sha256(
+            json.dumps(['zcode', 'zcode'], ensure_ascii=False, separators=(',', ':')).encode()
+        ).hexdigest()[:32]
+        with sqlite3.connect(self.root / '.scs/state.sqlite3') as con:
+            con.execute(
+                'INSERT INTO sessions VALUES(?,?,?,?,?,?,?)',
+                ('S-codex-std-pending', 'codex', 'standard', '["targeted"]', None, 'registered', '2026-11-20T01:00:00Z'),
+            )
+            con.execute(
+                'INSERT INTO sessions VALUES(?,?,?,?,?,?,?)',
+                ('S-codex-std-confirmed', 'codex', 'standard', '["targeted"]', 1, 'registered', '2026-11-20T01:10:00Z'),
+            )
+            con.execute(
+                'INSERT INTO sessions VALUES(?,?,?,?,?,?,?)',
+                ('S-zcode-std-hash', zcode_hash, 'standard', '["targeted"]', None, 'registered', '2026-11-20T01:20:00Z'),
+            )
+        clean_env = {k: v for k, v in os.environ.items() if k != 'SCS_NATIVE_REVIEW'}
+        with patch.dict(os.environ, clean_env, clear=True):
+            self.load()
+        items = {self.window.sessions.itemData(i): self.window.sessions.itemText(i)
+                 for i in range(self.window.sessions.count())}
+        self.assertNotIn('S-codex-std-pending', items)
+        self.assertIn('S-codex-std-confirmed', items)
+        self.assertIn('S-zcode-std-hash', items)
+
+    def test_theme_metric_value_has_no_shadowed_duplicate(self):
+        qss = theme.build_style(theme.LIGHT)
+        self.assertEqual(qss.count('QLabel#metricValue'), 1)
+        self.assertIn('QLabel#metricValue { font-size: 17px; font-weight: 600; }', qss)

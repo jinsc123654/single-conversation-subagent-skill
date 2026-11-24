@@ -337,6 +337,13 @@ class Work:
         con.execute("INSERT INTO work_operations VALUES(?,?,?,?,?,?)",
                     (operation_id, tool, session_id, payload, encode(result), now()))
 
+    def _record_view_update(self, session_id: str, operation_id: str | None, tool: str, response: dict) -> None:
+        if not operation_id:
+            return
+        with self.store.transaction(True) as con:
+            con.execute("UPDATE work_operations SET result=? WHERE id=? AND tool=? AND session_id=?",
+                        (encode(response), operation_id, tool, session_id))
+
     @staticmethod
     def _operation_id(value: str | None) -> str | None:
         if value is None:
@@ -528,7 +535,8 @@ class Work:
                 response["review_subject"] = subjects[0]
             return response
 
-    def _apply_result(self, row, data: dict, attempt, result: dict, host_agent_id: str | None) -> dict:
+    def _apply_result(self, row, data: dict, attempt, result: dict, host_agent_id: str | None,
+                      session=None) -> dict:
         """Validate one ENDED result and apply it to the in-memory revision data."""
         if not isinstance(result, dict) or set(result) - {"status", "evidence", "note"}:
             raise ScsError("INPUT_INVALID", "An ending attempt needs a status, evidence and optional note.")
@@ -538,11 +546,15 @@ class Work:
         evidence = result.get("evidence", [])
         if not isinstance(evidence, list):
             raise ScsError("EVIDENCE_INVALID", "Evidence must be a list.")
-        if status == "PASS" and not evidence:
-            raise ScsError("EVIDENCE_REQUIRED", "A PASS attempt needs verifiable evidence.")
         task = next((t for t in data["subtasks"] if t["id"] == attempt["subtask_id"]), None)
         if task is None:
             raise ScsError("SUBTASK_INVALID", "Attempt subtask no longer exists.")
+        validation = json.loads(session["verification"]) if session and session["verification"] else []
+        if task["kind"] == "test" and set(validation) & {"none", "method-only"} and status != "NOT_RUN":
+            raise ScsError("VALIDATION_NOT_AUTHORIZED",
+                           "This conversation chose no testing/method-only; test results must remain NOT_RUN.")
+        if status == "PASS" and not evidence:
+            raise ScsError("EVIDENCE_REQUIRED", "A PASS attempt needs verifiable evidence.")
         prefix = f"{row['docs_root']}/agent/evidence/{row['id']}/R{row['revision']}/{task['id']}/{attempt['id']}"
         if task["kind"] == "review":
             snapshot = json.loads(attempt["input_snapshot"]) if attempt["input_snapshot"] else {}
@@ -613,7 +625,8 @@ class Work:
 
     def update_attempt(self, session_id: str, attempt_id: str, expected_version: int,
                        state: str | None = None, result: dict | None = None,
-                       host_agent_id: str | None = None, operation_id: str | None = None) -> dict:
+                       host_agent_id: str | None = None, operation_id: str | None = None,
+                       *, _replayed: list[bool] | None = None) -> dict:
         operation_id = self._operation_id(operation_id)
         if state is None and result is None and host_agent_id is None:
             raise ScsError("INPUT_INVALID", "Specify a state, result, or host agent binding.")
@@ -632,6 +645,8 @@ class Work:
             if operation_id:
                 stored = self._operation(con, operation_id, "work_attempt_update", session_id, payload)
                 if stored is not None:
+                    if _replayed is not None:
+                        _replayed.append(True)
                     return stored
             if attempt["state"] == "ENDED":
                 raise ScsError("ATTEMPT_CLOSED", "This attempt has already ended.")
@@ -657,7 +672,8 @@ class Work:
             if target == "ENDED":
                 if attempt["revision"] != row["revision"]:
                     raise ScsError("REVISION_CONFLICT", "This attempt belongs to another revision.")
-                result_data = self._apply_result(row, data, attempt, result, host)
+                session = self.state._session(con, session_id)
+                result_data = self._apply_result(row, data, attempt, result, host, session=session)
                 self._verify_reports(data, row, row["revision"])
                 con.execute("UPDATE work_packages SET version=version+1,data=? WHERE id=? AND version=?",
                             (encode(data), row["id"], expected_version))
@@ -681,8 +697,12 @@ class Work:
                 self._store_operation(con, operation_id, "work_attempt_update", session_id, payload, response)
             return response
 
-    def update_attempts(self, session_id: str, updates: list[dict], operation_id: str) -> dict:
+    def update_attempts(self, session_id: str, updates: list[dict], operation_id: str,
+                        expected_version: int | None = None,
+                        *, _replayed: list[bool] | None = None) -> dict:
         """End same-package attempts atomically: one version increment, all or nothing."""
+        if expected_version is not None and (not isinstance(expected_version, int) or isinstance(expected_version, bool)):
+            raise ScsError("INPUT_INVALID", "expected_version must be an integer when supplied.")
         if not isinstance(updates, list) or not 1 <= len(updates) <= 100:
             raise ScsError("INPUT_INVALID", "Supply between one and 100 attempt updates.")
         seen = set()
@@ -697,18 +717,25 @@ class Work:
             seen.add(attempt_id)
         if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", operation_id):
             raise ScsError("INPUT_INVALID", "operation_id must be a simple identifier.")
-        payload = encode({"updates": updates})
+        payload_data: dict = {"updates": updates}
+        if expected_version is not None:
+            payload_data["expected_version"] = expected_version
+        payload = encode(payload_data)
         with self.store.transaction(True) as con:
-            self.state._session(con, session_id)
+            session = self.state._session(con, session_id)
             first = self._get_attempt(con, updates[0]["attempt_id"])
             row = self._get(con, first["package_id"])
             self._access(con, session_id, row)
             # A replay returns the original receipt even after the attempts ended.
             stored = self._operation(con, operation_id, "work_attempt_update_many", session_id, payload)
             if stored is not None:
+                if _replayed is not None:
+                    _replayed.append(True)
                 return stored
             if row["state"] in CLOSED_STATES:
                 raise ScsError("PACKAGE_CLOSED", "Closed work packages are immutable.")
+            if expected_version is not None and expected_version != row["version"]:
+                raise ScsError("VERSION_CONFLICT", "Refresh the work package before updating attempts.")
             attempts = []
             for item in updates:
                 attempt = self._get_attempt(con, item["attempt_id"])
@@ -727,13 +754,14 @@ class Work:
                 raise ScsError("SUBTASK_INVALID", "Attempt subtask no longer exists.")
             if sum(kind == "review" for kind in kinds) > 1 or (any(kind == "review" for kind in kinds) and len(attempts) > 1):
                 raise ScsError("REVIEW_WINDOW_ACTIVE", "End a review attempt alone; do not mix it with other results.")
-            expected_version = row["version"]
+            current_version = row["version"]
             for attempt in attempts:
                 self._apply_result(row, data, attempt, next(
-                    item["result"] for item in updates if item["attempt_id"] == attempt["id"]), attempt["host_agent_id"])
+                    item["result"] for item in updates if item["attempt_id"] == attempt["id"]),
+                    attempt["host_agent_id"], session=session)
             self._verify_reports(data, row, row["revision"])
             con.execute("UPDATE work_packages SET version=version+1,data=? WHERE id=? AND version=?",
-                        (encode(data), row["id"], expected_version))
+                        (encode(data), row["id"], current_version))
             stamp = now()
             for attempt in attempts:
                 result = next(item["result"] for item in updates if item["attempt_id"] == attempt["id"])
@@ -1010,7 +1038,14 @@ class Work:
         links: dict[str, str] = {}
         total = 0
         docs = row["docs_root"].rstrip("/")
-        evidence_prefix = docs + "/agent/evidence"
+        excluded_prefixes = (
+            docs + "/agent/evidence",
+            docs + "/agent/acceptance",
+            docs + "/agent/view-archives",
+        )
+
+        def is_excluded(relative: str) -> bool:
+            return any(relative == prefix or relative.startswith(prefix + "/") for prefix in excluded_prefixes)
 
         def incomplete(message: str):
             raise ScsError("REVIEW_SUBJECT_INCOMPLETE", message)
@@ -1084,8 +1119,7 @@ class Work:
                 incomplete("A reviewed directory cannot be enumerated; the subject is incomplete.")
             for name in names:
                 relative = f"{relative_dir}/{name}" if relative_dir else name
-                if (name in REVIEW_EXCLUDED or relative == evidence_prefix
-                        or relative.startswith(evidence_prefix + "/")):
+                if name in REVIEW_EXCLUDED or is_excluded(relative):
                     continue
                 try:
                     info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -1125,7 +1159,7 @@ class Work:
             normalized = "/".join(parts)
             if any(part in REVIEW_EXCLUDED for part in parts):
                 continue
-            if normalized == evidence_prefix or normalized.startswith(evidence_prefix + "/"):
+            if is_excluded(normalized):
                 continue
             if normalized in seen_scopes:
                 # Repeated scopes must not read or count the same files twice.
@@ -1283,7 +1317,8 @@ class Work:
     def update(self, session_id: str, package_id: str, expected_version: int,
                state: str | None = None, results: list[dict] | None = None,
                new_revision: bool = False, close_reason: str | None = None,
-               definition: dict | None = None, operation_id: str | None = None) -> dict:
+               definition: dict | None = None, operation_id: str | None = None,
+               *, _replayed: list[bool] | None = None) -> dict:
         operation_id = self._operation_id(operation_id)
         if not new_revision and state is None and not results and close_reason is None:
             raise ScsError("INPUT_INVALID", "Specify a state, results, close reason, or a new revision.")
@@ -1300,6 +1335,8 @@ class Work:
             if operation_id:
                 stored = self._operation(con, operation_id, "work_package_update", session_id, payload)
                 if stored is not None:
+                    if _replayed is not None:
+                        _replayed.append(True)
                     return stored
             if row["state"] in CLOSED_STATES:
                 raise ScsError("PACKAGE_CLOSED", "Closed work packages are immutable; create a new package for follow-up work.")
@@ -1447,6 +1484,7 @@ class Work:
             con.execute("UPDATE work_attempts SET state='ENDED', result_state='FAIL', result_data=?, "
                         "updated_at=?, last_observed_at=? WHERE package_id=? AND state!='ENDED'",
                         (encode({"force_closed": True, "reason": reason}), at, at, package_id))
+            self.leases.release_package(con, package_id)
             self.store.event(con, row["session_id"], None, "work_package_update", "PACKAGE_FORCE_CLOSED")
             updated = self._get(con, package_id)
             self.store.revision_snapshot(con, updated)

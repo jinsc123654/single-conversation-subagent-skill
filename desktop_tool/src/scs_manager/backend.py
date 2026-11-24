@@ -278,35 +278,101 @@ def manifest(root):
     return value
 
 
-def _session_rows(con):
-    """Session rows plus a derived long-mode codex_gate.
+def _client_hash(host: str, client_name) -> str:
+    payload = json.dumps([host, client_name], ensure_ascii=False, separators=(",", ":"))
+    return "h" + hashlib.sha256(payload.encode()).hexdigest()[:32]
 
-    Older fixtures/DBs may not have the questions table at all; then the gate is
-    simply None and the legacy codex_review value keeps selecting long sessions.
+
+ZCODE_CLIENT_HASHES = frozenset({
+    _client_hash("zcode", ""),
+    _client_hash("zcode", "zcode"),
+    _client_hash("zcode", "ZCode"),
+    _client_hash("zcode", None),
+    _client_hash("generic", "zcode"),
+})
+
+
+def is_zcode_client(client) -> bool:
+    """Return True when a stored client identifier matches ZCode."""
+    if not isinstance(client, str):
+        return False
+    value = client.strip()
+    if not value:
+        return False
+    return value in ZCODE_CLIENT_HASHES or "zcode" in value.lower()
+
+
+def _first_choice(raw):
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list) and parsed and isinstance(parsed[0], str):
+            return parsed[0]
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def session_uses_native_review(con, session_id):
+    """Return True when the environment or DB session uses ZCode native review."""
+    if os.environ.get("SCS_NATIVE_REVIEW") == "1":
+        return True
+    if not session_id:
+        return False
+    row = con.execute(
+        "SELECT id,client FROM sessions WHERE id=?", (session_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    has_questions = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='questions'"
+    ).fetchone()
+    if has_questions and con.execute(
+        "SELECT 1 FROM questions WHERE session_id=? AND kind='review_route' LIMIT 1",
+        (session_id,),
+    ).fetchone():
+        return True
+    return is_zcode_client(row["client"])
+
+
+def _session_rows(con):
+    """Session rows plus derived codex_gate, review_route, and native_review flag.
+
+    Older fixtures/DBs may not have the questions table at all; then the derived
+    question answers are simply None and legacy codex_review values keep working.
     """
+    env_native = os.environ.get("SCS_NATIVE_REVIEW") == "1"
     has_questions = con.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='questions'").fetchone()
     if not has_questions:
-        return [{**dict(row), "codex_gate": None} for row in con.execute(
-            "SELECT id,client,mode,verification,codex_review,review_registration,created_at "
-            "FROM sessions ORDER BY created_at DESC LIMIT 200")]
+        rows = []
+        for row in con.execute(
+                "SELECT id,client,mode,verification,codex_review,review_registration,created_at "
+                "FROM sessions ORDER BY created_at DESC LIMIT 200"):
+            data = dict(row)
+            data["codex_gate"] = None
+            data["review_route"] = None
+            data["native_review"] = bool(env_native or is_zcode_client(data.get("client")))
+            rows.append(data)
+        return rows
     rows = []
     for row in con.execute(
             "SELECT s.id,s.client,s.mode,s.verification,s.codex_review,s.review_registration,s.created_at,"
             "(SELECT q.answer FROM questions q WHERE q.session_id=s.id AND q.kind='codex_gate' "
-            "AND q.current=1 AND q.state='CONFIRMED' LIMIT 1) AS codex_gate_answer "
+            "AND q.current=1 AND q.state='CONFIRMED' LIMIT 1) AS codex_gate_answer,"
+            "(SELECT q.answer FROM questions q WHERE q.session_id=s.id AND q.kind='review_route' "
+            "AND q.current=1 AND q.state='CONFIRMED' LIMIT 1) AS review_route_answer,"
+            "EXISTS(SELECT 1 FROM questions q WHERE q.session_id=s.id AND q.kind='review_route') "
+            "AS has_review_route "
             "FROM sessions s ORDER BY s.created_at DESC LIMIT 200"):
         data = dict(row)
-        answer = data.pop("codex_gate_answer", None)
-        gate = None
-        if answer:
-            try:
-                parsed = json.loads(answer)
-                if isinstance(parsed, list) and parsed and isinstance(parsed[0], str):
-                    gate = parsed[0]
-            except (TypeError, ValueError):
-                gate = None
-        data["codex_gate"] = gate
+        data["codex_gate"] = _first_choice(data.pop("codex_gate_answer", None))
+        data["review_route"] = _first_choice(data.pop("review_route_answer", None))
+        has_review_route = bool(data.pop("has_review_route", 0))
+        data["native_review"] = bool(
+            env_native or has_review_route or is_zcode_client(data.get("client"))
+        )
         rows.append(data)
     return rows
 

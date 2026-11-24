@@ -36,13 +36,18 @@ class Leases:
         return parent == child or child.startswith(parent + "/")
 
     def _conflict(self, left: str, left_mode: str, right: str, right_mode: str) -> bool:
-        # R/R may share a resource; any writer conflicts with readers and writers.
+        # The leases table is keyed by resource (one active holder per row), so
+        # two active leases on the exact same resource can never coexist without
+        # overwriting one holder's row. File scopes also conflict across
+        # overlapping parent/child paths whenever any side writes.
+        if left == right:
+            return True
         if left_mode == "read" and right_mode == "read":
             return False
         if left.startswith("file:") and right.startswith("file:"):
             a, b = left[5:], right[5:]
             return self._covers(a, b) or self._covers(b, a)
-        return left == right
+        return False
 
     def _validate_ttl(self, ttl_seconds: float) -> float:
         if not math.isfinite(ttl_seconds) or not 1 <= ttl_seconds <= 3600:
@@ -87,7 +92,7 @@ class Leases:
             if not self._expired_active(con, row, stamp):
                 continue
             for item in requested:
-                if row["attempt_id"] == attempt_id:
+                if row["attempt_id"] is not None and row["attempt_id"] == attempt_id and row["owner"] == session_id:
                     continue
                 if self._conflict(item["resource"], item["mode"], row["resource"], row["mode"]):
                     raise ScsError("RESOURCE_BUSY",
@@ -109,6 +114,17 @@ class Leases:
         con.execute("DELETE FROM leases WHERE attempt_id=? AND owner=?", (attempt_id, session_id))
         return [row["resource"] for row in rows]
 
+    def release_package(self, con, package_id: str) -> list[str]:
+        rows = list(con.execute(
+            "SELECT resource FROM leases WHERE package_id=? "
+            "OR attempt_id IN (SELECT id FROM work_attempts WHERE package_id=?)",
+            (package_id, package_id)))
+        con.execute(
+            "DELETE FROM leases WHERE package_id=? "
+            "OR attempt_id IN (SELECT id FROM work_attempts WHERE package_id=?)",
+            (package_id, package_id))
+        return [row["resource"] for row in rows]
+
     def acquire(self, session_id: str, resource: str, ttl_seconds: float = 120,
                 lease_token: str | None = None) -> dict:
         resource = self.resource(resource)
@@ -118,7 +134,7 @@ class Leases:
             self.state._session(con, session_id)
             exact = con.execute("SELECT * FROM leases WHERE resource=?", (resource,)).fetchone()
             if exact and self._expired_active(con, exact, stamp):
-                if exact["owner"] != session_id or exact["token"] != lease_token:
+                if exact["attempt_id"] is not None or exact["owner"] != session_id or exact["token"] != lease_token:
                     return {"status": "CONFLICT", "resource": resource, "owner_session": exact["owner"],
                             "expires_at": exact["expires"], "advisory_only": True}
             for row in con.execute("SELECT * FROM leases"):
@@ -128,7 +144,9 @@ class Leases:
                     raise ScsError("RESOURCE_BUSY",
                         "Resource conflicts with an active lease.",
                         {"resource": resource, "holder": row["resource"], "owner_session": row["owner"]})
-            token = exact["token"] if exact and exact["owner"] == session_id and exact["token"] == lease_token else identifier("L-")
+            token = (exact["token"]
+                     if exact and exact["attempt_id"] is None and exact["owner"] == session_id and exact["token"] == lease_token
+                     else identifier("L-"))
             con.execute("INSERT OR REPLACE INTO leases(resource,owner,token,expires,mode,attempt_id,package_id) VALUES(?,?,?,?,'write',NULL,NULL)",
                         (resource, session_id, token, stamp + ttl_seconds))
             return {"status": "ACQUIRED", "resource": resource, "lease_token": token,

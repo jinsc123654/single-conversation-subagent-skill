@@ -275,7 +275,8 @@ class ProjectView:
                        "groups": {k: len(v) for k, v in groups.items()},
                        "evidence_issues": invalid, "sources_outside_vault": sorted(outside)}
 
-    def _info(self, con, docs: str, view: str, manifest, snapshot: str) -> dict:
+    def _info(self, con, docs: str, view: str, manifest, snapshot: str,
+              evidence_issues: list[dict] | None = None) -> dict:
         overview = view + "/" + PAGES["home"]
         configured = self._vault_config(docs)
         drift = []
@@ -287,11 +288,14 @@ class ProjectView:
                         drift.append(path)
                 except ScsError:
                     drift.append(path)
-        evidence_issues = []
-        for row in con.execute("SELECT * FROM work_packages"):
-            valid, reason = self._check_report(row)
-            if not valid:
-                evidence_issues.append({"package_id": row["id"], "error_code": reason})
+        if evidence_issues is None:
+            evidence_issues = []
+            for row in con.execute("SELECT * FROM work_packages ORDER BY created_at,id"):
+                valid, reason = self._check_report(row)
+                if not valid:
+                    evidence_issues.append({"package_id": row["id"], "error_code": reason})
+        else:
+            evidence_issues = list(evidence_issues)
         evidence_stale = manifest is None or encode(evidence_issues) != encode(manifest.get("evidence_issues", []))
         desktop_profile=profile_info(self.paths,docs)
         desktop_profile["open_uri"]=profile_uri(desktop_profile, "agent/acceptance/"+PAGES["home"])
@@ -376,7 +380,7 @@ class ProjectView:
             if not planned and manifest and not manifest.get("pending") and manifest["snapshot"] == snapshot and bool(manifest.get("auto_refresh")) == auto_refresh:
                 if initialize_vault and not configured:
                     self.paths.create_once(docs + "/.obsidian/app.json", "{}\n")
-                return {**self._info(con, docs, view, manifest, snapshot), **summary, "updated_files": 0, "result": "NO_CHANGES"}
+                return {**self._info(con, docs, view, manifest, snapshot, evidence_issues=summary["evidence_issues"]), **summary, "updated_files": 0, "result": "NO_CHANGES"}
             # Record both old/new ownership hashes first. If interrupted between
             # atomic file replacements, a retry recognizes its own partial output.
             pending = {"schema": 1, "project_hash": digest(str(self.store.root).encode()), "docs_root": docs,
@@ -393,4 +397,4 @@ class ProjectView:
             if initialize_vault and not configured:
                 self.paths.create_once(docs + "/.obsidian/app.json", "{}\n")
             self.store.event(con, session_id, None, "project_view_refresh", "VIEW_REFRESHED")
-            return {**self._info(con, docs, view, pending, snapshot), **summary, "updated_files": len(planned), "result": "REFRESHED"}
+            return {**self._info(con, docs, view, pending, snapshot, evidence_issues=summary["evidence_issues"]), **summary, "updated_files": len(planned), "result": "REFRESHED"}

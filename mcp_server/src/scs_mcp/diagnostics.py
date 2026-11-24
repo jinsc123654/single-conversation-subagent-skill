@@ -1,10 +1,34 @@
 """Bounded diagnostic facts; never guesses about invisible host behavior."""
 
+import json
 from importlib.metadata import version
 
 from . import __version__
 from .interaction import supports_form
 from .state import State
+
+_GATE_VERDICTS = {"ACCEPT", "REJECT", "UNAVAILABLE_OVERRIDE"}
+
+
+def _sanitize_event(row) -> dict:
+    item = dict(row)
+    tool = item.get("tool")
+    if tool == "operation_gate":
+        verdict = None
+        try:
+            payload = json.loads(item["event"])
+            if isinstance(payload, dict) and payload.get("verdict") in _GATE_VERDICTS:
+                verdict = payload["verdict"]
+        except (TypeError, ValueError):
+            pass
+        item["event"] = f"GATE_{verdict}" if verdict else "GATE_RECORDED"
+        if item.get("fallback_reason") is not None:
+            item["fallback_reason"] = "[REDACTED]"
+    elif tool == "work_attempt_note":
+        item["event"] = "NOTE_RECORDED"
+        if item.get("fallback_reason") is not None:
+            item["fallback_reason"] = "[REDACTED]"
+    return item
 
 
 def check(store, capabilities, protocol_version, registered_tools, session_id=None):
@@ -13,7 +37,7 @@ def check(store, capabilities, protocol_version, registered_tools, session_id=No
     with store.transaction() as con:
         integrity = con.execute("PRAGMA quick_check").fetchone()[0]
         schema = con.execute("PRAGMA user_version").fetchone()[0]
-        events = [dict(r) for r in con.execute(
+        events = [_sanitize_event(r) for r in con.execute(
             "SELECT * FROM events WHERE session_id=? ORDER BY seq DESC LIMIT 30", (session_id,))] if session_id else []
     return {"status": "OK" if integrity == "ok" else "ERROR", "database": integrity,
             "schema_version": schema, "sdk_version": version("mcp"), "server_version": __version__,

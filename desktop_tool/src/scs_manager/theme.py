@@ -408,7 +408,6 @@ QFrame#metric {{
     border: 1px solid {p.border};
     border-radius: 10px;
 }}
-QLabel#metricValue {{ font-size: 24px; font-weight: 600; }}
 QFrame#projectCard, QFrame#todoCard {{
     background: {p.surface};
     border: 1px solid {p.border};

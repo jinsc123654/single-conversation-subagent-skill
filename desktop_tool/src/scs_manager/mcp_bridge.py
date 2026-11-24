@@ -7,6 +7,30 @@ import sys
 from pathlib import Path
 
 
+def build_server_env(native_review=False, environ=None):
+    source_env = os.environ if environ is None else environ
+    env = {"SCS_ALLOW_SESSION_LOOKUP": "1"}
+    for name in ("SCS_BOARD_DIR", "SCS_NATIVE_REVIEW", "XDG_DATA_HOME", "HOME", "PATH", "LANG", "LC_ALL"):
+        if name in source_env:
+            env[name] = source_env[name]
+    if native_review:
+        env["SCS_NATIVE_REVIEW"] = "1"
+    source = Path(__file__).resolve().parents[3] / "mcp_server/src"
+    if source.is_dir():
+        env["PYTHONPATH"] = str(source)
+    return env
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=("probe", "refresh", "close", "board-add", "board-start",
+                                           "board-complete", "board-abandon", "board-prompt", "board-update"))
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--session", default="")
+    parser.add_argument("--native-review", action="store_true")
+    return parser.parse_args(argv)
+
+
 async def run(args):
     close_request = None
     payload = None
@@ -38,13 +62,7 @@ async def run(args):
         raise ValueError("放弃待办必须填写原因")
     from mcp import Client
     from mcp.client.stdio import StdioServerParameters
-    source = Path(__file__).resolve().parents[3] / "mcp_server/src"
-    env = {"SCS_ALLOW_SESSION_LOOKUP": "1"}
-    for name in ("SCS_BOARD_DIR", "XDG_DATA_HOME", "HOME", "PATH", "LANG", "LC_ALL"):
-        if name in os.environ:
-            env[name] = os.environ[name]
-    if source.is_dir():
-        env["PYTHONPATH"] = str(source)
+    env = build_server_env(native_review=bool(getattr(args, "native_review", False)))
     params = StdioServerParameters(command=sys.executable,
         args=["-m", "scs_mcp", "--project-root", args.root], env=env)
     async with Client(params, read_timeout_seconds=8) as client:
@@ -99,12 +117,7 @@ async def run(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("probe", "refresh", "close", "board-add", "board-start",
-                                           "board-complete", "board-abandon", "board-prompt", "board-update"))
-    parser.add_argument("--root", required=True)
-    parser.add_argument("--session", default="")
-    args = parser.parse_args()
+    args = parse_args()
     try:
         print(json.dumps({"ok": True, "data": asyncio.run(run(args))}, ensure_ascii=False))
     except Exception as error:

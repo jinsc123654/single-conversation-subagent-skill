@@ -10,8 +10,19 @@ import tempfile
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
+ROOT = Path(__file__).resolve().parents[1]
+EXPECTED_TOOL_COUNT = 38
+
+
+def expected_version() -> str:
+    lines = (ROOT / "VERSION").read_text(encoding="utf-8").splitlines()
+    if not lines or not lines[0].strip():
+        raise ValueError("VERSION file is missing a version on line 1")
+    return lines[0].strip()
+
 
 async def main(args):
+    version = expected_version()
     results = []
     for mode in ('auto', 'legacy'):
         with tempfile.TemporaryDirectory(prefix='scs-wheel-') as root:
@@ -23,9 +34,9 @@ async def main(args):
                     assert value and value.get('status') != 'ERROR', value
                     return value
                 diagnostics = await call('diagnostics_check')
-                assert diagnostics['server_version'] == '2.2.0'
+                assert diagnostics['server_version'] == version, (diagnostics['server_version'], version)
                 tools = await client.list_tools()
-                assert len(tools.tools) == 17
+                assert len(tools.tools) == EXPECTED_TOOL_COUNT, (len(tools.tools), EXPECTED_TOOL_COUNT)
                 sid = (await call('session_open', project_root=root, client_name='wheel-probe', explicit_skip=True))['id']
                 view = await call('project_view_refresh', session_id=sid, initialize_vault=True)
                 assert view['view_initialized'] and view['local_config_present']

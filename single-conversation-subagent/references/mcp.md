@@ -86,12 +86,13 @@ Skill 顺序：`mode` → `verification`（仅 standard/long）→ `codex_gate`�
 - `work_attempt_prepare(session_id, package_id, expected_version, subtask_id, host_agent_id?=None, ttl_seconds=120)`：校验依赖已 `PASS`/`SUBSTITUTED` 且无活动 attempt，原子占用子任务声明的完整资源集合，建立 `.../R<rev>/<subtask>/<attempt>/` 证据目录；返回 `attempt`、`leases`、`evidence_dir`、`warnings`。成功后才调用宿主 Agent。工作包 version 不变。
 - `work_attempt_prepare_many(session_id, package_id, expected_version, subtask_ids, host_agent_ids?=None, ttl_seconds=120)`：单包单事务批量 prepare，全有或全无；成功后 version 不变；返回 `attempts[]`。重复 ID 返回 INPUT_INVALID，缺失子任务 SUBTASK_INVALID；同批依赖按波次；含 review 且多于一项返回 REVIEW_WINDOW_ACTIVE。`host_agent_ids` 可选，提供时与 `subtask_ids` 一一对应。
 - `work_attempt_update(session_id, attempt_id, expected_version, state?, result?, host_agent_id?, operation_id?)`：`PREPARED → LAUNCHING → RUNNING → DRAINING → ENDED`，另有 `UNKNOWN`；`ENDED` 写入子任务结果并让工作包 version+1，`PASS` 必须有 attempt 目录内可验证证据；`UNKNOWN` 不释放资源、不自动重派。`operation_id` 同载荷重试返回原回执。
-- `work_attempt_update_many(session_id, updates=[{attempt_id,result}], operation_id)`：只接受 ENDED 结果；同包当前修订；全有或全无；成功只 version+1；`operation_id` 必填且重放先于状态/版本检查；review 不能与其他项混批。跨包/跨修订返回 BATCH_PACKAGE_MISMATCH/BATCH_REVISION_MISMATCH。
+- `work_attempt_update_many(session_id, updates=[{attempt_id,result}], operation_id, expected_version?=None)`：只接受 ENDED 结果；同包当前修订；全有或全无；成功只 version+1；`operation_id` 必填且重放先于状态/版本检查（相同载荷重放原样返回历史回执，含已记录的 `view_update`）；可选 `expected_version`（非 bool 整数）开启乐观锁，在重放与 `PACKAGE_CLOSED` 检查后校验版本，不匹配返回 `VERSION_CONFLICT`（修改 `expected_version` 复用同 `operation_id` 返回 `OPERATION_CONFLICT`）；review 不能与其他项混批。跨包/跨修订返回 BATCH_PACKAGE_MISMATCH/BATCH_REVISION_MISMATCH。
 - `work_attempt_list(session_id, package_id, revision?)`：只读查询 attempt 生命周期、宿主、结果和资源。
 - `work_attempt_note(session_id, attempt_id, note, note_id)`：追加审计备注，note 1..2000 字、note_id 为简单标识；不写版本、不续租、不证明进程存活；同 note_id 同载荷幂等，不同载荷 OPERATION_CONFLICT。
 - 子任务定义支持 `depends_on`、`resources`（`file:`/`device:`/`serial:`/`programmer:` + `read`/`write`；3.0 文件只支持 `write`）和 `required`。目录资源覆盖后代。
 - **读租约限制（3.0）**：只有 implement 默认对每个 scope 取独占写租约；analyze/test/review 默认 `[]`。显式 `file:` + `read` 返回 `RESOURCE_READ_UNSUPPORTED`；设备类 read 未禁用。旧包已存的文件 read 资源在 prepare 时过滤并返回 `warnings[]`（`READ_LEASE_SKIPPED`），不阻断。本版没有共享文件读保护。
 - review attempt 必须单独运行：prepare 时包内不得有其他活动 attempt；review 活动期间不得 prepare 其他子任务；批量中 review 必须单独一批，否则 REVIEW_WINDOW_ACTIVE。
+- **原生 `host_agent_id` 全局单活互斥与运行期不可换绑**：开启 `SCS_NATIVE_REVIEW=1` 时，`work_attempt_prepare` / `work_attempt_prepare_many` / `work_attempt_update` 强制同一个 `host_agent_id` 在全局所有工作包中同时最多只能有一个非 `ENDED` 的活动 attempt，冲突返回 `HOST_AGENT_ACTIVE`；活动 attempt 一旦绑定 `host_agent_id`，运行期禁止换绑为其他 Agent ID（原生 review attempt 返回 `REVIEW_AGENT_MISMATCH`，其余原生 attempt 返回 `HOST_AGENT_MISMATCH`）。
 - `REVIEW_READY`/`COMPLETED`/`ABANDONED`/`new_revision`/`handoff_export` 前必须有静止屏障；有活动 attempt 时 `work_package_update` 不接受直接子任务结果。结果 PASS/FAIL/BLOCKED/NOT_RUN/SUBSTITUTED；PASS 是子任务证据报告，不是最终接受。new_revision=true 单独调用，清空结果并分配新证据目录，不删除旧文件；`review_required` 沿用。
 
 ### review 子任务与证据
@@ -121,11 +122,11 @@ Skill 顺序：`mode` → `verification`（仅 standard/long）→ `codex_gate`�
 - 原始最终消息必须存在、sha256 匹配、UTF-8，且恰好一行 `结论: ACCEPT` 或 `结论: REJECT`（允许 `**...**` 和中文冒号），与 verdict 一致。不得拼接、补写或只查子串；review 忽略 `required_content`。
 - REJECT 合法且以 FAIL 落账，整改后用新 attempt。角色不可用、超时、缺实际 ID 或输出残缺时不提交伪 manifest、不标 PASS。只有原生 v2 证据用于本流程。
 
-`review_subject` 覆盖修订定义（goal/allowed_files/acceptance/非 review 子任务，按 id 排序）、非 review 子任务的 status+evidence(path,sha256)、包 allowed_files 的有界快照：regular 文件 path→sha256；范围内每个符号链接记录相对路径→`readlink` 目标的原始字节的十六进制（有链接时才出现 `links` 字段），不跟随、不读取目标内容；目标按原始字节无损编码，不经过带替换的文本解码，任何字节级改向（含非 UTF-8 目标）都会改变 subject。payload 顶层含显式 `subject_version`（当前 `2`），参与摘要；升级后旧 ACCEPT 因缺少版本字段而一律 `REVIEW_STALE`。路径名称（文件名、链接名、目录名）按 JSON 转义无损编码：非 UTF-8 名称经 surrogateescape 得到的字符以 `\uXXXX` 写出，canonical JSON 为纯 ASCII，不再抛 `UnicodeEncodeError`；转义可逆且单射，不使用 `surrogatepass` 生成非法 UTF-8。scope 路径的每一级部件（祖先和末级）不得是符号链接，任一级为符号链接返回 `REVIEW_SUBJECT_INCOMPLETE`。新增、删除或改向链接都会改变 subject；排除树内的链接跳过、不记录；fifo/socket/设备等非 regular/dir/symlink 的特殊文件返回 `REVIEW_SUBJECT_INCOMPLETE`。排除 `.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 和 `<docs_root>/agent/evidence`；上限 500 条目/100 MB（链接也计入条目上限），超限 `REVIEW_SUBJECT_TOO_LARGE`；读取失败/不可读 `REVIEW_SUBJECT_INCOMPLETE`。快照后文件或链接变化会在下一次重算表现为 `REVIEW_STALE`。
+`review_subject` 覆盖修订定义（goal/allowed_files/acceptance/非 review 子任务，按 id 排序）、非 review 子任务的 status+evidence(path,sha256)、包 allowed_files 的有界快照：regular 文件 path→sha256；范围内每个符号链接记录相对路径→`readlink` 目标的原始字节的十六进制（有链接时才出现 `links` 字段），不跟随、不读取目标内容；目标按原始字节无损编码，不经过带替换的文本解码，任何字节级改向（含非 UTF-8 目标）都会改变 subject。payload 顶层含显式 `subject_version`（当前 `2`），参与摘要；升级后旧 ACCEPT 因缺少版本字段而一律 `REVIEW_STALE`。路径名称（文件名、链接名、目录名）按 JSON 转义无损编码：非 UTF-8 名称经 surrogateescape 得到的字符以 `\uXXXX` 写出，canonical JSON 为纯 ASCII，不再抛 `UnicodeEncodeError`；转义可逆且单射，不使用 `surrogatepass` 生成非法 UTF-8。scope 路径的每一级部件（祖先和末级）不得是符号链接，任一级为符号链接返回 `REVIEW_SUBJECT_INCOMPLETE`。新增、删除或改向链接都会改变 subject；排除树内的链接跳过、不记录；fifo/socket/设备等非 regular/dir/symlink 的特殊文件返回 `REVIEW_SUBJECT_INCOMPLETE`。排除 `.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 和 `<docs_root>/agent/evidence`、`<docs_root>/agent/acceptance`、`<docs_root>/agent/view-archives`；上限 500 条目/100 MB（链接也计入条目上限），超限 `REVIEW_SUBJECT_TOO_LARGE`；读取失败/不可读 `REVIEW_SUBJECT_INCOMPLETE`。快照后文件或链接变化会在下一次重算表现为 `REVIEW_STALE`。
 
 ### 证据与资源
 
-证据路径 `<docs-root>/agent/evidence/WP-.../R1/T1/<attempt>/result.json`。`evidence_verify(session_id,package_id,revision,subtask_id,path,required_content=[])` 返回 VERIFIED/INVALID/INSUFFICIENT。UTF-8、非空、普通文件、最大 2 MB；测试证据 JSON 必须有非空 command、整数 exit_code=0、正整数 passed；review 证据按上述 manifest 校验。独立 `evidence_verify` 不传 subject，只校验 manifest 结构/原始消息，不判定 subject 是否当前；最终 fresh 判定以 review attempt 提交时的 `REVIEW_STALE` 为准。不能证明命令真实执行；主对话核原始日志和环境。PASS 更新引用 `{path,sha256,required_content?}`，更新时再次验证，内容变动则拒绝。未测写 NOT_RUN；不把测试方法当通过。
+证据路径 `<docs-root>/agent/evidence/WP-.../R1/T1/<attempt>/result.json`。`evidence_verify(session_id,package_id,revision,subtask_id,path,required_content=[])` 返回 VERIFIED/INVALID/INSUFFICIENT。UTF-8、非空、普通文件、最大 2 MB；测试证据 JSON 必须有非空 command、整数 exit_code=0、正整数 passed；review 证据按上述 manifest 校验。在原生审阅模式下（或匹配到的 review attempt 锁定了 `review_route`），独立 `evidence_verify` 也会从证据路径提取 `attempt_id`，核验该 attempt 对应的 `review_subject`、`review_route` 和已登记的 `host_agent_id`（路径在 review 证据前缀下但缺少匹配 attempt 时返回 `INVALID` / `REVIEW_ATTEMPT_REQUIRED`）；它校验的是该 attempt 准备时冻结的快照 `review_subject`，最终 fresh 判定仍以 review attempt 提交及 `REVIEW_READY`/`COMPLETED`/`handoff_export` 重算时的 `REVIEW_STALE` 为准。不能证明命令真实执行；主对话核原始日志和环境。PASS 更新引用 `{path,sha256,required_content?}`，更新时再次验证，内容变动则拒绝。未测写 NOT_RUN；不把测试方法当通过。
 
 `resource_acquire(session_id,resource="file:src/parser.py",ttl_seconds=120)`；资源类型 file/device/serial/programmer。3.0 该工具仍登记写租约；不提供共享读租约。续租携带 lease_token，释放也须 token；过期新 token 防止旧持有人释放新租约。同资源竞争返回 CONFLICT。锁为建议性，不阻止外部进程；目录范围锁不自动锁子文件，应采用同一具体文件/设备键，调用者统一资源命名。
 
@@ -167,7 +168,7 @@ operation_gate_check(
 )
 ```
 
-返回 `status=MISSING|APPROVED|REJECTED|UNAVAILABLE_OVERRIDE|STALE`，以及 `approved`、`reasons`、`expected_digest`/`computed_digest`（STALE 时）和记录摘要。只读、不写事件；`APPROVED` 仍带 `user_confirmation_still_required=true`，不是执行授权。`check` 不重读报告文件，报告以登记时 sha256 固化。
+返回 `status=MISSING|APPROVED|REJECTED|UNAVAILABLE_OVERRIDE|STALE`，以及 `approved`、`reasons`、`expected_digest`/`computed_digest`（STALE 时）和记录摘要。只读、不写事件；`APPROVED` 仍带 `user_confirmation_still_required=true`，不是执行授权。`check` 不重读报告文件，报告以登记时 sha256 固化。在原生审阅模式下，重开 `mode`（使模式待确认）、从 `long` 切出到非 `long` 模式，或重开/变更 `review_route` 都会使当前会话的有效复核路由失效或不匹配，既有破坏性操作批准在 `operation_gate_check` 中立即变为 `STALE`（`reasons=["REVIEW_ROUTE_MISMATCH"]`），必须重新确认长任务与复核路由后重新预审与登记。
 
 示例：
 
@@ -207,7 +208,13 @@ MCP 断开：纯 Skill 用原生/文本逐题确认适用项，保持相同模�
 | `REVIEW_REQUIRED` | `review_required=true` 但没有当前 PASS ACCEPT review（含未声明 review 子任务） |
 | `REVIEW_STALE` | review subject 已变化；manifest subject 不匹配；COMPLETED/export 时重算不一致 |
 | `REVIEW_WINDOW_ACTIVE` | review attempt 与其他活动 attempt 同时存在，或批量中 review 未单独运行 |
-| `REVIEW_ATTEMPT_REQUIRED` | 用 `work_package_update(results=...)` 直接写 review 子任务 |
+| `REVIEW_ATTEMPT_REQUIRED` | 用 `work_package_update(results=...)` 直接写 review 子任务，或原生审阅模式下独立 `evidence_verify` 的 review 证据路径缺少匹配 attempt |
+| `REVIEW_ROUTE_REQUIRED` | 原生审阅下未确认 `review_route`（`gpt`/`inherit`），或当前模式非 `long` 无法确认复核路由 |
+| `NATIVE_REVIEW_DISABLED` | 未启用 `SCS_NATIVE_REVIEW=1`，却访问 `review_route`、原生 review 工作包或已用原生回执的操作闸门 |
+| `REVIEW_AGENT_MISMATCH` | 原生 review manifest/回执的 `agent_type` 与确认路由不符、`agent_id` 与已登记 `host_agent_id` 不一致，或尝试替换原生 review attempt 已记录的 `host_agent_id` |
+| `REVIEW_FINAL_MESSAGE_NOT_TEXT` | 复核原始最终消息不是合法 UTF-8 文本 |
+| `HOST_AGENT_ACTIVE` | 原生审阅下同一 `host_agent_id` 在全局已有其他非 `ENDED` 的活动 attempt，禁止并发复用 |
+| `HOST_AGENT_MISMATCH` | 原生审阅下尝试将已绑定 `host_agent_id` 的活动非 review attempt 换绑为另一个 Agent ID |
 | `REVIEW_SUBJECT_TOO_LARGE` | review_subject 文件快照超过 500 文件/100 MB |
 | `REVIEW_SUBJECT_INCOMPLETE` | 快照读取中文件变化/不可读 |
 | `REVIEW_INVALID` / `REVIEW_VERDICT_INVALID` | review manifest 数量/结论与结果状态不符 |

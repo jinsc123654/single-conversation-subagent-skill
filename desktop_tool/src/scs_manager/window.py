@@ -254,7 +254,7 @@ class TaskDialog(QDialog):
 class TaskCloseDialog(QDialog):
     """Complete or abandon a board task."""
 
-    def __init__(self, task, parent=None):
+    def __init__(self, task, parent=None, default_state: str = "done"):
         super().__init__(parent)
         self.setWindowTitle("关闭待办")
         self.setMinimumWidth(480)
@@ -264,7 +264,10 @@ class TaskCloseDialog(QDialog):
         layout.addWidget(title)
         self.completed = QRadioButton("完成：摘要写入事件时间线", self)
         self.abandoned = QRadioButton("放弃：必须写原因", self)
-        self.abandoned.setChecked(True)
+        if default_state == "abandoned":
+            self.abandoned.setChecked(True)
+        else:
+            self.completed.setChecked(True)
         layout.addWidget(self.completed)
         layout.addWidget(self.abandoned)
         self.text = QPlainTextEdit(self)
@@ -1412,7 +1415,7 @@ class MainWindow(QMainWindow):
                 if column == 0:
                     item.setData(Qt.UserRole, task.get("id"))
                 if task.get("state") in BOARD_TERMINAL:
-                    item.setForeground(QColor("#888888"))
+                    item.setForeground(QColor(theme.tone("muted")))
                 self.tasks.setItem(row, column, item)
         self.task_hint.setVisible(not visible)
         self.tasks.resizeRowsToContents()
@@ -1468,7 +1471,7 @@ class MainWindow(QMainWindow):
     def new_task(self):
         if not self.current_root or self.busy:
             return
-        dialog = TaskDialog(self._sessions_for_task, self)
+        dialog = TaskDialog(self._sessions_for_task, self, project_root=self.current_root)
         if dialog.exec_() != QDialog.Accepted:
             return
         values = dialog.values()
@@ -1487,11 +1490,11 @@ class MainWindow(QMainWindow):
         payload = {"task_id": task["id"], "session_id": task.get("session_id") or "", "owner": "gui"}
         self.start_job("board-start", payload=payload)
 
-    def complete_task(self):
+    def _close_task(self, default_state: str):
         task = self.selected_task()
         if task is None or task.get("state") in BOARD_TERMINAL or self.busy:
             return
-        dialog = TaskCloseDialog(task, self)
+        dialog = TaskCloseDialog(task, self, default_state=default_state)
         if dialog.exec_() != QDialog.Accepted:
             return
         mode, text = dialog.values()
@@ -1499,17 +1502,11 @@ class MainWindow(QMainWindow):
         self.start_job("board-complete" if mode == "done" else "board-abandon",
                        payload={"task_id": task["id"], "actor": "gui", key: text})
 
+    def complete_task(self):
+        self._close_task("done")
+
     def abandon_task(self):
-        task = self.selected_task()
-        if task is None or task.get("state") in BOARD_TERMINAL or self.busy:
-            return
-        dialog = TaskCloseDialog(task, self)
-        dialog.abandoned.setChecked(True)
-        if dialog.exec_() != QDialog.Accepted:
-            return
-        _mode, reason = dialog.values()
-        self.start_job("board-abandon",
-                       payload={"task_id": task["id"], "actor": "gui", "reason": reason})
+        self._close_task("abandoned")
 
     def copy_task_prompt(self):
         task = self.selected_task()
@@ -2055,12 +2052,22 @@ class MainWindow(QMainWindow):
                 # New long sessions carry codex_gate; legacy rows without one
                 # stay visible through their old codex_review answer.
                 gate = s.get("codex_gate")
+                route = s.get("review_route")
                 if not s["verification"] or (gate is None and s["codex_review"] is None):
                     continue
-                suffix = f" · gate={gate}" if gate else ""
-                label = f"{s['client']} · long{suffix} · {s['id']}"
+                parts = [s["client"], "long"]
+                if gate:
+                    parts.append(f"gate={gate}")
+                if gate in ("packages", "closure") and route:
+                    parts.append(f"route={route}")
+                parts.append(s["id"])
+                label = " · ".join(parts)
             elif s["mode"] == "standard":
-                if not s["verification"] or (s["review_registration"] == "registered" and s["codex_review"] is None):
+                if not s["verification"] or (
+                    not s.get("native_review")
+                    and s["review_registration"] == "registered"
+                    and s["codex_review"] is None
+                ):
                     continue
                 label = f"{s['client']} · standard · {s['id']}"
             else:

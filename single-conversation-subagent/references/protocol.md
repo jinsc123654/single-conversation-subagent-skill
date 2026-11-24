@@ -78,7 +78,7 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 只自动续用长任务的 `analyze` / `implement` / `test`。一个 Agent ID 是一条可多轮使用的执行线，不是一个 attempt。主对话在对应 attempt 的证据与协作记录中保存原 ID、同一主会话/项目根、角色和有效 provider/model、工作线及读写/命令授权、最近完成轮次、证据路径，不存全量提示。**同角色、同工作线、基线连续且权限兼容**才复用；预期内的本线改动可继续，发现外部基线变化、角色/模型/工具变更或授权范围变化则不续用旧会话。短模式不自动启用。独立审阅（含包级、收尾、预审）每次新开，方案顾问仍至多一次。
 
 1. 仅从已收到真实终态、已登记 `ENDED`、无进程/设备遗留的执行线中挑选；`running` / `UNKNOWN` 继续等，不发送下一轮、不抢租约。若任务已做完且证据仍有效，直接复用结果，不额外发一轮。
-2. 核实占用后决定。优先用宿主可验证的上下文数据；Linux ZCode 4 可运行 `python3 -I <Skill目录>/scripts/zcode-context.py --parent <ZCode主会话ID> --agent <原Agent ID> --model <实际provider/model> --window <已核验有效窗口> [--reserve <下轮预算>]`。只使用精确模型和路由的有效窗口（有更低的网关/部署上限则用更低值），不得借用同名模型、其他 provider 的配置或猜数。探针只读验证该子会话归属，输出单条 JSON；只用最近一条请求的输入和输出，缓存命中仍计入占用，不累加每次请求，不用通知的累计 token。默认预留 4096 token，预计下一轮工具输入/结果较大时提高预留。预计超过 70% 则先有界交接再换新；恰好 70% 仍可复用。占用是估算，不保证单轮不会溢出。`UNKNOWN`、不可核实压缩、已确认上下文溢出、或宿主不能安全续用时，明确原因并用摘要开新，不把无法读取当成 0%。
+2. 核实占用后决定。优先用宿主可验证的上下文数据；Linux ZCode 4 可运行 `python3 -I <Skill目录>/scripts/zcode-context.py --parent <ZCode主会话ID> --agent <原Agent ID> --model <实际provider/model> [--window <已核验有效窗口>] [--reserve <下轮预算>] [--db <SQLite路径>]`。数据库路径默认以只读模式（`?mode=ro`）读取 `~/.zcode/cli/db/db.sqlite`，支持通过 `--db PATH` 或环境变量 `SCS_ZCODE_DB` 覆盖（优先级 `--db` > `SCS_ZCODE_DB` > 默认路径）。实操核实边界：`--parent` 仅可使用宿主当前对话真实可观测的父会话 `sess_...` ID，不得从目录、数据库最新行或其他会话猜测；`--window` 仅可使用该精确 `provider/model` 在当前 ZCode 配置或运行时明确确认的有效上下文窗口（有更低的网关/部署上限则取更低值），不得借用同名模型、其他 provider 的配置或猜数——**无法确认有效窗口时省略 `--window`**，让脚本安全返回 `UNKNOWN / CONTEXT_WINDOW_UNVERIFIED` 并回退为换新会话。探针只读验证该子会话归属，输出单条 JSON；只用最近一条 `subagent` 请求的输入和输出，缓存命中仍计入占用，不累加每次请求，不用通知的累计 token；除检查 `session.time_compacting` 外，还会检测该子会话在 `model_usage` 中的 `query_source='compact'` 历史压缩行（返回 `UNKNOWN / COMPACTION_STATE_PRESENT`）及 `cache_creation_input_tokens > 0` 或异常 token 字段等口径不确定项（返回 `UNKNOWN / USAGE_NOT_USABLE`），一律安全返回 `UNKNOWN`。默认预留 4096 token，预计下一轮工具输入/结果较大时提高预留。预计超过 70% 则先有界交接再换新；恰好 70% 仍可复用。占用是估算，不保证单轮不会溢出。`UNKNOWN`、不可核实压缩、已确认上下文溢出、或宿主不能安全续用时，明确原因并用摘要开新，不把无法读取当成 0%。
 3. 每轮先 `work_attempt_prepare`；续用时传原 `host_agent_id`，成功后用 `SendMessage(to=<原Agent ID>)` 发给已结束的 Agent。给当前 `WP / R / subtask / attempt_id`、本轮读写/命令授权、变化与验收，不重复全量历史，不沿用旧授权。新会话只带已证实结论、工作树状态、证据索引和剩余问题。宿主明确未受理时先结束这轮未执行 attempt，再决定是否换新；不确定是否受理时按 `UNKNOWN` 保留资源，不盲发或改用 `Agent`。
 4. 每轮独立核对最新宿主回执，使用本轮工具调用/通知关联和回传的 `attempt_id`；旧通知不得结束新 attempt。仅原 Agent ID 不能区分两轮；补查如果只看见上轮结果也不能结束本轮。登记时单独保存本轮证据，保持 `operation_id` 幂等。恢复主对话时先核对执行线和活动 attempt；无法可靠关联回执时保持 `UNKNOWN`。
 
@@ -125,11 +125,11 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 
 ### 批量 update
 
-`work_attempt_update_many(session_id, updates=[{attempt_id,result}], operation_id)`
+`work_attempt_update_many(session_id, updates=[{attempt_id,result}], operation_id, expected_version?=None)`
 
 - 只接受 ENDED 结果，不传生命周期 state；同包且属于当前修订，跨包/跨修订分别返回 `BATCH_PACKAGE_MISMATCH` / `BATCH_REVISION_MISMATCH`。
 - 重复 `attempt_id` 或格式错误返回 `INPUT_INVALID`；全有或全无，任一失败整批回滚。
-- 一次成功只把工作包 `version` 加一；`operation_id` 必填，重放先于状态/版本检查并返回原回执，不同载荷返回 `OPERATION_CONFLICT`。
+- 一次成功只把工作包 `version` 加一；`operation_id` 必填，重放先于状态/版本检查并返回原回执，不同载荷返回 `OPERATION_CONFLICT`。可选 `expected_version`（非 bool 整数）启用乐观锁，在重放与 `PACKAGE_CLOSED` 检查后校验版本，不匹配返回 `VERSION_CONFLICT`。
 - review 必须单独一项；不能与其他结果混批，否则 `REVIEW_WINDOW_ACTIVE`。
 - 批量不改变工作包状态，不替代 `work_package_update` 的状态转换和静止屏障。
 
@@ -224,11 +224,11 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 - scope 路径的每一级部件（祖先和末级）都不得是符号链接；任一级为符号链接返回 `REVIEW_SUBJECT_INCOMPLETE`，防止读取项目根之外的内容。
 - 进入 scope 后遇到符号链接不跟随、不读取目标，只记录相对路径和 `readlink` 目标；目标按原始字节无损编码（十六进制）进入 subject，不经过任何带替换的文本解码，因此非 UTF-8 目标与字面 ASCII 拼写不会碰撞；任何字节级改向（新增、删除或改向链接，含非 UTF-8 目标）都会改变 subject，旧 ACCEPT 不能继续放行。
 - 路径名称（文件名、链接名、目录名）在 canonical JSON 中按 JSON 转义无损编码：非 UTF-8 名称经 surrogateescape 得到的字符以 `\uXXXX` 转义写出，canonical JSON 为纯 ASCII，编码不再抛 `UnicodeEncodeError`；转义可逆且单射，实际字符与字面 `\uXXXX` 文本不会混淆，也不使用 `surrogatepass` 产出非法 UTF-8。
-- 排除树（`.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 和 `<docs_root>/agent/evidence`）内的链接直接跳过、不记录。
+- 排除树（`.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 和 `<docs_root>/agent/evidence`、`<docs_root>/agent/acceptance`、`<docs_root>/agent/view-archives`）内的链接直接跳过、不记录。
 - fifo/socket/设备等非 regular/dir/symlink 的特殊文件返回 `REVIEW_SUBJECT_INCOMPLETE`。
 - `allowed_files` 中的 `./` 和重复分隔符按路径部件归一化后遍历、去重；绝对路径、`..` 和反斜杠仍被拒绝。
 
-排除 `.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 和 `<docs_root>/agent/evidence`；上限 500 条目/100 MB（链接也计入条目上限），超限 `REVIEW_SUBJECT_TOO_LARGE`；读取失败/不可读 `REVIEW_SUBJECT_INCOMPLETE`。摘要使用稳定排序，证据目录变化不影响结果；其他在 `allowed_files` 内的文件或链接变化会改变 subject，并在下一次重算表现为 `REVIEW_STALE`。
+排除 `.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 和 `<docs_root>/agent/evidence`、`<docs_root>/agent/acceptance`、`<docs_root>/agent/view-archives`；上限 500 条目/100 MB（链接也计入条目上限），超限 `REVIEW_SUBJECT_TOO_LARGE`；读取失败/不可读 `REVIEW_SUBJECT_INCOMPLETE`。摘要使用稳定排序，证据目录与受管视图输出变化不影响结果；其他在 `allowed_files` 内的文件或链接变化会改变 subject，并在下一次重算表现为 `REVIEW_STALE`。
 
 ## 破坏性操作闸门
 

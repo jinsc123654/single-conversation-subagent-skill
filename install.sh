@@ -10,7 +10,13 @@ WITH_RULE=0
 UNINSTALL=0
 CHECK=0
 INSTRUCTIONS_FILE=""
-PYTHON_BIN="${SCS_PYTHON:-python3}"
+PYTHON_EXPLICIT=0
+if [ -n "${SCS_PYTHON:-}" ]; then
+  PYTHON_BIN="$SCS_PYTHON"
+  PYTHON_EXPLICIT=1
+else
+  PYTHON_BIN="python3"
+fi
 PROJECT_ROOT=""
 ALLOW_ROOTS=()
 HOST=zcode
@@ -25,6 +31,34 @@ ZCODE_AGENT_OPTIONS=0
 ZCODE_PROFILE_NAMES=(实施工程师 继承审阅员)
 BEGIN='<!-- single-conversation-subagent begin -->'
 END='<!-- single-conversation-subagent end -->'
+STAGE_TMP=""
+RULE_TMP=""
+RUNTIME_STAGE_DIR=""
+BOOTSTRAP_TMP=""
+
+cleanup_temps() {
+  local p published_python=""
+  for p in "${STAGE_TMP:-}" "${RULE_TMP:-}"; do
+    [ -n "$p" ] && rm -f -- "$p" || true
+  done
+  [ -n "$RUNTIME_STAGE_DIR" ] && rm -rf -- "$RUNTIME_STAGE_DIR" || true
+  if [ -n "$BOOTSTRAP_TMP" ]; then
+    # A signal can arrive after mv publishes python-path but before the next shell command.
+    if [ -f "$RUNTIME/python-path" ]; then
+      IFS= read -r published_python < "$RUNTIME/python-path" || true
+    fi
+    if [ "$published_python" != "$BOOTSTRAP_TMP/bin/python" ]; then
+      rm -rf -- "$BOOTSTRAP_TMP" || true
+    fi
+  fi
+  STAGE_TMP=""
+  RULE_TMP=""
+  RUNTIME_STAGE_DIR=""
+  BOOTSTRAP_TMP=""
+}
+trap cleanup_temps EXIT
+trap 'cleanup_temps; exit 130' INT
+trap 'cleanup_temps; exit 143' TERM
 
 usage() {
   cat <<'HELP'
@@ -72,7 +106,7 @@ while [ "$#" -gt 0 ]; do
             *) echo "Unknown skill: $2" >&2; exit 2 ;;
           esac ;;
         --instructions-file) INSTRUCTIONS_FILE="$2"; WITH_RULE=1 ;;
-        --python) PYTHON_BIN="$2" ;;
+        --python) PYTHON_BIN="$2"; PYTHON_EXPLICIT=1 ;;
         --project-root) PROJECT_ROOT="$2" ;;
         --allow-root) ALLOW_ROOTS+=("$2") ;;
         --host) HOST="$2" ;;
@@ -102,8 +136,8 @@ fi
 validate_zcode_model_options() {
   local family="$1" model="$2" thought="$3"
   if [ -n "$model" ]; then
-    if [[ ! "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$ || "$model" =~ ^[Ii][Nn][Hh][Ee][Rr][Ii][Tt]$ ]]; then
-      printf '%s\n' "--zcode-$family-model must be an explicit model ID, not inherit." >&2; exit 2
+    if [[ ! "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._:+@-]*/[A-Za-z0-9][A-Za-z0-9._:+@-]*$ || "$model" =~ ^[Ii][Nn][Hh][Ee][Rr][Ii][Tt]$ ]]; then
+      printf '%s\n' "--zcode-$family-model must be an explicit provider/model ID, not inherit." >&2; exit 2
     fi
   elif [ -n "$thought" ]; then
     printf '%s\n' "--zcode-$family-thought-level requires --zcode-$family-model." >&2; exit 2
@@ -135,6 +169,7 @@ case "$QUESTION_CHANNEL" in auto|native|mcp|text) ;; *) echo 'Question channel m
 case "$AGENT_HOME" in /*) ;; *) AGENT_HOME="$PWD/$AGENT_HOME" ;; esac
 DEST_DIR="$AGENT_HOME/skills/$SKILL_NAME"
 RUNTIME="$AGENT_HOME/mcp/$SKILL_NAME"
+BACKUP_DIR="$AGENT_HOME/.scs-backups"
 if { [ "$WITH_RULE" -eq 1 ] || [ "$UNINSTALL" -eq 1 ]; } && [ -z "$INSTRUCTIONS_FILE" ]; then
   INSTRUCTIONS_FILE="$AGENT_HOME/AGENTS.md"
 fi
@@ -155,6 +190,23 @@ backup() {
     echo "Backed up: $1"
   fi
 }
+backup_managed() {
+  local src="$1" label="${2:-$(basename -- "$1")}" dst ts n
+  [ -e "$src" ] || return 0
+  safe_path "$BACKUP_DIR"
+  mkdir -p -- "$BACKUP_DIR"
+  safe_path "$BACKUP_DIR"
+  ts="$(date +%Y%m%d-%H%M%S)"
+  dst="$BACKUP_DIR/${label}.bak.${ts}.$$"
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    n=1
+    while [ -e "${dst}.${n}" ] || [ -L "${dst}.${n}" ]; do n=$((n + 1)); done
+    dst="${dst}.${n}"
+  fi
+  safe_path "$dst"
+  cp -pR -- "$src" "$dst"
+  echo "Backed up: $src -> $dst"
+}
 validate_block() {
   local b e bl el
   [ -f "$INSTRUCTIONS_FILE" ] || return 0
@@ -169,7 +221,16 @@ validate_block() {
 # All destination checks precede mutations, including skill-only installation.
 safe_path "$DEST_DIR"
 safe_path "$RUNTIME"
-for child in src venv launcher.py python-path client-examples.json codex-example.toml host-profile.json zcode-example.json; do safe_path "$RUNTIME/$child"; done
+safe_path "$BACKUP_DIR"
+for child in src launcher.py python-path client-examples.json codex-example.toml host-profile.json zcode-example.json; do
+  safe_path "$RUNTIME/$child"
+done
+if [ -d "$RUNTIME" ]; then
+  for venv_dir in "$RUNTIME"/venv.*; do
+    [ -e "$venv_dir" ] || [ -L "$venv_dir" ] || continue
+    safe_path "$venv_dir"
+  done
+fi
 [ "$DEST_DIR" != "$SCRIPT_DIR/$SKILL_NAME" ] || { echo "Destination is the source; refusing self-replacement" >&2; exit 1; }
 if [ -n "$INSTRUCTIONS_FILE" ]; then safe_path "$INSTRUCTIONS_FILE"; validate_block; fi
 
@@ -197,7 +258,7 @@ if [ "$WITH_ZCODE_AGENTS" -eq 1 ]; then
   safe_path "$ZCODE_AGENTS_DIR"
   ZCODE_AGENTS_DIR="$(normalize_install_path "$ZCODE_AGENTS_DIR")"
   case "$ZCODE_AGENTS_DIR/" in
-    "$(normalize_install_path "$DEST_DIR")/"*|"$(normalize_install_path "$RUNTIME")/"*)
+    "$(normalize_install_path "$DEST_DIR")/"*|"$(normalize_install_path "$RUNTIME")/"*|"$(normalize_install_path "$BACKUP_DIR")/"*)
       echo 'Refusing ZCode profiles directory inside the managed Skill or runtime.' >&2; exit 1 ;;
   esac
   if [ "$ZCODE_AGENTS_DIR" = / ] || [ "$ZCODE_AGENTS_DIR" -ef "$SCRIPT_DIR/zcode-agents" ] ||
@@ -224,17 +285,21 @@ install_zcode_agents() {
       方案顾问|固定审阅员) model="$ZCODE_GPT_MODEL"; thought="$ZCODE_GPT_THOUGHT_LEVEL" ;;
       查询侦察员|测试验证员) model="$ZCODE_DEEPSEEK_MODEL"; thought="$ZCODE_DEEPSEEK_THOUGHT_LEVEL" ;;
     esac
-    stage="$(mktemp "$ZCODE_AGENTS_DIR/.scs-profile.XXXXXX")"
+    STAGE_TMP="$(mktemp "$ZCODE_AGENTS_DIR/.scs-profile.XXXXXX")"
+    stage="$STAGE_TMP"
     if [[ "$template" == *.md.in ]]; then
       if ! awk -v model="$model" -v thought="$thought" '
         $0 == "@SCS_MODEL@" { printf "model: \"%s\"\n", model; next }
         $0 == "@SCS_THOUGHT_LEVEL@" { if (thought != "") printf "thoughtLevel: \"%s\"\n", thought; next }
         { print }
       ' "$template" > "$stage"; then
-        rm -f -- "$stage"; return 1
+        rm -f -- "$stage"; STAGE_TMP=""; return 1
       fi
     elif ! cp -- "$template" "$stage"; then
-      rm -f -- "$stage"; return 1
+      rm -f -- "$stage"; STAGE_TMP=""; return 1
+    fi
+    if ! chmod =rw,go-w -- "$stage"; then
+      rm -f -- "$stage"; STAGE_TMP=""; return 1
     fi
     # Publish atomically without replacing or following the destination leaf.
     if ln -T -- "$stage" "$destination" 2>/dev/null; then
@@ -242,11 +307,12 @@ install_zcode_agents() {
     elif [ -e "$destination" ] || [ -L "$destination" ]; then
       printf 'Preserved existing ZCode profile path: %s\n' "$destination"
     else
-      rm -f -- "$stage"
+      rm -f -- "$stage"; STAGE_TMP=""
       printf 'Cannot create ZCode profile path: %s (requires hard links and ln -T)\n' "$destination" >&2
       return 1
     fi
     rm -f -- "$stage"
+    STAGE_TMP=""
   done
   if [ -z "$ZCODE_GPT_MODEL" ]; then
     echo 'Not installing new 方案顾问 or 固定审阅员 profiles: use --zcode-gpt-model with an explicit ZCode model ID.'
@@ -257,14 +323,34 @@ install_zcode_agents() {
 }
 
 sdk_ready() {
-  "$PYTHON_BIN" -c 'import sys,importlib.metadata; assert sys.version_info >= (3,11); assert importlib.metadata.version("mcp") == "2.3.0"; from mcp.server import MCPServer; from mcp.server.mcpserver import Resolve,Elicit' >/dev/null 2>&1
+  local py="${1:-$PYTHON_BIN}"
+  [ -n "$py" ] && command -v -- "$py" >/dev/null 2>&1 || return 1
+  "$py" -c '
+import importlib.metadata, re, sys
+if sys.version_info < (3, 11) or importlib.metadata.version("mcp") != "2.3.0":
+    sys.exit(1)
+v = importlib.metadata.version("pydantic")
+m = re.fullmatch(r"(?:0!)?(\d+(?:\.\d+)*)(?:(a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?(?:\+[A-Za-z0-9.]+)?", v)
+if m is None:
+    sys.exit(1)
+rel = tuple(int(p) for p in m.group(1).split("."))
+major, minor, rest = rel[0], (rel[1] if len(rel) > 1 else 0), rel[2:]
+is_pre = bool(m.group(2)) or (bool(m.group(4)) and not m.group(3))
+if major != 2 or minor < 12 or (minor == 12 and not any(rest) and is_pre):
+    sys.exit(1)
+import pydantic
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Resolve, Elicit
+' >/dev/null 2>&1
 }
 if [ "$CHECK" -eq 1 ]; then
   [ -f "$DEST_DIR/SKILL.md" ] || { echo 'SKILL_NOT_LOADED: installation missing; registry loading still needs host evidence.' >&2; exit 1; }
   echo 'Skill files exist. Host registry/loading: NOT_TESTED.'
   if [ "$MODE" = hybrid ]; then
     [ -f "$RUNTIME/launcher.py" ] || { echo 'MCP runtime missing' >&2; exit 1; }
-    if [ -f "$RUNTIME/python-path" ]; then PYTHON_BIN="$(cat "$RUNTIME/python-path")"; fi
+    if [ -f "$RUNTIME/python-path" ] && [ ! -L "$RUNTIME/python-path" ]; then
+      IFS= read -r PYTHON_BIN < "$RUNTIME/python-path" || true
+    fi
     sdk_ready || { echo 'MCP SDK/Python check failed; pure Skill remains usable.' >&2; exit 1; }
     "$PYTHON_BIN" "$RUNTIME/launcher.py" --version
     echo 'MCP imports pass. Client connection/UI: NOT_TESTED.'
@@ -277,7 +363,8 @@ update_rule() {
   if [ "$UNINSTALL" -eq 1 ] && [ ! -f "$INSTRUCTIONS_FILE" ]; then return 0; fi
   mkdir -p -- "$(dirname -- "$INSTRUCTIONS_FILE")"
   local tmp
-  tmp="$(mktemp "${INSTRUCTIONS_FILE}.tmp.XXXXXX")"
+  RULE_TMP="$(mktemp "${INSTRUCTIONS_FILE}.tmp.XXXXXX")"
+  tmp="$RULE_TMP"
   if [ -f "$INSTRUCTIONS_FILE" ] && grep -qxF "$BEGIN" "$INSTRUCTIONS_FILE"; then
     awk -v begin="$BEGIN" -v end="$END" -v uninstall="$UNINSTALL" -v snippet="$SCRIPT_DIR/AGENTS.snippet.md" '
       $0==begin {if (!uninstall) {while ((getline s < snippet)>0) print s; close(snippet)} skip=1; next}
@@ -287,17 +374,23 @@ update_rule() {
     if [ -f "$INSTRUCTIONS_FILE" ]; then cat "$INSTRUCTIONS_FILE" > "$tmp"; printf '\n' >> "$tmp"; fi
     cat "$SCRIPT_DIR/AGENTS.snippet.md" >> "$tmp"
   else
-    rm -- "$tmp"; return 0
+    rm -- "$tmp"; RULE_TMP=""; return 0
   fi
-  if [ -f "$INSTRUCTIONS_FILE" ] && cmp -s "$tmp" "$INSTRUCTIONS_FILE"; then rm -- "$tmp"; return 0; fi
+  if [ -f "$INSTRUCTIONS_FILE" ] && cmp -s "$tmp" "$INSTRUCTIONS_FILE"; then rm -- "$tmp"; RULE_TMP=""; return 0; fi
   backup "$INSTRUCTIONS_FILE"
   # Preserve existing permissions; create private permissions on a new file.
   if [ -f "$INSTRUCTIONS_FILE" ]; then cat "$tmp" > "$INSTRUCTIONS_FILE"; rm -- "$tmp"; else mv -- "$tmp" "$INSTRUCTIONS_FILE"; fi
+  RULE_TMP=""
 }
 if [ "$UNINSTALL" -eq 1 ]; then
-  for installed in "$DEST_DIR" "$RUNTIME"; do
-    if [ -d "$installed" ]; then backup "$installed"; rm -r -- "$installed"; fi
-  done
+  if [ -d "$DEST_DIR" ]; then
+    backup_managed "$DEST_DIR" "skill-$SKILL_NAME"
+    rm -r -- "$DEST_DIR"
+  fi
+  if [ -d "$RUNTIME" ]; then
+    backup_managed "$RUNTIME" "runtime-$SKILL_NAME"
+    rm -r -- "$RUNTIME"
+  fi
   update_rule
   echo 'Uninstalled this skill/runtime. Client configurations and project .scs state were preserved.'
   exit 0
@@ -306,7 +399,7 @@ fi
 [ -f "$SCRIPT_DIR/$SKILL_NAME/SKILL.md" ] || { echo 'Skill source missing' >&2; exit 1; }
 mkdir -p -- "$AGENT_HOME/skills"
 if [ ! -d "$DEST_DIR" ] || ! diff -qr "$SCRIPT_DIR/$SKILL_NAME" "$DEST_DIR" >/dev/null 2>&1; then
-  backup "$DEST_DIR"
+  backup_managed "$DEST_DIR" "skill-$SKILL_NAME"
   if [ -d "$DEST_DIR" ]; then rm -r -- "$DEST_DIR"; fi
   cp -R -- "$SCRIPT_DIR/$SKILL_NAME" "$DEST_DIR"
 fi
@@ -315,16 +408,29 @@ echo "Skill installed: $DEST_DIR"
 if [ "$WITH_ZCODE_AGENTS" -eq 1 ]; then install_zcode_agents; fi
 
 if [ "$MODE" = hybrid ]; then
-  if ! command -v "$PYTHON_BIN" >/dev/null 2>&1 || ! "$PYTHON_BIN" -c 'import sys; assert sys.version_info >= (3,11)' >/dev/null 2>&1; then
-    echo 'HYBRID_UNAVAILABLE: Python 3.11+ missing. Skill installation succeeded; use text fallback.' >&2
-    exit 0
+  reused_python=0
+  if [ "$PYTHON_EXPLICIT" -eq 0 ] && [ -f "$RUNTIME/python-path" ] && [ ! -L "$RUNTIME/python-path" ]; then
+    existing_python=""
+    IFS= read -r existing_python < "$RUNTIME/python-path" || true
+    if [ -n "$existing_python" ] && sdk_ready "$existing_python"; then
+      PYTHON_BIN="$existing_python"
+      reused_python=1
+    fi
+  fi
+  if [ "$reused_python" -eq 0 ]; then
+    if ! command -v -- "$PYTHON_BIN" >/dev/null 2>&1 || ! "$PYTHON_BIN" -c 'import sys; sys.exit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
+      echo 'HYBRID_UNAVAILABLE: Python 3.11+ missing. Skill installation succeeded; use text fallback.' >&2
+      exit 0
+    fi
   fi
   mkdir -p -- "$RUNTIME"
-  if ! sdk_ready; then
+  if [ "$reused_python" -eq 0 ] && ! sdk_ready; then
     # Failed bootstrap never damages the installed Skill; old runtime is retained.
-    bootstrap_env="$(mktemp -d "$RUNTIME/venv.XXXXXX")"
-    if ! "$PYTHON_BIN" -m venv "$bootstrap_env" || ! "$bootstrap_env/bin/python" -m pip install 'mcp==2.3.0' 'pydantic>=2.12,<3'; then
-      rm -r -- "$bootstrap_env"
+    BOOTSTRAP_TMP="$(mktemp -d "$RUNTIME/venv.XXXXXX")"
+    bootstrap_env="$BOOTSTRAP_TMP"
+    if ! "$PYTHON_BIN" -m venv "$bootstrap_env" || ! "$bootstrap_env/bin/python" -m pip install 'mcp==2.3.0' 'pydantic>=2.12,<3' || ! sdk_ready "$bootstrap_env/bin/python"; then
+      rm -rf -- "$bootstrap_env"
+      BOOTSTRAP_TMP=""
       echo 'HYBRID_UNAVAILABLE: dependencies failed. Pure Skill and previous runtime remain installed.' >&2
       exit 0
     fi
@@ -332,42 +438,60 @@ if [ "$MODE" = hybrid ]; then
   fi
   PYTHON_BIN="$("$PYTHON_BIN" -c 'import sys; print(sys.executable)')"
   if [ -d "$RUNTIME/src" ] && ! diff -qr -x __pycache__ -x '*.pyc' "$SCRIPT_DIR/mcp_server/src" "$RUNTIME/src" >/dev/null 2>&1; then
-    backup "$RUNTIME/src"; rm -r -- "$RUNTIME/src"
+    backup_managed "$RUNTIME/src" "runtime-src"; rm -r -- "$RUNTIME/src"
   fi
   if [ ! -d "$RUNTIME/src" ]; then
     mkdir -p -- "$RUNTIME/src"
     tar -C "$SCRIPT_DIR/mcp_server/src" --exclude=__pycache__ --exclude='*.pyc' -cf - . | tar -C "$RUNTIME/src" -xf -
   fi
-  # Never change arbitrary client configs. Back up our own generated files too.
+  # Never change arbitrary client configs. Back up changed managed files only.
   runtime_files=(launcher.py python-path client-examples.json codex-example.toml host-profile.json)
   if [ "$HOST" = zcode ]; then runtime_files+=(zcode-example.json); fi
-  for file in "${runtime_files[@]}"; do safe_path "$RUNTIME/$file"; backup "$RUNTIME/$file"; done
-  cat > "$RUNTIME/launcher.py" <<'PY'
+  for file in "${runtime_files[@]}"; do safe_path "$RUNTIME/$file"; done
+  RUNTIME_STAGE_DIR="$(mktemp -d "$RUNTIME/.scs-stage.XXXXXX")"
+  cat > "$RUNTIME_STAGE_DIR/launcher.py" <<'PY'
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 from scs_mcp.__main__ import main
 main()
 PY
-  printf '%s\n' "$PYTHON_BIN" > "$RUNTIME/python-path"
-  "$PYTHON_BIN" - "$RUNTIME" "$PYTHON_BIN" "$PROJECT_ROOT" "$HOST" "$QUESTION_CHANNEL" "${ALLOW_ROOTS[@]}" <<'PY'
+  printf '%s\n' "$PYTHON_BIN" > "$RUNTIME_STAGE_DIR/python-path"
+  "$PYTHON_BIN" - "$RUNTIME" "$RUNTIME_STAGE_DIR" "$PYTHON_BIN" "$PROJECT_ROOT" "$HOST" "$QUESTION_CHANNEL" "${ALLOW_ROOTS[@]}" <<'PY'
 import json, sys
 from pathlib import Path
-runtime, python, root, host, channel, *extra_roots = sys.argv[1:]
+runtime, stage, python, root, host, channel, *extra_roots = sys.argv[1:]
 root = str(Path(root).resolve()) if root else "<ABSOLUTE_PROJECT_ROOT>"
 env = {"SCS_HOST": host, "SCS_QUESTION_CHANNEL": channel}
 args = [str(Path(runtime)/"launcher.py"), "--project-root", root]
 for extra in extra_roots:
     args.extend(["--allow-root", str(Path(extra).resolve())])
 entry = {"command": python, "args": args, "env": env}
-(Path(runtime)/"client-examples.json").write_text(json.dumps({"mcpServers": {"single-conversation-subagent": entry}}, indent=2)+"\n")
-(Path(runtime)/"codex-example.toml").write_text('[mcp_servers.single-conversation-subagent]\ncommand = '+json.dumps(python)+'\nargs = '+json.dumps(entry["args"])+'\n[mcp_servers.single-conversation-subagent.env]\nSCS_HOST = '+json.dumps(host)+'\nSCS_QUESTION_CHANNEL = '+json.dumps(channel)+"\n")
-(Path(runtime)/"host-profile.json").write_text(json.dumps({"host": host, "question_channel": channel}, indent=2)+"\n")
+stage_dir = Path(stage)
+(stage_dir/"client-examples.json").write_text(json.dumps({"mcpServers": {"single-conversation-subagent": entry}}, indent=2)+"\n")
+(stage_dir/"codex-example.toml").write_text('[mcp_servers.single-conversation-subagent]\ncommand = '+json.dumps(python)+'\nargs = '+json.dumps(entry["args"])+'\n[mcp_servers.single-conversation-subagent.env]\nSCS_HOST = '+json.dumps(host)+'\nSCS_QUESTION_CHANNEL = '+json.dumps(channel)+"\n")
+(stage_dir/"host-profile.json").write_text(json.dumps({"host": host, "question_channel": channel}, indent=2)+"\n")
 if host == "zcode":
     zcode_entry = {"type": "stdio", **entry, "env": {**env, "SCS_NATIVE_REVIEW": "1"}, "timeoutMs": 60000}
     zcode = {"mcp": {"servers": {"single-conversation-subagent": zcode_entry}}}
-    (Path(runtime)/"zcode-example.json").write_text(json.dumps(zcode, indent=2)+"\n")
+    (stage_dir/"zcode-example.json").write_text(json.dumps(zcode, indent=2)+"\n")
 PY
+  for file in "${runtime_files[@]}"; do
+    if [ -f "$RUNTIME/$file" ] && cmp -s "$RUNTIME_STAGE_DIR/$file" "$RUNTIME/$file"; then
+      continue
+    fi
+    if [ -e "$RUNTIME/$file" ]; then
+      if [ ! -f "$RUNTIME/$file" ]; then
+        echo "Refusing non-regular runtime file path: $RUNTIME/$file" >&2; exit 1
+      fi
+      backup_managed "$RUNTIME/$file" "runtime-$file"
+    fi
+    mv -- "$RUNTIME_STAGE_DIR/$file" "$RUNTIME/$file"
+    if [ "$file" = python-path ]; then BOOTSTRAP_TMP=""; fi
+  done
+  BOOTSTRAP_TMP=""
+  rm -rf -- "$RUNTIME_STAGE_DIR"
+  RUNTIME_STAGE_DIR=""
   echo "Hybrid runtime ready: $RUNTIME/launcher.py"
   echo "Question channel: $HOST / $QUESTION_CHANNEL"
   if [ "$HOST" = zcode ]; then

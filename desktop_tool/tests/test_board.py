@@ -12,12 +12,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "mcp_server/src"))
 
+from PyQt5.QtGui import QColor
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QFormLayout
+from PyQt5.QtWidgets import QApplication, QDialog, QFormLayout
 
 from scs_manager import theme
 from scs_manager.backend import board_snapshot
-from scs_manager.window import DashboardPage, MainWindow, ProjectCard, TaskDialog, TodoCard, TodoPage
+from scs_manager.window import (DashboardPage, MainWindow, ProjectCard, TaskCloseDialog,
+                                TaskDialog, TodoCard, TodoPage)
 from scs_mcp.board import Board
 from helpers import project
 
@@ -125,6 +127,87 @@ class BoardWindowTests(unittest.TestCase):
         self.assertEqual(self.window.tasks.rowCount(), 1)
         self.window.show_closed_tasks.setChecked(True)
         self.assertEqual(self.window.tasks.rowCount(), 2)
+        closed_row = next(
+            row for row, task in enumerate(self.window.visible_tasks)
+            if task["id"] == self.first["id"]
+        )
+        self.assertEqual(
+            self.window.tasks.item(closed_row, 0).foreground().color(),
+            QColor(theme.tone("muted")),
+        )
+
+    def test_task_close_dialog_defaults_and_mode_dispatch(self):
+        self.window.tasks.selectRow(0)
+        task = self.window.selected_task()
+        self.assertIsNotNone(task)
+
+        done_default = TaskCloseDialog(task, self.window)
+        self.addCleanup(done_default.deleteLater)
+        self.assertTrue(done_default.completed.isChecked())
+        self.assertFalse(done_default.abandoned.isChecked())
+
+        abandoned_default = TaskCloseDialog(task, self.window, default_state="abandoned")
+        self.addCleanup(abandoned_default.deleteLater)
+        self.assertTrue(abandoned_default.abandoned.isChecked())
+        self.assertFalse(abandoned_default.completed.isChecked())
+
+        # Entry via complete_task: default is "done", switching to "abandoned" dispatches board-abandon.
+        observed_complete = []
+
+        def fake_complete_exec(dlg):
+            observed_complete.append((dlg.completed.isChecked(), dlg.abandoned.isChecked()))
+            dlg.abandoned.setChecked(True)
+            dlg.text.setPlainText("改由其他方案实现")
+            return QDialog.Accepted
+
+        with patch.object(TaskCloseDialog, "exec_", fake_complete_exec), \
+             patch.object(self.window, "start_job") as mock_start:
+            self.window.complete_task()
+        self.assertEqual(observed_complete, [(True, False)])
+        mock_start.assert_called_once_with(
+            "board-abandon",
+            payload={"task_id": task["id"], "actor": "gui", "reason": "改由其他方案实现"},
+        )
+
+        # Entry via abandon_task: default is "abandoned", switching to "done" with empty text dispatches board-complete.
+        observed_abandon = []
+
+        def fake_abandon_exec(dlg):
+            observed_abandon.append((dlg.completed.isChecked(), dlg.abandoned.isChecked()))
+            dlg.completed.setChecked(True)
+            dlg.text.setPlainText("")
+            return QDialog.Accepted
+
+        with patch.object(TaskCloseDialog, "exec_", fake_abandon_exec), \
+             patch.object(self.window, "start_job") as mock_start:
+            self.window.abandon_task()
+        self.assertEqual(observed_abandon, [(False, True)])
+        mock_start.assert_called_once_with(
+            "board-complete",
+            payload={"task_id": task["id"], "actor": "gui", "summary": ""},
+        )
+
+    def test_new_task_passes_current_project_root(self):
+        seen_titles = []
+        orig_init = TaskDialog.__init__
+
+        def spy_init(dlg, *args, **kwargs):
+            self.assertEqual(kwargs.get("project_root"), self.window.current_root)
+            orig_init(dlg, *args, **kwargs)
+            seen_titles.append(dlg.windowTitle())
+
+        def fake_exec(dlg):
+            dlg.title.setText("新任务")
+            return QDialog.Accepted
+
+        with patch.object(TaskDialog, "__init__", spy_init), \
+             patch.object(TaskDialog, "exec_", fake_exec), \
+             patch.object(self.window, "start_job") as mock_start:
+            self.window.new_task()
+        self.assertEqual(len(seen_titles), 1)
+        self.assertIn(self.root.name, seen_titles[0])
+        mock_start.assert_called_once()
+        self.assertEqual(mock_start.call_args[0][0], "board-add")
 
 
 class DashboardTests(unittest.TestCase):

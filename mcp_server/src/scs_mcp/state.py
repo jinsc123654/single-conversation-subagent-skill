@@ -269,12 +269,15 @@ class State:
     def render_question(self, q) -> dict:
         return {**dict(q), "native_review": self.store.native_review}
 
-    def _retire_inapplicable_native_reviews(self, con, session_id: str, mode: str | None) -> None:
+    def _retire_inapplicable_native_reviews(self, con, session_id: str, mode: str | None,
+                                            *, keep_confirmed_long: bool = False) -> None:
         if not self.store.native_review:
             return
-        rows = con.execute("SELECT id,kind FROM questions WHERE session_id=? AND current=1 "
+        rows = con.execute("SELECT id,kind,state FROM questions WHERE session_id=? AND current=1 "
                            "AND kind IN ('codex_gate','codex_review','review_route')", (session_id,)).fetchall()
         for row in rows:
+            if keep_confirmed_long and row["state"] == "CONFIRMED" and self._review_question_applies("long", row["kind"]):
+                continue
             if not self._review_question_applies(mode, row["kind"]):
                 con.execute("UPDATE questions SET current=0,updated_at=? WHERE id=?", (now(), row["id"]))
                 self.store.event(con, session_id, row["id"], "interaction_request", "SUPERSEDED",
@@ -306,7 +309,8 @@ class State:
             if kind == "review_route" and not self.store.native_review:
                 return {"status": "SKIPPED", "reason": "NATIVE_REVIEW_DISABLED"}
             if self.store.native_review:
-                self._retire_inapplicable_native_reviews(con, session_id, s["mode"])
+                self._retire_inapplicable_native_reviews(
+                    con, session_id, s["mode"], keep_confirmed_long=(s["mode"] is None))
                 if not self._review_question_applies(s["mode"], kind) and (kind == "codex_review" or s["mode"]):
                     reason = "USE_CODEX_GATE" if s["mode"] == "long" else "MODE_DOES_NOT_REQUIRE_QUESTION"
                     return {"status": "SKIPPED", "reason": reason}
@@ -328,7 +332,7 @@ class State:
                     # the legacy closure-only review question.
                     return {"status": "SKIPPED", "reason": "USE_CODEX_GATE"}
             q = con.execute("SELECT * FROM questions WHERE session_id=? AND kind=? AND current=1", (session_id, kind)).fetchone()
-            if q:
+            if q and self._review_question_applies(s["mode"], kind):
                 return {"created": False, **dict(q)}
             # Return the current question so the host can finish it without opening another UI.
             pending = con.execute(
@@ -430,8 +434,11 @@ class State:
             if action == "accept":
                 selected = json.loads(answer)
                 if q["kind"] == "mode":
-                    # Do not carry a short-mode review row into newly confirmed long mode.
-                    self._retire_inapplicable_native_reviews(con, session_id, session["mode"])
+                    new_mode = selected[0]
+                    if session["mode"] is not None:
+                        # Retire rows inapplicable under the previous mode before adopting the new mode.
+                        self._retire_inapplicable_native_reviews(con, session_id, session["mode"])
+                    self._retire_inapplicable_native_reviews(con, session_id, new_mode)
                 # codex_gate has no sessions column: the confirmed question row
                 # is the only source and is projected by get().
                 column = {"mode": "mode", "verification": "verification",
@@ -449,17 +456,24 @@ class State:
             raise ScsError("INPUT_INVALID", "Unknown question kind.")
         with self.store.transaction(True) as con:
             session = self._session(con, session_id)
+            if session["mode"] is None and kind in {"codex_gate", "review_route", "codex_review"}:
+                raise ScsError("QUESTION_ORDER", "Confirm mode first.")
+            if not self._review_question_applies(session["mode"], kind):
+                raise ScsError("QUESTION_NOT_FOUND", "There is no applicable current question to reopen.")
             q = con.execute("SELECT * FROM questions WHERE session_id=? AND kind=? AND current=1", (session_id, kind)).fetchone()
             if not q:
                 # The explicit skip path confirms quick without creating a question.
                 # A later explicit mode change must still be representable in this chat.
                 if kind == "mode" and session["mode"] and explicit_user_change:
+                    self._retire_inapplicable_native_reviews(con, session_id, session["mode"])
                     con.execute("UPDATE sessions SET mode=NULL WHERE id=?", (session_id,))
                     self.store.event(con, session_id, None, "interaction_reopen", "EXPLICIT_MODE_CHANGE")
                     return {"status": "REOPENED", "previous_question_id": None, "next": "interaction_request"}
                 raise ScsError("QUESTION_NOT_FOUND", "There is no current question to reopen.")
             if q["state"] in {"REQUESTED", "WAITING_USER", "CONFIRMED"} and not explicit_user_change:
                 raise ScsError("EXPLICIT_CHANGE_REQUIRED", "Reopening an active or confirmed question requires an explicit user change.")
+            if kind == "mode" and session["mode"] is not None:
+                self._retire_inapplicable_native_reviews(con, session_id, session["mode"])
             # Invalidate unfinished dependent questions when an earlier choice
             # changes. Already confirmed scopes remain this conversation's choices.
             dependent = {"mode": ("verification", "codex_gate", "codex_review", "review_route"),

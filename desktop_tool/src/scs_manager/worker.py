@@ -7,7 +7,8 @@ import subprocess
 import sqlite3
 import sys
 
-from .backend import archive_view, board_all, database, discover, snapshot, project_catalog, prepare_obsidian, registered_projects
+from .backend import (archive_view, board_all, database, discover, snapshot, project_catalog,
+                      prepare_obsidian, registered_projects, session_uses_native_review)
 
 
 def main():
@@ -67,11 +68,21 @@ def main():
             payload = json.loads(raw)
             if not isinstance(payload, dict):
                 raise ValueError("关闭请求格式错误")
+            use_native_review = False
             with database(args.root) as con:
                 if con.execute("PRAGMA user_version").fetchone()[0] not in (2, 3):
                     raise ValueError("请先按 MCP 升级说明备份并升级旧状态库；此按钮不会替你迁移")
+                package_id = payload.get("package")
+                owner = None
+                if isinstance(package_id, str) and package_id:
+                    row = con.execute("SELECT session_id FROM work_packages WHERE id=?", (package_id,)).fetchone()
+                    owner = row["session_id"] if row else None
+                use_native_review = session_uses_native_review(con, owner or args.session)
             bridge = Path(__file__).with_name("mcp_bridge.py")
-            result = subprocess.run([args.python, str(bridge), "close", "--root", args.root],
+            cmd = [args.python, str(bridge), "close", "--root", args.root]
+            if use_native_review:
+                cmd.append("--native-review")
+            result = subprocess.run(cmd,
                                     input=json.dumps(payload, ensure_ascii=False).encode(),
                                     capture_output=True, timeout=22)
             if len(result.stdout) > 2_000_000:
@@ -83,12 +94,16 @@ def main():
         else:
             # Connecting starts the configured server: only accept already upgraded
             # schema 2 here, so a status button cannot silently migrate an old DB.
+            use_native_review = False
             with database(args.root) as con:
                 if con.execute("PRAGMA user_version").fetchone()[0] not in (2, 3):
                     raise ValueError("请先按 MCP 升级说明备份并升级旧状态库；此按钮不会替你迁移")
+                use_native_review = session_uses_native_review(con, args.session)
             bridge = Path(__file__).with_name("mcp_bridge.py")
-            result = subprocess.run([args.python, str(bridge), args.action, "--root", args.root,
-                                     "--session", args.session], capture_output=True, timeout=22)
+            cmd = [args.python, str(bridge), args.action, "--root", args.root, "--session", args.session]
+            if use_native_review:
+                cmd.append("--native-review")
+            result = subprocess.run(cmd, capture_output=True, timeout=22)
             if len(result.stdout) > 2_000_000:
                 raise ValueError("响应超过限制")
             reply = json.loads(result.stdout)
