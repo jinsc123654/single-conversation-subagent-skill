@@ -2,7 +2,6 @@
 set -euo pipefail
 
 SKILL_NAME=single-conversation-subagent
-SKILL_SELECT=single-conversation-subagent
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_HOME="${AGENT_HOME:-$HOME/.agents}"
 AGENT_HOME="${AGENT_HOME%/}"
@@ -14,8 +13,16 @@ INSTRUCTIONS_FILE=""
 PYTHON_BIN="${SCS_PYTHON:-python3}"
 PROJECT_ROOT=""
 ALLOW_ROOTS=()
-HOST=generic
+HOST=zcode
 QUESTION_CHANNEL=""
+WITH_ZCODE_AGENTS=0
+ZCODE_AGENTS_DIR=""
+ZCODE_GPT_MODEL=""
+ZCODE_GPT_THOUGHT_LEVEL=""
+ZCODE_DEEPSEEK_MODEL=""
+ZCODE_DEEPSEEK_THOUGHT_LEVEL=""
+ZCODE_AGENT_OPTIONS=0
+ZCODE_PROFILE_NAMES=(实施工程师 继承审阅员)
 BEGIN='<!-- single-conversation-subagent begin -->'
 END='<!-- single-conversation-subagent end -->'
 
@@ -23,17 +30,27 @@ usage() {
   cat <<'HELP'
 Usage: bash install.sh [options]
   --mode skill|hybrid       Default skill; hybrid adds a local MCP runtime.
-  --skill NAME              Bundled skill to install: single-conversation-subagent (default)
-                            or codex-review (pure Skill; no AGENTS rule, no MCP runtime).
+  --skill NAME              Bundled skill to install: single-conversation-subagent (default).
   --with-default-rule       Update only this skill's marked block in AGENT_HOME/AGENTS.md.
   --instructions-file PATH  Update the marked block in this file; implies default rule.
   --python PATH             Python 3.11+ for hybrid (or SCS_PYTHON).
   --project-root PATH       Default allowed workspace in generated MCP examples.
   --allow-root PATH         Additional allowed workspace; repeatable.
-  --host NAME               Host label for examples: codex|zcode|claude|generic.
+  --host NAME               Host label for examples: zcode (default)|codex|claude|generic.
   --question-channel MODE   auto|native|mcp|text; defaults per host.
+  --with-zcode-agents       Opt in to adding missing ZCode agent profiles (ZCode host only).
+  --zcode-agents-dir PATH   Profile directory; defaults to ~/.zcode/agents.
+  --zcode-gpt-model ID      Add 方案顾问 and 固定审阅员 with this explicit GPT model ID.
+  --zcode-gpt-thought-level LEVEL
+                            Optional thoughtLevel for those newly installed GPT profiles.
+  --zcode-deepseek-model ID Add 查询侦察员 and 测试验证员 with this explicit DeepSeek model ID.
+  --zcode-deepseek-thought-level LEVEL
+                            Optional thoughtLevel for those newly installed DeepSeek profiles.
+                            Fixed profiles are skipped without their model ID; never inherit.
+                            Directory/model/thought options require --with-zcode-agents.
   --check                   Read-only installation/dependency check; never installs.
-  --uninstall               Back up/remove this skill, runtime and its marked rule only.
+  --uninstall               Back up/remove this skill, runtime and its marked rule only;
+                            agent profiles and client configs are preserved.
   -h, --help                Show help.
 AGENT_HOME defaults to ~/.agents. Existing client MCP configs are never rewritten.
 Hybrid may install SDK dependencies into its own venv if the chosen Python lacks them.
@@ -42,20 +59,33 @@ HELP
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --mode|--instructions-file|--python|--project-root|--allow-root|--host|--question-channel|--skill)
-      [ "$#" -ge 2 ] || { echo "Missing option value" >&2; exit 2; }
+    --mode|--instructions-file|--python|--project-root|--allow-root|--host|--question-channel|--skill|--zcode-agents-dir|--zcode-gpt-model|--zcode-gpt-thought-level|--zcode-deepseek-model|--zcode-deepseek-thought-level)
+      if [ "$#" -lt 2 ] || [[ -z "$2" || "$2" == --* ]]; then
+        echo "Missing option value: $1" >&2; exit 2
+      fi
       case "$1" in
         --mode) MODE="$2" ;;
-        --skill) SKILL_SELECT="$2" ;;
+        --skill)
+          case "$2" in
+            single-conversation-subagent) ;;
+            codex-review) echo 'The legacy codex-review Skill is not installable on this ZCode branch.' >&2; exit 2 ;;
+            *) echo "Unknown skill: $2" >&2; exit 2 ;;
+          esac ;;
         --instructions-file) INSTRUCTIONS_FILE="$2"; WITH_RULE=1 ;;
         --python) PYTHON_BIN="$2" ;;
         --project-root) PROJECT_ROOT="$2" ;;
         --allow-root) ALLOW_ROOTS+=("$2") ;;
         --host) HOST="$2" ;;
         --question-channel) QUESTION_CHANNEL="$2" ;;
+        --zcode-agents-dir) ZCODE_AGENTS_DIR="$2"; ZCODE_AGENT_OPTIONS=1 ;;
+        --zcode-gpt-model) ZCODE_GPT_MODEL="$2"; ZCODE_AGENT_OPTIONS=1 ;;
+        --zcode-gpt-thought-level) ZCODE_GPT_THOUGHT_LEVEL="$2"; ZCODE_AGENT_OPTIONS=1 ;;
+        --zcode-deepseek-model) ZCODE_DEEPSEEK_MODEL="$2"; ZCODE_AGENT_OPTIONS=1 ;;
+        --zcode-deepseek-thought-level) ZCODE_DEEPSEEK_THOUGHT_LEVEL="$2"; ZCODE_AGENT_OPTIONS=1 ;;
       esac
       shift ;;
     --with-default-rule) WITH_RULE=1 ;;
+    --with-zcode-agents) WITH_ZCODE_AGENTS=1 ;;
     --check) CHECK=1 ;;
     --uninstall) UNINSTALL=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -65,17 +95,33 @@ while [ "$#" -gt 0 ]; do
 done
 case "$MODE" in skill|hybrid) ;; *) echo 'Mode must be skill or hybrid' >&2; exit 2 ;; esac
 case "$HOST" in codex|zcode|claude|generic) ;; *) echo 'Host must be codex, zcode, claude or generic' >&2; exit 2 ;; esac
-case "$SKILL_SELECT" in
-  single-conversation-subagent|codex-review) SKILL_NAME="$SKILL_SELECT" ;;
-  *) echo "Unknown skill: $SKILL_SELECT" >&2; exit 2 ;;
-esac
-if [ "$SKILL_NAME" != single-conversation-subagent ]; then
-  if [ "$WITH_RULE" -eq 1 ]; then
-    echo "Note: $SKILL_NAME has no AGENTS rule block; installing Skill only." >&2
+if [ "$ZCODE_AGENT_OPTIONS" -eq 1 ] && [ "$WITH_ZCODE_AGENTS" -eq 0 ]; then
+  echo 'ZCode profile options require --with-zcode-agents.' >&2; exit 2
+fi
+# Validate YAML scalar values before expanding fixed-model templates.
+validate_zcode_model_options() {
+  local family="$1" model="$2" thought="$3"
+  if [ -n "$model" ]; then
+    if [[ ! "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$ || "$model" =~ ^[Ii][Nn][Hh][Ee][Rr][Ii][Tt]$ ]]; then
+      printf '%s\n' "--zcode-$family-model must be an explicit model ID, not inherit." >&2; exit 2
+    fi
+  elif [ -n "$thought" ]; then
+    printf '%s\n' "--zcode-$family-thought-level requires --zcode-$family-model." >&2; exit 2
   fi
-  MODE=skill
-  WITH_RULE=0
-  INSTRUCTIONS_FILE=""
+  if [ -n "$thought" ] && [[ ! "$thought" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+    printf '%s\n' "--zcode-$family-thought-level must be a simple level name supported by the model." >&2; exit 2
+  fi
+}
+if [ "$WITH_ZCODE_AGENTS" -eq 1 ]; then
+  if [ "$HOST" != zcode ] || [ "$CHECK" -eq 1 ] || [ "$UNINSTALL" -eq 1 ]; then
+    echo '--with-zcode-agents requires --host zcode and cannot be used with --check or --uninstall.' >&2; exit 2
+  fi
+  ZCODE_AGENTS_DIR="${ZCODE_AGENTS_DIR:-$HOME/.zcode/agents}"
+  case "$ZCODE_AGENTS_DIR" in /*) ;; *) ZCODE_AGENTS_DIR="$PWD/$ZCODE_AGENTS_DIR" ;; esac
+  validate_zcode_model_options gpt "$ZCODE_GPT_MODEL" "$ZCODE_GPT_THOUGHT_LEVEL"
+  validate_zcode_model_options deepseek "$ZCODE_DEEPSEEK_MODEL" "$ZCODE_DEEPSEEK_THOUGHT_LEVEL"
+  if [ -n "$ZCODE_GPT_MODEL" ]; then ZCODE_PROFILE_NAMES+=(方案顾问 固定审阅员); fi
+  if [ -n "$ZCODE_DEEPSEEK_MODEL" ]; then ZCODE_PROFILE_NAMES+=(查询侦察员 测试验证员); fi
 fi
 if [ -z "$QUESTION_CHANNEL" ]; then
   case "$HOST" in
@@ -123,9 +169,92 @@ validate_block() {
 # All destination checks precede mutations, including skill-only installation.
 safe_path "$DEST_DIR"
 safe_path "$RUNTIME"
-for child in src venv launcher.py python-path client-examples.json codex-example.toml; do safe_path "$RUNTIME/$child"; done
+for child in src venv launcher.py python-path client-examples.json codex-example.toml host-profile.json zcode-example.json; do safe_path "$RUNTIME/$child"; done
 [ "$DEST_DIR" != "$SCRIPT_DIR/$SKILL_NAME" ] || { echo "Destination is the source; refusing self-replacement" >&2; exit 1; }
 if [ -n "$INSTRUCTIONS_FILE" ]; then safe_path "$INSTRUCTIONS_FILE"; validate_block; fi
+
+zcode_profile_template() {
+  case "$1" in
+    方案顾问|固定审阅员|查询侦察员|测试验证员) printf '%s\n' "$SCRIPT_DIR/zcode-agents/$1.md.in" ;;
+    *) printf '%s\n' "$SCRIPT_DIR/zcode-agents/$1.md" ;;
+  esac
+}
+# Used only after safe_path rejects '..' and symlink components. Normalize aliases
+# like '/./' so a custom profile store cannot live in a replaceable install tree.
+normalize_install_path() {
+  local rest="${1#/}/" part normalized=""
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    rest="${rest#*/}"
+    case "$part" in ''|.) ;; *) normalized="$normalized/$part" ;; esac
+  done
+  printf '%s\n' "${normalized:-/}"
+}
+if [ "$WITH_ZCODE_AGENTS" -eq 1 ]; then
+  while [[ "$ZCODE_AGENTS_DIR" == */ && "$ZCODE_AGENTS_DIR" != / ]]; do
+    ZCODE_AGENTS_DIR="${ZCODE_AGENTS_DIR%/}"
+  done
+  safe_path "$ZCODE_AGENTS_DIR"
+  ZCODE_AGENTS_DIR="$(normalize_install_path "$ZCODE_AGENTS_DIR")"
+  case "$ZCODE_AGENTS_DIR/" in
+    "$(normalize_install_path "$DEST_DIR")/"*|"$(normalize_install_path "$RUNTIME")/"*)
+      echo 'Refusing ZCode profiles directory inside the managed Skill or runtime.' >&2; exit 1 ;;
+  esac
+  if [ "$ZCODE_AGENTS_DIR" = / ] || [ "$ZCODE_AGENTS_DIR" -ef "$SCRIPT_DIR/zcode-agents" ] ||
+     { [ -e "$ZCODE_AGENTS_DIR" ] && [ ! -d "$ZCODE_AGENTS_DIR" ]; }; then
+    echo 'Refusing unsafe ZCode profiles directory.' >&2; exit 1
+  fi
+  for name in "${ZCODE_PROFILE_NAMES[@]}"; do
+    [ -f "$(zcode_profile_template "$name")" ] || { echo "Missing ZCode profile template: $name" >&2; exit 1; }
+  done
+fi
+
+install_zcode_agents() {
+  local name destination stage template model thought
+  mkdir -p -- "$ZCODE_AGENTS_DIR"
+  safe_path "$ZCODE_AGENTS_DIR"
+  for name in "${ZCODE_PROFILE_NAMES[@]}"; do
+    destination="$ZCODE_AGENTS_DIR/$name.md"
+    if [ -e "$destination" ] || [ -L "$destination" ]; then
+      printf 'Preserved existing ZCode profile path: %s\n' "$destination"
+      continue
+    fi
+    template="$(zcode_profile_template "$name")"
+    case "$name" in
+      方案顾问|固定审阅员) model="$ZCODE_GPT_MODEL"; thought="$ZCODE_GPT_THOUGHT_LEVEL" ;;
+      查询侦察员|测试验证员) model="$ZCODE_DEEPSEEK_MODEL"; thought="$ZCODE_DEEPSEEK_THOUGHT_LEVEL" ;;
+    esac
+    stage="$(mktemp "$ZCODE_AGENTS_DIR/.scs-profile.XXXXXX")"
+    if [[ "$template" == *.md.in ]]; then
+      if ! awk -v model="$model" -v thought="$thought" '
+        $0 == "@SCS_MODEL@" { printf "model: \"%s\"\n", model; next }
+        $0 == "@SCS_THOUGHT_LEVEL@" { if (thought != "") printf "thoughtLevel: \"%s\"\n", thought; next }
+        { print }
+      ' "$template" > "$stage"; then
+        rm -f -- "$stage"; return 1
+      fi
+    elif ! cp -- "$template" "$stage"; then
+      rm -f -- "$stage"; return 1
+    fi
+    # Publish atomically without replacing or following the destination leaf.
+    if ln -T -- "$stage" "$destination" 2>/dev/null; then
+      printf 'ZCode profile installed: %s\n' "$destination"
+    elif [ -e "$destination" ] || [ -L "$destination" ]; then
+      printf 'Preserved existing ZCode profile path: %s\n' "$destination"
+    else
+      rm -f -- "$stage"
+      printf 'Cannot create ZCode profile path: %s (requires hard links and ln -T)\n' "$destination" >&2
+      return 1
+    fi
+    rm -f -- "$stage"
+  done
+  if [ -z "$ZCODE_GPT_MODEL" ]; then
+    echo 'Not installing new 方案顾问 or 固定审阅员 profiles: use --zcode-gpt-model with an explicit ZCode model ID.'
+  fi
+  if [ -z "$ZCODE_DEEPSEEK_MODEL" ]; then
+    echo 'Not installing new 查询侦察员 or 测试验证员 profiles: use --zcode-deepseek-model with an explicit ZCode model ID.'
+  fi
+}
 
 sdk_ready() {
   "$PYTHON_BIN" -c 'import sys,importlib.metadata; assert sys.version_info >= (3,11); assert importlib.metadata.version("mcp") == "2.3.0"; from mcp.server import MCPServer; from mcp.server.mcpserver import Resolve,Elicit' >/dev/null 2>&1
@@ -183,6 +312,7 @@ if [ ! -d "$DEST_DIR" ] || ! diff -qr "$SCRIPT_DIR/$SKILL_NAME" "$DEST_DIR" >/de
 fi
 if [ "$WITH_RULE" -eq 1 ]; then update_rule; fi
 echo "Skill installed: $DEST_DIR"
+if [ "$WITH_ZCODE_AGENTS" -eq 1 ]; then install_zcode_agents; fi
 
 if [ "$MODE" = hybrid ]; then
   if ! command -v "$PYTHON_BIN" >/dev/null 2>&1 || ! "$PYTHON_BIN" -c 'import sys; assert sys.version_info >= (3,11)' >/dev/null 2>&1; then
@@ -209,7 +339,9 @@ if [ "$MODE" = hybrid ]; then
     tar -C "$SCRIPT_DIR/mcp_server/src" --exclude=__pycache__ --exclude='*.pyc' -cf - . | tar -C "$RUNTIME/src" -xf -
   fi
   # Never change arbitrary client configs. Back up our own generated files too.
-  for file in launcher.py python-path client-examples.json codex-example.toml host-profile.json; do safe_path "$RUNTIME/$file"; backup "$RUNTIME/$file"; done
+  runtime_files=(launcher.py python-path client-examples.json codex-example.toml host-profile.json)
+  if [ "$HOST" = zcode ]; then runtime_files+=(zcode-example.json); fi
+  for file in "${runtime_files[@]}"; do safe_path "$RUNTIME/$file"; backup "$RUNTIME/$file"; done
   cat > "$RUNTIME/launcher.py" <<'PY'
 from pathlib import Path
 import sys
@@ -231,10 +363,17 @@ entry = {"command": python, "args": args, "env": env}
 (Path(runtime)/"client-examples.json").write_text(json.dumps({"mcpServers": {"single-conversation-subagent": entry}}, indent=2)+"\n")
 (Path(runtime)/"codex-example.toml").write_text('[mcp_servers.single-conversation-subagent]\ncommand = '+json.dumps(python)+'\nargs = '+json.dumps(entry["args"])+'\n[mcp_servers.single-conversation-subagent.env]\nSCS_HOST = '+json.dumps(host)+'\nSCS_QUESTION_CHANNEL = '+json.dumps(channel)+"\n")
 (Path(runtime)/"host-profile.json").write_text(json.dumps({"host": host, "question_channel": channel}, indent=2)+"\n")
+if host == "zcode":
+    zcode_entry = {"type": "stdio", **entry, "env": {**env, "SCS_NATIVE_REVIEW": "1"}, "timeoutMs": 60000}
+    zcode = {"mcp": {"servers": {"single-conversation-subagent": zcode_entry}}}
+    (Path(runtime)/"zcode-example.json").write_text(json.dumps(zcode, indent=2)+"\n")
 PY
   echo "Hybrid runtime ready: $RUNTIME/launcher.py"
   echo "Question channel: $HOST / $QUESTION_CHANNEL"
-  echo "Copy/review the generated examples; replace project-root placeholder: $RUNTIME/client-examples.json"
-  echo "Codex example: $RUNTIME/codex-example.toml"
+  if [ "$HOST" = zcode ]; then
+    echo "Review and merge the ZCode MCP example; set the project root: $RUNTIME/zcode-example.json"
+  else
+    echo "Review and merge the compatible MCP examples; set the project root: $RUNTIME/client-examples.json / $RUNTIME/codex-example.toml"
+  fi
 fi
 echo 'Start a new chat to load Skill/rule changes. UI visibility still needs host verification.'

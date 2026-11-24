@@ -6,7 +6,7 @@
 
 首次绑定对话时，`session_open(project_root=<绝对项目根>, register_obsidian=true)` 初始化库与总览，并发布到 PyQt 的本地项目索引。项目根使用用户明确指定的目录，或宿主提供的当前对话工作目录。选定的 docs-root 固定在项目数据库中，后续对话复用。登记先于执行模式和验证，需有项目元数据与本地索引的写入权限。
 
-如需手动刷新已有视图，可在确认本对话模式和验证范围后调用：
+如需手动刷新已有视图，可在确认本对话的模式、适用的验证范围及长任务复核选择后调用。启用长任务复核时须确认 `review_route`；`INTAKE_REQUIRED` 只补当前模式下适用的缺项。如果旧 MCP 在非长任务要求 SCS 复核确认，说明并暂缓刷新，不补问、不代填、不切模式；可用只读 `project_view_info` 检查已有视图：
 
 ```json
 {"session_id":"S-...","initialize_vault":true,"auto_refresh":true}

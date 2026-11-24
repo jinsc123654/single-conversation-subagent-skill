@@ -13,7 +13,9 @@ REPO = Path(__file__).resolve().parents[2]
 
 def install(tmp_path, *args, env=None):
     return subprocess.run(["bash", str(REPO / "install.sh"), *args],
-        env={**os.environ, "AGENT_HOME": str(tmp_path / "agent-home"), **(env or {})},
+        cwd=tmp_path,
+        env={**os.environ, "HOME": str(tmp_path / "fake-home"),
+             "AGENT_HOME": str(tmp_path / "agent-home"), **(env or {})},
         text=True, capture_output=True, timeout=20)
 
 
@@ -86,6 +88,11 @@ def test_hybrid_real_runtime_and_examples(tmp_path):
     entry = examples["mcpServers"]["single-conversation-subagent"]
     assert entry["command"] == sys.executable
     assert entry["args"][-1] == str(root)
+    zcode = json.loads((runtime / "zcode-example.json").read_text())
+    assert zcode == {"mcp": {"servers": {"single-conversation-subagent": {
+        "type": "stdio", "command": sys.executable, "args": entry["args"], "timeoutMs": 60000,
+        "env": {"SCS_HOST": "zcode", "SCS_QUESTION_CHANNEL": "native", "SCS_NATIVE_REVIEW": "1"},
+    }}}}
     version = subprocess.run([sys.executable, "launcher.py", "--version"], cwd=str(runtime),
                              capture_output=True, timeout=5, shell=False)
     assert version.stdout.strip() == __version__.encode()
@@ -104,3 +111,164 @@ def test_runtime_child_symlink_rejected_before_install(tmp_path):
     assert install(tmp_path, "--mode", "hybrid", "--python", sys.executable).returncode != 0
     assert list(outside.iterdir()) == []
     assert not (home / "skills").exists()
+
+
+GPT_MODEL = "new-provider-2/gpt-6.2-sol"
+DEEPSEEK_MODEL = "new-provider-2/deepseek-v4.1-flash"
+READ_ONLY_TOOLS = "tools: [Read, Grep, Glob]"
+INHERITED_PROFILES = {
+    "实施工程师": "tools: [Read, Grep, Glob, Edit, Write]",
+    "继承审阅员": READ_ONLY_TOOLS,
+}
+GPT_PROFILES = {"方案顾问": READ_ONLY_TOOLS, "固定审阅员": READ_ONLY_TOOLS}
+DEEPSEEK_PROFILES = {
+    "查询侦察员": READ_ONLY_TOOLS,
+    "测试验证员": "tools: [Read, Grep, Glob, Bash]",
+}
+
+
+def assert_profile(path, model, tools, thought=None):
+    text = path.read_text(encoding="utf-8")
+    assert "@SCS_" not in text
+    header = text.split("---", 2)[1].strip().splitlines()
+    assert [line for line in header if line.startswith("name:")] == [f'name: "{path.stem}"']
+    assert [line for line in header if line.startswith("model:")] == [f'model: "{model}"']
+    assert [line for line in header if line.startswith("tools:")] == [tools]
+    assert [line for line in header if line.startswith("thoughtLevel:")] == (
+        [f'thoughtLevel: "{thought}"'] if thought else [])
+
+
+def test_zcode_profiles_opt_in_default_dir_and_no_implicit_fixed_profiles(tmp_path):
+    zcode = tmp_path / "fake-home/.zcode"
+    config = zcode / "cli/config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text('{"keep": true}')
+    profiles = zcode / "agents"
+    assert install(tmp_path).returncode == 0
+    assert not profiles.exists()
+    assert install(tmp_path, "--check").returncode == 0
+    assert not profiles.exists()
+    result = install(tmp_path, "--with-zcode-agents")
+    assert result.returncode == 0, result.stderr
+    assert {p.name for p in profiles.iterdir()} == {f"{name}.md" for name in INHERITED_PROFILES}
+    for name, tools in INHERITED_PROFILES.items():
+        assert_profile(profiles / f"{name}.md", "inherit", tools)
+    assert config.read_text() == '{"keep": true}'
+    assert install(tmp_path, "--uninstall").returncode == 0
+    assert {p.name for p in profiles.iterdir()} == {f"{name}.md" for name in INHERITED_PROFILES}
+    assert config.read_text() == '{"keep": true}'
+
+
+@pytest.mark.parametrize("use_gpt,use_deepseek,gpt_thought,deepseek_thought", [
+    pytest.param(True, False, None, None, id="gpt-only"),
+    pytest.param(False, True, None, None, id="deepseek-only"),
+    pytest.param(True, True, "enabled", "high", id="both-with-levels"),
+])
+def test_zcode_profiles_explicit_fixed_models_and_custom_directory(
+    tmp_path, use_gpt, use_deepseek, gpt_thought, deepseek_thought,
+):
+    profiles = tmp_path / "isolated storage"
+    args = ["--with-zcode-agents", "--zcode-agents-dir", profiles.name]
+    expected = {name: ("inherit", tools, None) for name, tools in INHERITED_PROFILES.items()}
+    for selected, family, model, tools_by_name, thought in (
+        (use_gpt, "gpt", GPT_MODEL, GPT_PROFILES, gpt_thought),
+        (use_deepseek, "deepseek", DEEPSEEK_MODEL, DEEPSEEK_PROFILES, deepseek_thought),
+    ):
+        if selected:
+            args.extend([f"--zcode-{family}-model", model])
+            if thought:
+                args.extend([f"--zcode-{family}-thought-level", thought])
+            expected.update({name: (model, tools, thought) for name, tools in tools_by_name.items()})
+    result = install(tmp_path, *args)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "fake-home/.zcode").exists()
+    assert {p.name for p in profiles.iterdir()} == {f"{name}.md" for name in expected}
+    for name, fields in expected.items():
+        assert_profile(profiles / f"{name}.md", *fields)
+
+
+def test_zcode_profiles_reinstall_preserves_existing_models_and_levels(tmp_path):
+    args = ("--with-zcode-agents", "--zcode-agents-dir", "profiles")
+    result = install(tmp_path, *args,
+                     "--zcode-gpt-model", GPT_MODEL, "--zcode-gpt-thought-level", "enabled",
+                     "--zcode-deepseek-model", DEEPSEEK_MODEL, "--zcode-deepseek-thought-level", "high")
+    assert result.returncode == 0, result.stderr
+    profiles = tmp_path / "profiles"
+    before = {p.name: p.read_bytes() for p in profiles.iterdir()}
+    rerun = install(tmp_path, *args,
+                    "--zcode-gpt-model", "other/gpt-example", "--zcode-gpt-thought-level", "low",
+                    "--zcode-deepseek-model", "other/deepseek-example", "--zcode-deepseek-thought-level", "low")
+    assert rerun.returncode == 0, rerun.stderr
+    assert {p.name: p.read_bytes() for p in profiles.iterdir()} == before
+    assert install(tmp_path, "--uninstall").returncode == 0
+    assert {p.name: p.read_bytes() for p in profiles.iterdir()} == before
+
+
+def test_zcode_profiles_preserve_existing_paths_and_links(tmp_path):
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (profiles / "查询侦察员.md").write_text("user configuration")
+    (profiles / "实施工程师.md").symlink_to(outside, target_is_directory=True)
+    missing = outside / "missing.md"
+    (profiles / "测试验证员.md").symlink_to(missing)
+    (profiles / "固定审阅员.md").mkdir()
+    (profiles / "scout.md").write_text("legacy configuration")
+    result = install(tmp_path, "--with-zcode-agents", "--zcode-agents-dir", str(profiles),
+                     "--zcode-gpt-model", GPT_MODEL, "--zcode-deepseek-model", DEEPSEEK_MODEL)
+    assert result.returncode == 0, result.stderr
+    assert (profiles / "查询侦察员.md").read_text() == "user configuration"
+    assert (profiles / "实施工程师.md").readlink() == outside
+    assert (profiles / "测试验证员.md").readlink() == missing
+    assert list(outside.iterdir()) == []
+    assert list((profiles / "固定审阅员.md").iterdir()) == []
+    assert (profiles / "scout.md").read_text() == "legacy configuration"
+    assert (profiles / "继承审阅员.md").is_file()
+    assert (profiles / "方案顾问.md").is_file()
+    assert not list(profiles.glob(".scs-profile.*"))
+
+
+@pytest.mark.parametrize("suffix", ["/", "/agents"])
+def test_zcode_profiles_reject_symlinked_directory_before_install(tmp_path, suffix):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    result = install(tmp_path, "--with-zcode-agents", "--zcode-agents-dir", str(link) + suffix)
+    assert result.returncode != 0
+    assert "symlinked installation path" in result.stderr
+    assert list(outside.iterdir()) == []
+    assert not (tmp_path / "agent-home").exists()
+
+
+@pytest.mark.parametrize("managed", ["./skills/single-conversation-subagent/profiles",
+                                    "./mcp/single-conversation-subagent/profiles"])
+def test_zcode_profiles_reject_replaceable_install_storage(tmp_path, managed):
+    home = tmp_path / "agent-home"
+    result = install(tmp_path, "--with-zcode-agents", "--zcode-agents-dir", f"{home}/{managed}")
+    assert result.returncode != 0
+    assert "inside the managed Skill or runtime" in result.stderr
+    assert not home.exists()
+
+
+@pytest.mark.parametrize("args", [
+    ("--zcode-agents-dir", "profiles"),
+    ("--zcode-deepseek-model", DEEPSEEK_MODEL),
+    ("--zcode-deepseek-thought-level", "high"),
+    ("--with-zcode-agents", "--zcode-gpt-model", "inherit"),
+    ("--with-zcode-agents", "--zcode-gpt-model", 'gpt"\ntools: [Bash]'),
+    ("--with-zcode-agents", "--zcode-gpt-thought-level", "enabled"),
+    ("--with-zcode-agents", "--zcode-deepseek-model", "InHeRiT"),
+    ("--with-zcode-agents", "--zcode-deepseek-model", 'deepseek"\ntools: [Bash]'),
+    ("--with-zcode-agents", "--zcode-gpt-model", GPT_MODEL, "--zcode-deepseek-thought-level", "high"),
+    ("--with-zcode-agents", "--zcode-deepseek-model", DEEPSEEK_MODEL, "--zcode-deepseek-thought-level", "high: invalid"),
+    ("--with-zcode-agents", "--zcode-deepseek-model"),
+    ("--with-zcode-agents", "--host", "generic"),
+    ("--with-zcode-agents", "--check"),
+    ("--with-zcode-agents", "--uninstall"),
+    ("--skill", "codex-review"),
+])
+def test_invalid_profile_options_leave_install_and_home_untouched(tmp_path, args):
+    assert install(tmp_path, *args).returncode == 2
+    assert list(tmp_path.iterdir()) == []

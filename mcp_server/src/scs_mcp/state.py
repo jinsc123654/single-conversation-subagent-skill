@@ -10,7 +10,8 @@ from .storage import Store, encode, now
 
 MODES = ("quick", "standard", "long", "investigate")
 VERIFICATION = ("smoke", "targeted", "full", "stability", "none", "method-only")
-KINDS = ("mode", "verification", "codex_gate", "codex_review")
+KINDS = ("mode", "verification", "codex_gate", "codex_review", "review_route")
+REVIEW_AGENTS = {"gpt": "固定审阅员", "inherit": "继承审阅员"}
 PENDING = ("REQUESTED", "WAITING_USER", "UNSUPPORTED", "FAILED")
 TERMINAL = ("CONFIRMED", "DECLINED", "CANCELLED", "TIMED_OUT")
 DESCRIPTIONS = {
@@ -49,6 +50,22 @@ OPTIONS = {
                                     ("packages", "包级复核 + 收尾审查"))],
     "codex_review": [{"value": "no", "label": "不使用", "desc": DESCRIPTIONS["codex_review"]["no"]},
                      {"value": "yes", "label": "使用：收尾只读独立审查", "desc": DESCRIPTIONS["codex_review"]["yes"]}],
+    "review_route": [
+        {"value": "gpt", "label": "GPT 独立审查", "desc": f"由宿主启动 {REVIEW_AGENTS['gpt']}"},
+        {"value": "inherit", "label": "沿用当前模型的独立审查", "desc": f"由宿主启动 {REVIEW_AGENTS['inherit']}"},
+    ],
+}
+NATIVE_OPTIONS = {
+    **OPTIONS,
+    "codex_gate": [
+        {"value": "none", "label": "不做独立复核", "desc": "不做包级复核或收尾审查"},
+        {"value": "closure", "label": "仅收尾审查", "desc": "仅收尾做一次只读独立审查"},
+        {"value": "packages", "label": "包级复核 + 收尾审查", "desc": "每个工作包做独立复核，收尾再审查"},
+    ],
+    "codex_review": [
+        {"value": "no", "label": "不使用", "desc": "收尾不追加只读独立审查"},
+        {"value": "yes", "label": "使用：收尾只读独立审查", "desc": "收尾由宿主启动独立审查 Agent"},
+    ],
 }
 
 
@@ -58,7 +75,7 @@ def identifier(prefix: str) -> str:
 
 def _code(kind: str, value: str) -> str:
     """Accept either the stored code or the display label shown to users."""
-    for option in OPTIONS[kind]:
+    for option in OPTIONS[kind] + NATIVE_OPTIONS[kind]:
         if value == option["value"] or value == option["label"] or value.startswith(option["value"] + " — "):
             return option["value"]
     return value
@@ -104,36 +121,61 @@ class State:
             return None
         return json.loads(row["answer"])
 
-    def intake_status(self, con, session_id: str) -> dict:
-        """One shared intake predicate for work packages, views and projections.
+    def _review_question_applies(self, mode: str | None, kind: str) -> bool:
+        if not self.store.native_review:
+            return True  # Legacy applicability is unchanged.
+        if kind == "codex_review":
+            return False
+        return kind not in {"codex_gate", "review_route"} or mode == "long"
 
-        long -> a confirmed codex_gate is required; standard -> the existing
-        verification plus registered codex_review rule; quick/investigate have
-        no follow-up requirement. Older long sessions are asked once; this
-        function never invents a confirmed gate.
-        """
+    def review_route(self, con, session_id: str) -> str | None:
+        if self.store.native_review and not self._review_question_applies(
+                self._session(con, session_id)["mode"], "review_route"):
+            return None
+        choices = self._confirmed(con, session_id, "review_route")
+        return choices[0] if choices in (["gpt"], ["inherit"]) else None
+
+    def require_review_route(self, con, session_id: str) -> str:
+        route = self.review_route(con, session_id)
+        if route is None:
+            if self.store.native_review and self._session(con, session_id)["mode"] != "long":
+                raise ScsError("REVIEW_ROUTE_REQUIRED",
+                               "Explicitly change to long mode before confirming the independent review route.")
+            raise ScsError("REVIEW_ROUTE_REQUIRED", "Explicitly confirm the independent review route first.")
+        return route
+
+    def intake_status(self, con, session_id: str) -> dict:
+        """One shared intake predicate for work packages, views and projections."""
         session = self._session(con, session_id)
-        if not session["mode"]:
+        mode = session["mode"]
+        native = self.store.native_review
+
+        def ready(policy: str | None, source: str) -> dict:
+            if native and policy in {"closure", "packages"} and not self.review_route(con, session_id):
+                return {"ready": False, "policy": policy, "source": "review_route",
+                        "reason": "REVIEW_ROUTE_REQUIRED"}
+            return {"ready": True, "policy": policy, "source": source, "reason": None}
+
+        if not mode:
             return {"ready": False, "policy": None, "source": "not_required",
                     "reason": "MODE_REQUIRED"}
-        if session["mode"] not in {"standard", "long"}:
-            # quick/investigate (and any unknown legacy value) have no follow-up
-            # requirement; this keeps old databases usable instead of deadlocking.
-            return {"ready": True, "policy": None, "source": "not_required", "reason": None}
+        if mode not in {"standard", "long"}:
+            return ready(None, "not_required")
         if not session["verification"]:
             return {"ready": False, "policy": None, "source": "verification",
                     "reason": "VERIFICATION_REQUIRED"}
-        if session["mode"] == "long":
+        if mode == "long":
             gate = self._confirmed(con, session_id, "codex_gate")
             if gate:
-                return {"ready": True, "policy": gate[0], "source": "codex_gate", "reason": None}
+                return ready(gate[0], "codex_gate")
             return {"ready": False, "policy": None, "source": "codex_gate",
                     "reason": "CODEX_GATE_REQUIRED"}
+        if native:
+            return ready(None, "not_required")
         if session["review_registration"] == "registered" and session["codex_review"] is None:
             return {"ready": False, "policy": None, "source": "codex_review",
                     "reason": "CODEX_REVIEW_REQUIRED"}
-        policy = "closure" if session["codex_review"] else "none"
-        return {"ready": True, "policy": policy, "source": "codex_review", "reason": None}
+        return ready("closure" if session["codex_review"] else "none", "codex_review")
 
     def open(self, project_root: str, client_name: str, conversation_id: str | None = None,
              review_registration: str = "unknown", explicit_skip: bool = False,
@@ -187,12 +229,19 @@ class State:
     def get(self, session_id: str) -> dict:
         with self.store.transaction() as con:
             session = dict(self._session(con, session_id))
-            questions = [dict(r) for r in con.execute("SELECT * FROM questions WHERE session_id=? AND current=1 ORDER BY created_at", (session_id,))]
+            questions = [dict(r) for r in con.execute(
+                "SELECT * FROM questions WHERE session_id=? AND current=1 ORDER BY created_at", (session_id,))
+                if self._review_question_applies(session["mode"], r["kind"])]
             intake = self.intake_status(con, session_id)
+            session["review_route"] = self.review_route(con, session_id)
+        session["native_review"] = self.store.native_review
         session.pop("identity")
         session["temporary"] = bool(session["temporary"])
         session["verification"] = json.loads(session["verification"]) if session["verification"] else None
-        session["codex_review"] = bool(session["codex_review"]) if session["codex_review"] is not None else None
+        if self.store.native_review:
+            session["codex_review"] = None
+        elif session["codex_review"] is not None:
+            session["codex_review"] = bool(session["codex_review"])
         for q in questions:
             q["recommendation"] = json.loads(q["recommendation"])
             q["answer"] = json.loads(q["answer"]) if q["answer"] else None
@@ -208,11 +257,28 @@ class State:
 
     def question(self, session_id: str, question_id: str) -> dict:
         with self.store.transaction() as con:
-            self._session(con, session_id)
+            session = self._session(con, session_id)
             q = con.execute("SELECT * FROM questions WHERE id=? AND session_id=?", (question_id, session_id)).fetchone()
             if q is None:
                 raise ScsError("QUESTION_NOT_FOUND", "Question is not part of this conversation.")
-            return dict(q)
+            result = self.render_question(q)
+            if not self._review_question_applies(session["mode"], q["kind"]):
+                result["current"] = 0  # Also block resuming an inapplicable question by ID.
+            return result
+
+    def render_question(self, q) -> dict:
+        return {**dict(q), "native_review": self.store.native_review}
+
+    def _retire_inapplicable_native_reviews(self, con, session_id: str, mode: str | None) -> None:
+        if not self.store.native_review:
+            return
+        rows = con.execute("SELECT id,kind FROM questions WHERE session_id=? AND current=1 "
+                           "AND kind IN ('codex_gate','codex_review','review_route')", (session_id,)).fetchall()
+        for row in rows:
+            if not self._review_question_applies(mode, row["kind"]):
+                con.execute("UPDATE questions SET current=0,updated_at=? WHERE id=?", (now(), row["id"]))
+                self.store.event(con, session_id, row["id"], "interaction_request", "SUPERSEDED",
+                                 None, "NATIVE_REVIEW_QUESTION_NOT_APPLICABLE")
 
     def _retire_legacy_review_question(self, con, session_id: str) -> int:
         """Retire a current codex_review row that long mode no longer asks.
@@ -237,9 +303,15 @@ class State:
         recommendation = check_selection(kind, recommendation)
         with self.store.transaction(True) as con:
             s = self._session(con, session_id)
-            if s["mode"] == "long":
-                # Long mode asks codex_gate instead of codex_review. Retire a
-                # stale legacy row before any pending/reuse lookup.
+            if kind == "review_route" and not self.store.native_review:
+                return {"status": "SKIPPED", "reason": "NATIVE_REVIEW_DISABLED"}
+            if self.store.native_review:
+                self._retire_inapplicable_native_reviews(con, session_id, s["mode"])
+                if not self._review_question_applies(s["mode"], kind) and (kind == "codex_review" or s["mode"]):
+                    reason = "USE_CODEX_GATE" if s["mode"] == "long" else "MODE_DOES_NOT_REQUIRE_QUESTION"
+                    return {"status": "SKIPPED", "reason": reason}
+            elif s["mode"] == "long":
+                # Legacy long mode asks codex_gate instead of codex_review.
                 self._retire_legacy_review_question(con, session_id)
             if s["mode"] is not None:
                 # Mode applicability comes before question reuse and the pending
@@ -260,8 +332,10 @@ class State:
                 return {"created": False, **dict(q)}
             # Return the current question so the host can finish it without opening another UI.
             pending = con.execute(
-                "SELECT id,kind,state FROM questions WHERE session_id=? AND current=1 AND state != 'CONFIRMED'",
-                (session_id,),
+                "SELECT id,kind,state FROM questions WHERE session_id=? AND current=1 AND state != 'CONFIRMED' "
+                "AND NOT (kind='review_route' AND state IN ('DECLINED','CANCELLED','TIMED_OUT')) "
+                "AND (? OR kind!='review_route')",
+                (session_id, self.store.native_review),
             ).fetchone()
             if pending:
                 return {"status": "QUESTION_PENDING", "question_id": pending["id"],
@@ -272,6 +346,13 @@ class State:
                 raise ScsError("QUESTION_ORDER", "Confirm mode first.")
             if kind == "codex_gate" and not s["verification"]:
                 raise ScsError("QUESTION_ORDER", "Confirm verification scope first.")
+            if kind == "review_route":
+                intake = self.intake_status(con, session_id)
+                if intake["reason"] in {"VERIFICATION_REQUIRED", "CODEX_GATE_REQUIRED"}:
+                    raise ScsError("QUESTION_ORDER", "Confirm verification and the applicable review timing first.",
+                                   {"reason": intake["reason"]})
+                # Once the normal intake is settled, the same question can
+                # also select a route specifically for an operation pre-review.
             if kind == "codex_review":
                 if s["mode"] == "standard" and not s["verification"]:
                     raise ScsError("QUESTION_ORDER", "Confirm verification scope first.")
@@ -294,6 +375,8 @@ class State:
             q = con.execute("SELECT * FROM questions WHERE id=? AND session_id=?", (question_id, session_id)).fetchone()
             if not q or not q["current"]:
                 raise ScsError("LATE_REPLY", "This question was replaced.")
+            if self.store.native_review and not self._review_question_applies(self._session(con, session_id)["mode"], q["kind"]):
+                raise ScsError("LATE_REPLY", "This review question no longer applies.")
             if q["state"] != "REQUESTED":
                 return False, dict(q)
             con.execute("UPDATE questions SET state='WAITING_USER',updated_at=? WHERE id=?", (now(), question_id))
@@ -307,6 +390,8 @@ class State:
             q = con.execute("SELECT * FROM questions WHERE id=? AND session_id=?", (question_id, session_id)).fetchone()
             if not q or not q["current"]:
                 raise ScsError("LATE_REPLY", "Question was replaced; this result cannot affect the current question.")
+            if self.store.native_review and not self._review_question_applies(self._session(con, session_id)["mode"], q["kind"]):
+                raise ScsError("LATE_REPLY", "This review question no longer applies.")
             if q["state"] in TERMINAL:
                 return dict(q)
             con.execute("UPDATE questions SET state=?,updated_at=? WHERE id=?", (state, now(), question_id))
@@ -326,12 +411,16 @@ class State:
         codes = {"accept": "USER_CONFIRMED", "decline": "USER_DECLINED", "cancel": "USER_CANCELLED",
                  "timeout": "HOST_OBSERVED_TIMEOUT", "unsupported": "ELICITATION_UNSUPPORTED", "error": "RPC_ERROR"}
         with self.store.transaction(True) as con:
-            self._session(con, session_id)
+            session = self._session(con, session_id)
             q = con.execute("SELECT * FROM questions WHERE id=? AND session_id=?", (question_id, session_id)).fetchone()
             if q is None:
                 raise ScsError("QUESTION_NOT_FOUND", "Question is not part of this conversation.")
             if not q["current"]:
                 raise ScsError("LATE_REPLY", "A reply for a replaced question is isolated.")
+            if not self._review_question_applies(session["mode"], q["kind"]):
+                raise ScsError("LATE_REPLY", "This review question no longer applies.")
+            if q["kind"] == "review_route" and not self.store.native_review:
+                raise ScsError("NATIVE_REVIEW_DISABLED", "The native review backend is not enabled.")
             answer = encode(check_selection(q["kind"], choices or [])) if action == "accept" else None
             if q["state"] in TERMINAL:
                 if q["state"] == target and q["answer"] == answer:
@@ -340,6 +429,9 @@ class State:
             con.execute("UPDATE questions SET state=?,answer=?,updated_at=? WHERE id=?", (target, answer, now(), question_id))
             if action == "accept":
                 selected = json.loads(answer)
+                if q["kind"] == "mode":
+                    # Do not carry a short-mode review row into newly confirmed long mode.
+                    self._retire_inapplicable_native_reviews(con, session_id, session["mode"])
                 # codex_gate has no sessions column: the confirmed question row
                 # is the only source and is projected by get().
                 column = {"mode": "mode", "verification": "verification",
@@ -370,9 +462,10 @@ class State:
                 raise ScsError("EXPLICIT_CHANGE_REQUIRED", "Reopening an active or confirmed question requires an explicit user change.")
             # Invalidate unfinished dependent questions when an earlier choice
             # changes. Already confirmed scopes remain this conversation's choices.
-            dependent = {"mode": ("verification", "codex_gate", "codex_review"),
-                         "verification": ("codex_gate", "codex_review"),
-                         "codex_gate": ("codex_review",), "codex_review": ()}[kind]
+            dependent = {"mode": ("verification", "codex_gate", "codex_review", "review_route"),
+                         "verification": ("codex_gate", "codex_review", "review_route"),
+                         "codex_gate": ("codex_review", "review_route"),
+                         "codex_review": ("review_route",), "review_route": ()}[kind]
             for child_kind in dependent:
                 child = con.execute("SELECT * FROM questions WHERE session_id=? AND kind=? AND current=1 AND state != 'CONFIRMED'",
                                     (session_id, child_kind)).fetchone()

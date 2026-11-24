@@ -9,7 +9,7 @@ import stat
 from .errors import ScsError
 from .evidence import verify_file
 from .locks import Leases
-from .state import State, identifier
+from .state import REVIEW_AGENTS, State, identifier
 from .storage import Store, encode, now
 
 STATES = {"PENDING": {"IN_PROGRESS", "BLOCKED", "ABANDONED"},
@@ -263,6 +263,8 @@ class Work:
                 self.store.paths.mkdir(f"{docs}/agent/evidence/{pid}/R1/{task['id']}")
             data = {**definition,
                     "review_required": session["mode"] == "long" and intake["policy"] == "packages"}
+            if self.store.native_review and data["review_required"]:
+                data["native_review_required"] = True
             con.execute("INSERT INTO work_packages VALUES(?,?,?,?,?,?,?,?)", (pid, session_id, 1, 1, "PENDING", encode(data), docs, now()))
             self.store.event(con, session_id, None, "work_package_create", "PACKAGE_CREATED")
             row = self._get(con, pid)
@@ -385,6 +387,16 @@ class Work:
         """Create one attempt inside the caller's write transaction."""
         package_id, revision = row["id"], row["revision"]
         self._assert_review_window(con, row, data, task)
+        route = None
+        if task["kind"] == "review" and data.get("native_review_required") and not self.store.native_review:
+            raise ScsError("NATIVE_REVIEW_DISABLED", "This package requires the native review backend.")
+        if self.store.native_review:
+            if task["kind"] == "review":
+                route = self.state.require_review_route(con, session_id)
+            intake = self.state.intake_status(con, session_id)
+            if not intake["ready"]:
+                raise ScsError("INTAKE_REQUIRED", "Confirm this conversation's intake before preparing an attempt.",
+                               {"reason": intake["reason"], "source": intake["source"], "policy": intake["policy"]})
         active = con.execute("SELECT id FROM work_attempts WHERE package_id=? AND revision=? AND subtask_id=? AND state!='ENDED'",
                              (package_id, revision, task["id"])).fetchone()
         if active:
@@ -428,6 +440,8 @@ class Work:
             # manifest must match this baseline and the current recomputation.
             review_subject = self._review_subject(row, data)
             input_snapshot["review_subject"] = review_subject
+            if route is not None:
+                input_snapshot.update(review_route=route, agent_type=REVIEW_AGENTS[route])
         self.store.paths.mkdir(evidence_dir)
         con.execute("INSERT INTO work_attempts(id,package_id,revision,subtask_id,attempt_no,state,host_agent_id,controller_session,input_snapshot,resources,result_state,result_data,created_at,updated_at,last_observed_at) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,?)",
                     (attempt_id, package_id, revision, task["id"], attempt_no, state,
@@ -440,6 +454,8 @@ class Work:
         if review_subject is not None:
             entry["review_subject"] = review_subject
             entry["review_required"] = bool(data.get("review_required"))
+            if route is not None:
+                entry.update(review_route=route, agent_type=REVIEW_AGENTS[route])
         return entry
 
     def prepare_attempt(self, session_id: str, package_id: str, expected_version: int,
@@ -504,7 +520,7 @@ class Work:
                 response["review_subject"] = subjects[0]
             return response
 
-    def _apply_result(self, con, row, data: dict, attempt, result: dict) -> dict:
+    def _apply_result(self, row, data: dict, attempt, result: dict, host_agent_id: str | None) -> dict:
         """Validate one ENDED result and apply it to the in-memory revision data."""
         if not isinstance(result, dict) or set(result) - {"status", "evidence", "note"}:
             raise ScsError("INPUT_INVALID", "An ending attempt needs a status, evidence and optional note.")
@@ -523,15 +539,20 @@ class Work:
         if task["kind"] == "review":
             snapshot = json.loads(attempt["input_snapshot"]) if attempt["input_snapshot"] else {}
             frozen = snapshot.get("review_subject")
+            route = snapshot.get("review_route")
             if not isinstance(frozen, str) or not re.fullmatch(r"[0-9a-f]{64}", frozen):
                 # Attempts prepared before the subject was frozen keep the old
                 # contract: the manifest is bound to the current recomputation.
                 frozen = None
+            if route is None and data.get("native_review_required") and evidence:
+                raise ScsError("REVIEW_INVALID", "This package requires a native review receipt.")
+            if route is not None and evidence and (not frozen or not host_agent_id or not host_agent_id.strip()):
+                raise ScsError("REVIEW_INVALID", "A native review needs its pinned subject and a recorded host_agent_id.")
             if status == "PASS" and len(evidence) != 1:
                 raise ScsError("REVIEW_INVALID", "A PASS review needs exactly one JSON manifest.")
-            if status in {"FAIL", "BLOCKED", "NOT_RUN"} and len(evidence) > 1:
+            if (route is not None or status in {"FAIL", "BLOCKED", "NOT_RUN"}) and len(evidence) > 1:
                 raise ScsError("REVIEW_INVALID", "A review attempt records at most one JSON manifest.")
-            if status == "PASS":
+            if status == "PASS" or (route is not None and evidence):
                 # PASS/ACCEPT needs the manifest, the prepare-time baseline and
                 # the current subject to agree; a failure without evidence never
                 # recomputes, so a broken file set cannot trap an open attempt.
@@ -551,21 +572,24 @@ class Work:
                         or not isinstance(entry.get("path"), str)):
                     raise ScsError("EVIDENCE_INVALID", "Supply evidence path, sha256 and optional required_content.")
                 check = verify_file(self.store, entry["path"], prefix, "review",
-                                    entry.get("required_content"), subject_sha256=expected)
+                                    entry.get("required_content"), subject_sha256=expected,
+                                    review_route=route, host_agent_id=host_agent_id)
                 if check["status"] != "VERIFIED" or entry.get("sha256") != check["sha256"]:
                     code = check.get("error_code") or "EVIDENCE_INVALID"
                     if code in {"REVIEW_STALE", "REVIEW_SUBJECT_TOO_LARGE", "REVIEW_SUBJECT_INCOMPLETE"}:
                         raise ScsError(code, check.get("message") or "The review subject is stale or unavailable.")
-                    raise ScsError("EVIDENCE_INVALID", "Review evidence is invalid, insufficient or changed.")
+                    raise ScsError("EVIDENCE_INVALID", "Review evidence is invalid, insufficient or changed.",
+                                   {"reason": code} if route is not None else None)
                 manifests.append(check["review"])
-            if status == "PASS":
-                if manifests[0]["verdict"] != "ACCEPT":
-                    raise ScsError("REVIEW_VERDICT_INVALID", "A PASS review requires an ACCEPT manifest.")
-                task["review"] = {"subject_sha256": expected, "verdict": "ACCEPT", "attempt_id": attempt["id"]}
-            elif status == "FAIL" and manifests:
-                if manifests[0]["verdict"] != "REJECT":
-                    raise ScsError("REVIEW_VERDICT_INVALID", "A FAIL review with evidence must record REJECT.")
-                task["review"] = {"subject_sha256": expected, "verdict": "REJECT", "attempt_id": attempt["id"]}
+            if route is not None and manifests and status not in {"PASS", "FAIL"}:
+                raise ScsError("REVIEW_VERDICT_INVALID", "A completed native verdict must be recorded as PASS or FAIL.")
+            if status == "PASS" or (status == "FAIL" and manifests):
+                verdict = "ACCEPT" if status == "PASS" else "REJECT"
+                if manifests[0]["verdict"] != verdict:
+                    raise ScsError("REVIEW_VERDICT_INVALID", f"A {status} review with evidence requires {verdict}.")
+                task["review"] = {"subject_sha256": expected, "verdict": verdict, "attempt_id": attempt["id"]}
+                if route is not None:
+                    task["review"].update(review_route=route, agent_type=REVIEW_AGENTS[route], agent_id=host_agent_id)
             else:
                 task.pop("review", None)
         else:
@@ -613,18 +637,21 @@ class Work:
             task = next((t for t in data["subtasks"] if t["id"] == attempt["subtask_id"]), None)
             if task is None:
                 raise ScsError("SUBTASK_INVALID", "Attempt subtask no longer exists.")
+            host = host_agent_id if host_agent_id is not None else attempt["host_agent_id"]
+            if (task["kind"] == "review" and json.loads(attempt["input_snapshot"]).get("review_route") is not None
+                    and attempt["host_agent_id"] and host != attempt["host_agent_id"]):
+                raise ScsError("REVIEW_AGENT_MISMATCH", "A native review's recorded host_agent_id cannot be replaced.")
             result_data = None
             if target == "ENDED":
                 if attempt["revision"] != row["revision"]:
                     raise ScsError("REVISION_CONFLICT", "This attempt belongs to another revision.")
-                result_data = self._apply_result(con, row, data, attempt, result)
+                result_data = self._apply_result(row, data, attempt, result, host)
                 self._verify_reports(data, row, row["revision"])
                 con.execute("UPDATE work_packages SET version=version+1,data=? WHERE id=? AND version=?",
                             (encode(data), row["id"], expected_version))
                 self.store.revision_snapshot(con, self._get(con, row["id"]))
                 self.leases.release_attempt(con, attempt_id, session_id)
             stamp = now()
-            host = host_agent_id if host_agent_id is not None else attempt["host_agent_id"]
             con.execute("UPDATE work_attempts SET state=?,host_agent_id=?,result_state=?,result_data=?,updated_at=?,last_observed_at=? WHERE id=?",
                         (target, host,
                          result_data["status"] if result_data else attempt["result_state"],
@@ -690,8 +717,8 @@ class Work:
                 raise ScsError("REVIEW_WINDOW_ACTIVE", "End a review attempt alone; do not mix it with other results.")
             expected_version = row["version"]
             for attempt in attempts:
-                self._apply_result(con, row, data, attempt, next(
-                    item["result"] for item in updates if item["attempt_id"] == attempt["id"]))
+                self._apply_result(row, data, attempt, next(
+                    item["result"] for item in updates if item["attempt_id"] == attempt["id"]), attempt["host_agent_id"])
             self._verify_reports(data, row, row["revision"])
             con.execute("UPDATE work_packages SET version=version+1,data=? WHERE id=? AND version=?",
                         (encode(data), row["id"], expected_version))
@@ -928,6 +955,25 @@ class Work:
             if not task:
                 raise ScsError("SUBTASK_INVALID", "Subtask does not exist in this revision.")
             prefix = f"{row['docs_root']}/agent/evidence/{package_id}/R{revision}/{subtask_id}"
+            if task["kind"] == "review":
+                try:
+                    clean = self.store.paths.validate(path)
+                except ScsError as exc:
+                    return {"status": "INVALID", "error_code": exc.code, "message": str(exc)}
+                attempt = None
+                if clean.startswith(prefix + "/"):
+                    attempt_id = clean[len(prefix) + 1:].split("/", 1)[0]
+                    attempt = con.execute("SELECT * FROM work_attempts WHERE id=? AND package_id=? AND revision=? AND subtask_id=?",
+                                          (attempt_id, package_id, revision, subtask_id)).fetchone()
+                    if attempt:
+                        snapshot = json.loads(attempt["input_snapshot"])
+                        route = snapshot.get("review_route")
+                        if route is not None:
+                            return verify_file(self.store, clean, prefix + "/" + attempt_id, "review",
+                                               subject_sha256=snapshot["review_subject"], review_route=route,
+                                               host_agent_id=attempt["host_agent_id"])
+                if self.store.native_review and clean.startswith(prefix + "/") and attempt is None:
+                    return {"status": "INVALID", "error_code": "REVIEW_ATTEMPT_REQUIRED"}
             return verify_file(self.store, path, prefix, task["kind"], required_content)
 
     def _review_subject(self, row, data: dict) -> str:
@@ -1155,7 +1201,9 @@ class Work:
                 continue
             review = task.get("review") or {}
             if review.get("verdict") == "ACCEPT":
-                if review.get("subject_sha256") == current:
+                native = self.store.native_review or data.get("native_review_required")
+                if (review.get("subject_sha256") == current
+                        and (not native or review.get("review_route") in REVIEW_AGENTS)):
                     return
                 stale = True
         if stale:
@@ -1193,25 +1241,31 @@ class Work:
 
     def _verify_reports(self, data: dict, row, revision: int):
         for task in data["subtasks"]:
-            if task["status"] != "PASS":
+            review = (task.get("review") or {}) if task["kind"] == "review" else {}
+            route = review.get("review_route")
+            if task["status"] != "PASS" and not (route is not None and task["status"] == "FAIL"):
                 continue
             if not task["evidence"]:
-                raise ScsError("EVIDENCE_REQUIRED", "A stored PASS report has no evidence.")
-            review = task.get("review") if task["kind"] == "review" else None
-            if task["kind"] == "review" and (len(task["evidence"]) != 1 or not review
-                                             or review.get("verdict") != "ACCEPT"):
-                raise ScsError("REVIEW_INVALID", "A stored PASS review needs exactly one ACCEPT manifest.")
+                raise ScsError("EVIDENCE_REQUIRED", "A stored report has no evidence.")
+            verdict = "ACCEPT" if task["status"] == "PASS" else "REJECT"
+            if task["kind"] == "review" and (len(task["evidence"]) != 1 or review.get("verdict") != verdict):
+                raise ScsError("REVIEW_INVALID", f"A stored review needs exactly one {verdict} manifest.")
+            prefix = f"{row['docs_root']}/agent/evidence/{row['id']}/R{revision}/{task['id']}"
+            if route is not None:
+                if not review.get("attempt_id") or not review.get("agent_id") or not review.get("subject_sha256"):
+                    raise ScsError("REVIEW_INVALID", "Stored native review is missing its attempt binding.")
+                prefix += "/" + review["attempt_id"]
             for entry in task["evidence"]:
-                result = verify_file(self.store, entry["path"],
-                    f"{row['docs_root']}/agent/evidence/{row['id']}/R{revision}/{task['id']}",
-                    task["kind"], entry.get("required_content"))
+                result = verify_file(self.store, entry["path"], prefix, task["kind"], entry.get("required_content"),
+                                     review_route=route, host_agent_id=review.get("agent_id"))
                 if result["status"] != "VERIFIED" or result["sha256"] != entry["sha256"]:
-                    raise ScsError("EVIDENCE_CHANGED", "Stored PASS evidence changed; revise its report before continuing.")
+                    raise ScsError("EVIDENCE_CHANGED", "Stored evidence changed; revise its report before continuing.")
                 if task["kind"] == "review":
                     manifest = result["review"]
-                    if manifest["verdict"] != "ACCEPT":
-                        raise ScsError("REVIEW_INVALID", "A stored PASS review must carry an ACCEPT manifest.")
-                    if manifest["subject_sha256"] != review.get("subject_sha256"):
+                    if manifest["verdict"] != verdict:
+                        raise ScsError("REVIEW_INVALID", f"A stored review must carry an {verdict} manifest.")
+                    key = "review_subject" if route is not None else "subject_sha256"
+                    if manifest[key] != review.get("subject_sha256"):
                         raise ScsError("REVIEW_STALE", "The stored review manifest no longer matches its subject.")
 
     def update(self, session_id: str, package_id: str, expected_version: int,

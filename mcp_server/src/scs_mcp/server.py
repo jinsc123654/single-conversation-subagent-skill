@@ -16,7 +16,7 @@ from . import __version__
 from .board import Board, BoardError
 from .errors import ScsError
 from .models import AttemptResult, AttemptUpdateItem, SubtaskDefinition, SubtaskResult, WorkPackageDefinition
-from .interaction import MESSAGES, choice_code, describe, native_question, schema_for, supports_form
+from .interaction import choice_code, describe, message_for, native_question, schema_for, supports_form
 from .obsidian import ProjectView
 from .roots import Roots
 from .project_index import publish
@@ -183,8 +183,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         """Read confirmed choices and pending questions; does not ask or alter preferences.
 
         codex_gate is projected from the current confirmed question (null when
-        not asked), codex_review keeps its original boolean meaning, and intake
-        reports the shared ready/policy/source/reason predicate.
+        not asked), codex_review keeps its original boolean meaning, review_route
+        is the confirmed native route, and intake reports ready/policy/source/reason.
         """
         return roots.for_session(session_id).get(session_id)
 
@@ -202,6 +202,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             q = state.request(session_id, kind, recommendation, channel)
         if "id" not in q:
             return q
+        q = state.render_question(q)
         if q["state"] == "CONFIRMED":
             return {"status": "ALREADY_CONFIRMED", "question_id": q["id"], "choices": json.loads(q["answer"])}
         if q["state"] in {"DECLINED", "CANCELLED", "TIMED_OUT"}:
@@ -218,6 +219,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             return result
         if q["state"] == "REQUESTED":
             claimed, q = state.claim(session_id, q["id"])
+            q = state.render_question(q)
             if not claimed:
                 if q["state"] == "CONFIRMED":
                     return {"status": "ALREADY_CONFIRMED", "question_id": q["id"], "choices": json.loads(q["answer"])}
@@ -239,18 +241,19 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             analysis = f"分析：{analysis}"
         elif q["kind"] == "mode":
             analysis = f"扫描：{scan_workspace(state.store.root)[:150]}"
-        message = MESSAGES[q["kind"]] + " question_id=" + q["id"]
+        message = message_for(q) + " question_id=" + q["id"]
         if analysis:
             message += "\n" + analysis
         if timeout and timeout > 0:
-            message += f"\n{timeout:g} 秒未选择按推荐项继续。"
+            message += (f"\n{timeout:g} 秒未选择不确认路线。" if kind == "review_route"
+                        else f"\n{timeout:g} 秒未选择按推荐项继续。")
         return Elicit(message, schema_for(q, analysis, timeout))
 
     # Local closure annotations are deliberately evaluated (no future annotations):
     # SDK get_type_hints must see this exact resolver object, not an unresolved name.
     @mcp.tool(structured_output=True)
     async def interaction_request(
-        session_id: str, kind: Literal["mode", "verification", "codex_gate", "codex_review"],
+        session_id: str, kind: Literal["mode", "verification", "codex_gate", "codex_review", "review_route"],
         recommendation: list[str],
         answer: Annotated[ElicitationResult[BaseModel], Resolve(prepare)],
         channel: Literal["auto", "native", "text"] = "auto",
@@ -292,7 +295,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
     async def interaction_ask(
         ctx: Context,
         session_id: str,
-        kind: Literal["mode", "verification", "codex_gate", "codex_review"],
+        kind: Literal["mode", "verification", "codex_gate", "codex_review", "review_route"],
         recommendation: list[str],
         timeout_seconds: float = 15.0,
         analysis: str | None = None,
@@ -326,14 +329,16 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
             return describe(q, "MODERN_NO_BACKCHANNEL", analysis=analysis)
         message = outcome.message
         if timeout_seconds is not None and timeout_seconds > 0:
-            message += f"；{timeout_seconds:g} 秒后按推荐项继续。"
+            message += (f"；{timeout_seconds:g} 秒后不确认路线。" if kind == "review_route"
+                        else f"；{timeout_seconds:g} 秒后按推荐项继续。")
             try:
                 with anyio.fail_after(timeout_seconds):
                     answer = await ctx.elicit(message, outcome.schema)
             except TimeoutError:
                 result = state.submit(session_id, qid, "timeout", None, "mcp", True)
                 result["recommendation"] = recommendation
-                result["next"] = "Use the recommended choice; the MCP form timed out."
+                result["next"] = ("No route confirmed; explicitly reopen before retrying." if kind == "review_route"
+                                  else "Use the recommended choice; the MCP form timed out.")
                 return result
         else:
             answer = await ctx.elicit(message, outcome.schema)
@@ -361,7 +366,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         return roots.for_session(session_id).submit(session_id, question_id, action, choices, source, observed_timeout)
 
     @mcp.tool(structured_output=True)
-    async def interaction_reopen(session_id: str, kind: Literal["mode", "verification", "codex_gate", "codex_review"],
+    async def interaction_reopen(session_id: str, kind: Literal["mode", "verification", "codex_gate", "codex_review", "review_route"],
                            explicit_user_change: bool = False) -> dict[str, Any]:
         """Explicitly retry an ended question. Replacing an active/confirmed question requires a real user change.
 
@@ -388,9 +393,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         """Create an optional bounded package after intake. request_key makes retries safe.
 
         subtasks=[{id,kind:analyze|implement|test|review,allowed_files,acceptance}].
-        review is a record of an external Codex review launched by the main
-        conversation, not a fourth host subagent. Only implement defaults to a
-        write lease; analyze/test/review default to no lease. When the long-mode
+        review records an independent review launched by the main conversation
+        (a host Agent in native mode). Only implement defaults to a write lease;
+        analyze/test/review default to no lease. When the long-mode
         gate is packages the package stores review_required=true.
         Scope is project-relative; no scheduling occurs. Missing Markdown records are
         initialized only; main conversation must explicitly sync reviewed records.
@@ -443,6 +448,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         host Agent only after this returns. The work package version is unchanged.
         A review attempt must run alone (REVIEW_WINDOW_ACTIVE otherwise), takes no
         default lease, and returns review_subject; the manifest must echo it.
+        Native review also pins review_route and agent_type at preparation.
         Legacy stored read resources are skipped with warnings.
         """
         result = roots.work(session_id).prepare_attempt(session_id, package_id, expected_version,
@@ -461,9 +467,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         lost, and ENDED with result when activity is confirmed stopped. ENDED writes
         the subtask report and increments the package version; PASS needs evidence
         under the attempt directory. A review PASS needs exactly one strict JSON
-        manifest with verdict ACCEPT; review FAIL may record a valid REJECT
-        manifest (both are legitimate reports, exit_code=0). operation_id makes
-        retries idempotent.
+        manifest with verdict ACCEPT; review FAIL may record a valid REJECT.
+        A native review manifest is a v2 receipt and its agent_id must match
+        host_agent_id. operation_id makes retries idempotent.
         """
         updated = roots.work(session_id).update_attempt(session_id, attempt_id, expected_version,
                                                         state, result.model_dump() if result is not None else None,
@@ -540,18 +546,21 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
                                     verdict: Literal["ACCEPT", "REJECT", "UNAVAILABLE_OVERRIDE"],
                                     user_confirmed: bool, report_path: str | None = None,
                                     reason: str | None = None,
-                                    baseline: dict[str, Any] | None = None) -> dict[str, Any]:
+                                    baseline: dict[str, Any] | None = None,
+                                    review_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
         """Record a destructive-operation decision bound to its exact operation.
 
         This is a protocol-level ledger, not an execution hook: MCP neither runs
         nor intercepts host commands. The operation digest covers command,
         absolute cwd (inside the project), sorted targets and baseline
-        ({"head": sha} or {"files": {path: sha256}}). ACCEPT/REJECT need a
-        project-local UTF-8 report whose body has exactly one final conclusion
-        line ``结论: ACCEPT`` or ``结论: REJECT`` (bold allowed); ACCEPT also
-        needs user_confirmed=true. REJECT is terminal for the same
-        operation_id/digest; a later ACCEPT returns GATE_REJECTED.
-        UNAVAILABLE_OVERRIDE is only for unavailable Codex: it requires
+        ({"head": sha} or {"files": {path: sha256}}). Native ACCEPT/REJECT
+        need a strict v2 review_receipt bound to the operation_digest and
+        confirmed review_route; final_message.path is project-relative and
+        report_path, if supplied, must match it. Legacy mode uses report_path
+        alone. The UTF-8 final report must contain exactly one conclusion line
+        ``结论: ACCEPT`` or ``结论: REJECT``; ACCEPT also needs user_confirmed=true.
+        REJECT is terminal for the same operation_id/digest; a later ACCEPT
+        returns GATE_REJECTED. UNAVAILABLE_OVERRIDE is only for unavailable review: it requires
         user_confirmed=true and a reason of at least 10 characters, may omit the
         report, and is never reported as APPROVED. Same operation_id, digest and
         verdict returns the original record; a different digest returns
@@ -560,7 +569,7 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         """
         return roots.gate(session_id).record(
             session_id, operation_id, command, cwd, targets, impact, backup, rollback,
-            verdict, user_confirmed, report_path, reason, baseline)
+            verdict, user_confirmed, report_path, reason, baseline, review_receipt)
 
     @mcp.tool(structured_output=True)
     async def operation_gate_check(session_id: str, operation_id: str,
@@ -570,12 +579,13 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         """Read-only pre-execution check. Call immediately before a destructive operation.
 
         status is MISSING, APPROVED, REJECTED, UNAVAILABLE_OVERRIDE or STALE.
-        APPROVED requires a recorded ACCEPT with user_confirmed=true;
-        UNAVAILABLE_OVERRIDE is never APPROVED. Supplying command/cwd/targets/
-        baseline recomputes the digest against the record; any change returns
-        STALE. The user's independent confirmation is still required, no events
-        are written, and the report file is not re-read (its sha256 was fixed at
-        record time). MCP cannot intercept host commands.
+        APPROVED requires a recorded ACCEPT with user_confirmed=true and in
+        native mode a matching route and v2 receipt. UNAVAILABLE_OVERRIDE is
+        never APPROVED. Supplying command/cwd/targets/baseline recomputes the
+        digest; any mismatch returns STALE. For a new native operation, supply
+        command, cwd and targets together to get its digest in MISSING. The
+        user's independent confirmation is still required, no events are written,
+        and the report contents are not re-read. MCP cannot intercept commands.
         """
         return roots.gate(session_id).check(
             session_id, operation_id, command, cwd, targets, baseline)
@@ -619,14 +629,13 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
                               path: str, required_content: list[str] | None = None) -> dict[str, Any]:
         """Verify a bounded UTF-8 file inside this package/revision/subtask evidence directory.
 
-        Test evidence is JSON with command, exit_code=0, and passed>0. Review
-        evidence is a strict JSON manifest with exactly verdict, session_id,
-        model, subject_sha256, final_message_sha256, command, exit_code=0 and
-        raw_path; raw_path stays inside the evidence directory, its sha256 must
-        match, and the raw final message must contain exactly one conclusion
-        line (结论: ACCEPT|REJECT) agreeing with verdict. VERIFIED is
-        file/content validation, not proof of execution or final main-agent
-        acceptance.
+        Test evidence is JSON with command, exit_code=0, and passed>0. Native
+        review evidence is a strict v2 receipt pinned to the prepared attempt;
+        final_message.path is relative to the receipt and stays inside the
+        attempt directory. Pre-native attempts retain their legacy manifest.
+        The raw message hash must match and exactly one conclusion line
+        (结论: ACCEPT|REJECT) must agree with verdict. VERIFIED is structural
+        validation, not proof of host execution or final main-agent acceptance.
         """
         return roots.work(session_id).evidence(session_id, package_id, revision, subtask_id, path, required_content)
 

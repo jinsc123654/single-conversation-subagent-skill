@@ -2,7 +2,7 @@
 
 单对话两级 Subagent 协作，采用 **Skill 主策略/主问 + 本地 MCP 收集状态/工作流 + 宿主原生 Subagent 执行**。主对话直接协调并最终验收，执行子 Agent 不继续委派；MCP 不创建 Agent，也不默认驱动提问 UI。3.0 为长任务增加 `codex_gate` 包级复核、侦察/实施/验证三角色与扇出预算，并把破坏性操作闸门扩展到所有模式。
 
-ZCode 默认 `SCS_QUESTION_CHANNEL=native`：Skill 用宿主原生 AskUserQuestion 问四选一/验证/`codex_gate`/`codex_review`；MCP 的 `session_open(project_root=<任务项目根>)` 返回 `workspace_scan`/`mode_options`/`project_root`/`codex_gate`/`intake`，为任务项目建设独立 `<项目>/.scs` 并记录选择。MCP form/15 秒只作为没有原生提问工具宿主的兜底，不默认使用。推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认；原生/文本路径不声称 15 秒。
+本分支面向 **ZCode 4**：主对话直接派发执行子 Agent 和只读复核子 Agent；不使用外部复核 CLI 或额外复核 Skill。MCP 只收集状态和证据，不启动模型。默认 `SCS_QUESTION_CHANNEL=native`，Skill 用宿主原生 AskUserQuestion；`session_open(project_root=<任务项目根>)` 为项目维护独立 `<项目>/.scs` 并记录选择。MCP form/15 秒仅为没有原生提问工具的宿主兜底。推荐项、未回复、取消、RPC 失联和 UI 不出现均不算确认；原生/文本路径没有这个 15 秒期限。
 
 ```mermaid
 flowchart TD
@@ -10,40 +10,38 @@ flowchart TD
   I --> O["session_open → workspace_scan / mode_options"]
   O --> A["Skill 原生提问：四选一"]
   A --> M{"模式"}
-  M -->|标准 / 长任务| V["问验证范围"]
-  V --> L{"长任务?"}
-  L -->|是| G["问 codex_gate：packages / closure / none（推荐 packages）"]
-  L -->|否| R["已注册时问 codex_review：yes / no"]
-  G --> C["高危 / 长任务：一次 Codex 只读方案指导（推荐）"]
+  M -->|标准| V["确认验证范围"]
+  M -->|长任务| VL["确认验证范围"]
+  V --> P["ZCode 内建执行，按需用默认/内建 Agent"]
+  M -->|快速| P
+  M -->|只调查| D["只读分析，按需用内建 Explore"]
+  VL --> G["确认复核频率 packages / closure / none"]
+  G -->|packages / closure| R["确认复核路线 gpt / inherit"]
+  G -->|none| C["可选一次原生只读方案指导"]
   R --> C
-  C --> P["标准：主对话实现与验证"]
-  G --> W["长任务：侦察 / 实施 / 验证子 Agent"]
-  M -->|快速| Q["已注册可问 codex_review；高危再一次方案指导"]
-  Q --> F["主对话直接处理"]
-  M -->|只调查| D["只读分析（可选只读子 Agent）"]
-  P --> E["证据 / 修订 → 主对话验收"]
+  C --> W["长任务按专用角色派发侦察、实施、验证"]
   W --> RV{"packages?"}
-  RV -->|是| T["每包 review attempt：Codex 只读复核"]
-  RV -->|否| E
+  RV -->|是| T["每包 review attempt 做原生只读复核"]
+  RV -->|否| E["汇总证据"]
   T --> E
-  F --> E
-  D --> E
-  E --> X["收尾：gate packages/closure 或 codex_review=yes → codex-review"]
-  P -.-> H["破坏性操作闸门（全模式，执行前 check）"]
-  W -.-> H
-  F -.-> H
-  X --> Z["主对话最终验收"]
+  E --> X["按长任务的已确认频率和路线收尾"]
+  P -.-> B["破坏性操作阻塞，等待用户明确切换长任务"]
+  B -.->|用户明确切换| VL
+  W -.-> H["破坏性操作闸门，独立确认及执行前 check"]
+  P --> Z["主对话最终验收"]
+  D --> Z
+  X --> Z
 ```
 
-本对话模式：快速处理 / 标准执行 / 长任务 / 只调查，只给一个按风险、范围、成本动态决定的推荐。后续沿用本对话结果；新对话重新开始。标准/长任务首次确认验证范围，快速/只调查跳过。**长任务在验证范围后确认 `codex_gate`**：`packages` = 每个工作包由主对话启动 Codex 只读复核并在收尾再审查（推荐），`closure` = 仅收尾审查，`none` = 不做 Codex 审查；推荐不是确认。**标准/快速保持原 `codex_review` yes/no**（仅 codex-review 注册已确认时），长任务不再问 `codex_review`。**高危操作或长任务在实现前推荐一次 Codex 只读方案指导（仅一次）**：用户确认后由主对话运行，brief 包含目标、计划改动、高危点、约束、验证和回滚，结果纳入方案并记录；Codex 不可用或用户拒绝时说明并继续，不重复启动；方案指导不替代收尾审查。
+对话模式为快速处理 / 标准执行 / 长任务 / 只调查，推荐项不等于用户确认。标准/长任务首次确认验证范围，快速/只调查跳过。**标准/快速**随后走 ZCode 内建流程，主对话直接处理，仅按需用默认/内建 Agent，不问 SCS 原生复核时机、路由或方案指导。**只调查**保持只读，按需用内建 `Explore`。**只有长任务**自动编排六个专用角色：`codex_gate=packages|closure|none` 对应逐包+收尾、仅收尾、不做包级和收尾复核；适用时确认 `review_route=gpt|inherit`。长任务可在实现前推荐一次原生只读方案指导，用户确认后主对话才派发；指导不替代正式复核。用户明确点名时，可在自动流程外手动调用可用的专用角色，仍守当前模式边界，不启动 SCS 复核问答，也不替代正式复核或闸门。
 
-长任务执行固定使用侦察者（`analyze`，只读）、实施者（`implement`，只改 `allowed_files`）、验证者（`test`，只跑命令）三类执行子 Agent；Codex 技术复核者不是子 Agent，只由主对话启动。调查阶段有 n 个独立只读子任务时起步 min(4, n) 个侦察者；实现阶段按 `allowed_files` 两两不相交取最大并行集合；默认并发上限 4，没有宿主并发证据时取 1。`packages` 包在 `REVIEW_READY` 前需要 review attempt 的 ACCEPT manifest 且 `review_subject` 当前，文件/定义/结果变化即 `REVIEW_STALE`。破坏性操作在**所有模式**都要先登记 `operation_gate_record`、执行前 `operation_gate_check` 为 `APPROVED`；REJECT 终态，Codex 不可用只能记 `UNAVAILABLE_OVERRIDE`。MCP 不执行、不拦截宿主命令，没有宿主 Hook 时是协议级约束。
+长任务由主对话直接派发侦察者（`analyze`，只读）、实施者（`implement`，只改 `allowed_files`）、验证者（`test`，只跑获准命令），以及需要时的原生只读复核者。调查阶段有 n 个独立只读子任务时起步 min(4, n) 个侦察者；实现阶段按 `allowed_files` 两两不相交取最大并行集合；默认并发上限 4，没有宿主并发证据时取 1。`packages` 包在 `REVIEW_READY` 前需要 review attempt 的 ACCEPT manifest 且 `review_subject` 当前，文件/定义/结果变化即 `REVIEW_STALE`。破坏性操作在**所有模式**都要先登记 `operation_gate_record`、执行前 `operation_gate_check` 为 `APPROVED`；REJECT 终态，复核不可用时不得伪记 ACCEPT。MCP 不执行、不拦截宿主命令，没有宿主 Hook 时是协议级约束。
 
 “不做测试”和“只记录方法”各自与其他验证操作互斥，均 NOT_RUN；危险操作独立确认。仅用户明确“不用问，直接做”可跳过模式选择，不能因此授权删除、擦除或烧录。超时只认可宿主可观测结果和事先告知的策略；本版服务只记录超时，不自动确认。
 
 ## 安装
 
-纯 Skill 不依赖 Python，也不需要 MCP：
+纯 Skill 不依赖 Python 或 MCP。原生问答或文本继续按模式确认适用选项；标准仍确认验证范围，标准/快速仍走内建流程，只调查仍保持只读。长任务仍按六个专用角色的职责编排，并手工记录工作包和证据。安装命令如下。
 
 ```bash
 bash install.sh --mode skill --with-default-rule
@@ -65,23 +63,44 @@ bash install.sh --mode hybrid --check
 
 如选定 Python 已有 mcp 2.3.0 则使用该解释器；否则在 `$AGENT_HOME/mcp/single-conversation-subagent/venv.<id>` 创建隔离环境并安装依赖。可用 `--python /absolute/venv/bin/python` 或 SCS_PYTHON 指定现有环境。Python 或依赖失败时输出 HYBRID_UNAVAILABLE，Skill 保持可用；`--mode hybrid --check` 会明确报告未就绪。
 
-安装器在修改前备份，只替换本技能的标记块，保留其他技能/项目内容；重复安装不重复注入规则。拒绝目标及其父目录的符号链接、父目录跳转、畸形规则标记和源目录自覆盖。安装器不改写现有客户端 MCP 配置；生成可审查示例到 runtime 的 `client-examples.json`、`codex-example.toml`，由用户复制合并。未给 project-root 时须替换示例占位符。**重开对话**以加载 Skill 和规则变更。
+安装器在修改前备份，只替换本技能的标记块，保留其他技能/项目内容；重复安装不重复注入规则。拒绝目标及其父目录的符号链接、父目录跳转、畸形规则标记和源目录自覆盖。安装器不改写现有客户端 MCP 配置；默认生成 runtime 的 `zcode-example.json`，由用户审查并手动合并。未给 project-root 时须替换示例占位符。**重开对话**以加载 Skill、规则和 Agent。
 
 手动安装：复制 `single-conversation-subagent/` 到宿主实际的 skills 目录，再把 AGENTS.snippet.md 的标记块合入宿主读取的指令文件；无 bash/无 Python 也能使用纯 Skill。不要覆盖其他标记块或已有项目记忆。
 
-## 另一个技能：codex-review
+## ZCode 4 原生 Agent profiles
 
-本仓库同时管理 `codex-review/`：让 Codex 以只读方式独立审查任务、未提交改动、修订或 commit，输出逐项判定与最终 `ACCEPT/REJECT`；审查模型固定为 `gpt-6.2-sol`，含 brief 模板与会话复用规则（审查基线一致才 `codex exec resume`，基线变化新开会话）。
+可选安装：不加 `--with-zcode-agents` 不会创建或修改 Agent 配置。默认目标是 `~/.zcode/agents/`（与 `AGENT_HOME` 独立）；如需隔离或使用宿主支持的其他位置，用 `--zcode-agents-dir PATH`，不能放在本 Skill 或 MCP 运行时的受管目录内。安装器只新增缺失的同名文件，不覆盖普通文件、目录或符号链接，不跟随目标目录及其父目录的符号链接。安装要求目标文件系统支持硬链接及 `ln -T`；卸载不移除任何 Agent profiles。
+
+只新增两个继承型 profile：
 
 ```bash
-bash install.sh --skill codex-review
-bash install.sh --skill codex-review --check
-bash install.sh --skill codex-review --uninstall
+bash install.sh --with-zcode-agents
 ```
 
-默认装到 `$AGENT_HOME/skills/codex-review/`。它是纯 Skill：没有 AGENTS 规则块，也没有 MCP runtime；`--mode hybrid` 与 `--with-default-rule` 会被忽略并降为纯 Skill 安装。手动安装时复制 `codex-review/` 到宿主 skills 目录即可。
+为全部六个角色安装缺失的 profile（示例同时生成混合模式的 MCP 运行时）：
 
-两个技能相互独立：主技能在收尾联动时按用户选择调用 codex-review，不依赖安装顺序。
+```bash
+bash install.sh --mode hybrid --project-root /absolute/workspace --with-zcode-agents \
+  --zcode-gpt-model new-provider-2/gpt-6.2-sol \
+  --zcode-deepseek-model new-provider-2/deepseek-v4.1-flash
+```
+
+| Profile ID（同名 `.md` 文件） | 模型 / 安装条件 | 工具 |
+| --- | --- | --- |
+| `方案顾问` | `--zcode-gpt-model ID`，只读方案指导 | Read、Grep、Glob |
+| `实施工程师` | `inherit`，不设置 `thoughtLevel` | Read、Grep、Glob、Edit、Write |
+| `查询侦察员` | `--zcode-deepseek-model ID` | Read、Grep、Glob |
+| `测试验证员` | `--zcode-deepseek-model ID` | Read、Grep、Glob、Bash（只执行明确授权的验证命令） |
+| `固定审阅员` | `--zcode-gpt-model ID`，用于 `gpt` 路线 | Read、Grep、Glob |
+| `继承审阅员` | `inherit`，不设置 `thoughtLevel`，用于 `inherit` 路线 | Read、Grep、Glob |
+
+两个模型选项可独立使用：未给对应的 ID 就跳过该组固定角色，不生成 `inherit` 替代配置。示例 ID 不是内置默认值；请用本机 ZCode 已配置的对应模型 ID，不能填 `inherit`。可分别加 `--zcode-gpt-thought-level LEVEL` 或 `--zcode-deepseek-thought-level LEVEL` 给同组**新装**角色设置 `thoughtLevel`；每个 level 选项都要求同时提供同组模型 ID，值以该模型在本机 ZCode 支持的级别为准，省略时不写入该字段。目录、模型和级别选项均要求 `--with-zcode-agents`；该开关仅支持 `--host zcode`（默认），不可与 `--check` 或 `--uninstall` 合用。
+
+也可在 ZCode UI 中手动创建固定角色，参照 [方案顾问](zcode-agents/方案顾问.md.in)、[查询侦察员](zcode-agents/查询侦察员.md.in)、[测试验证员](zcode-agents/测试验证员.md.in) 和 [固定审阅员](zcode-agents/固定审阅员.md.in) 模板，明确指定模型与工具，不要把含占位符的 `.md.in` 直接放进加载目录。仅 [实施工程师](zcode-agents/实施工程师.md) 和 [继承审阅员](zcode-agents/继承审阅员.md) 可在确认无同名冲突后直接复制。历史英文模板不再由安装器安装；既有英文 profile 不会迁移、改名或删除。
+
+重开会话后核对宿主加载的同名 profile、有效模型和工具；已有自定义 Agent 不会被改成上表配置，目录中有文件也不证明宿主已经加载。固定角色的模型未配置、不可确认或不可用时，报告该角色不可用，不静默改用继承模型。复核改选 `inherit` 路线需要用户明确确认。
+
+`codex-review/` 是历史源文件，不属于此分支支持的运行时，安装器不会安装或调用它。已有独立安装不会被迁移或删除。
 
 ## 客户端配置
 
@@ -95,32 +114,7 @@ python3 -m venv .venv
 
 该入口只使用 stdio，不启动 HTTP。stdout 只传 MCP 协议，错误写 stderr；脱敏交互事件保存在任务项目 `<项目>/.scs/state.sqlite3` 的 events 表（每个项目独立；配置根只是工作区边界）。依赖固定 `mcp==2.3.0`，开发环境完整版本见 [requirements-dev.lock](mcp_server/requirements-dev.lock)；项目级约束见 pyproject.toml。重现测试环境可先安装锁文件再安装本包。
 
-Codex TOML 示例（复制前按实际路径修改，不需要放宽审批或信任）：
-
-```toml
-[mcp_servers.single-conversation-subagent]
-command = "/absolute/repository/.venv/bin/python"
-args = ["-m", "scs_mcp", "--project-root", "/absolute/workspace"]
-
-[mcp_servers.single-conversation-subagent.env]
-SCS_HOST = "codex"
-SCS_QUESTION_CHANNEL = "native"
-```
-
-JSON stdio 示例（适用于使用 mcpServers 格式的客户端；逐客户端核对导入位置）：
-
-```json
-{
-  "mcpServers": {
-    "single-conversation-subagent": {
-      "command": "/absolute/repository/.venv/bin/python",
-      "args": ["-m", "scs_mcp", "--project-root", "/absolute/workspace"]
-    }
-  }
-}
-```
-
-ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.servers`（不是顶层 `mcpServers`；schema 严格，未知键会丢弃该服务）：
+ZCode 用户配置位于 `~/.zcode/cli/config.json`。仅将示例服务条目合入现有 `mcp.servers`（不是顶层 `mcpServers`）；保留 `SCS_NATIVE_REVIEW=1`。以下以开发入口为例，混合安装生成的示例使用稳定的 `runtime/launcher.py`，不依赖仓库位置：
 
 ```json
 {
@@ -130,7 +124,7 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
         "type": "stdio",
         "command": "/absolute/repository/.venv/bin/python",
         "args": ["-m", "scs_mcp", "--project-root", "/absolute/workspace"],
-        "env": {"SCS_HOST": "zcode", "SCS_QUESTION_CHANNEL": "native"},
+        "env": {"SCS_HOST": "zcode", "SCS_QUESTION_CHANNEL": "native", "SCS_NATIVE_REVIEW": "1"},
         "timeoutMs": 60000
       }
     }
@@ -138,28 +132,18 @@ ZCode 用户配置位于 `~/.zcode/cli/config.json`，字段是嵌套的 `mcp.se
 }
 ```
 
-同一对话的 `mode`/`verification`/`codex_gate`/`codex_review` 已确认后直接沿用，不再提问；后续验证/复核问题以已确认值作为 recommendation。只有用户显式说“使用长任务/只调查/快速处理/标准执行”才通过 `interaction_reopen(explicit_user_change=true)` 切换，显式切换走 text 提交、不弹表单；普通讨论不推断切换。旧长会话没有 `codex_gate` 时，首次工作包操作或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次，不迁移旧 `codex_review`。ZCode 主路径是 Skill 原生提问；MCP form 仅在没有原生工具的宿主兜底。
+同一对话直接沿用当前模式适用的已确认选择，不把历史复核频率视为路线授权，也不在短模式触发历史复核选择。只有用户明确要求切换模式才通过 `interaction_reopen(explicit_user_change=true)` 切换；显式切换走 text 提交，不从普通讨论推断。旧长会话缺少 `codex_gate` 时，首次工作包操作或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次，不迁移旧 `codex_review`。
 
 ZCode 的 stdio 客户端会先用 2026-07-28 信封探测 `server/discover`，随后按 legacy 形状继续；服务端已内置兼容层：对 ZCode（或未声明身份）的探测本地返回 `-32022` 并剥离后续 2026 `_meta` 信封，回落到 2025-11-25 握手。明确声明为其他客户端的 modern 探测保持原路径。`--host zcode` 默认 `SCS_QUESTION_CHANNEL=native`：Skill 用宿主原生 AskUserQuestion 主问，`session_open` 先返回 `workspace_scan` 与 `mode_options`，推荐项第一位并带扫描理由；ZCode 原生倒计时为 60 秒隐藏 + 5 分钟截止。MCP 只做 `session_open`/选择记录/`interaction_submit`/工作包/证据/视图，不默认驱动 form；要 MCP form 才显式 `--question-channel mcp`，`interaction_ask(timeout_seconds=15)` 是服务端截止、无动画倒计时、表单可能残留，仅作为没有原生工具的宿主兜底。无 form 或 modern 无回通道时问题保持 `WAITING_USER`，用同一 `question_id` 直接 `interaction_submit`。stdio 序列已验证；宿主 UI/elicitation 显示仍需在 ZCode 会话内视觉确认。
 
-混合安装器生成的示例使用稳定的 runtime/launcher.py 入口，无需依赖仓库位置。Codex 配置格式参考 [官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 并与本机 CLI help 核对；Claude Code JSON/stdio 参考 [官方 MCP 文档](https://code.claude.com/docs/en/mcp)。
-
 ### 宿主与提问通道
 
-一份工程、同一套 Skill/MCP，可被多个宿主使用；提问通道在安装期选择，不做两套主对话/子 Agent 流程：
-
-```bash
-bash install.sh --mode hybrid --host codex --project-root /absolute/workspace
-bash install.sh --mode hybrid --host zcode --project-root /absolute/workspace
-bash install.sh --mode hybrid --host claude --question-channel auto --project-root /absolute/workspace
-```
-
-- `--host`：`codex|zcode|claude|generic`，写入示例的 `SCS_HOST`。
+- `--host`：默认 `zcode`，写入示例的 `SCS_HOST`。`codex|claude|generic` 标签仅为 MCP 客户端配置兼容，不提供 ZCode 原生 Agent 复核。
 - `--project-root`：允许的工作区边界，不是单个项目根。Skill 的 `session_open(project_root=<任务项目根>)` 会为每个项目建独立 `<项目>/.scs`，所以同一个 MCP 服务可直接用于多个项目；项目必须在工作区内，越界返回 `PROJECT_MISMATCH`。
 - `--question-channel`：`auto|native|mcp|text`，写入 `SCS_QUESTION_CHANNEL`；未指定时 `codex→native`、`zcode→native`、其他→`auto`。ZCode 主路径是 Skill 原生提问，MCP 只收集状态；`mcp` 仅用于没有原生工具的宿主。
 - 服务器启动时读取 env；`session_open` 返回 `question_channel`、`host`、`workspace_scan` 与 `mode_options`。Skill 按它路由：`native`→原生（推荐项第一位、扫描理由、选项说明；ZCode 60s 隐藏+5min），`text`→完整文本，`mcp`→`interaction_ask`（15s 服务端截止，无动画倒计时），`auto`→form 可用则 mcp，否则 native/text。
 - `interaction_ask` 只在 legacy stdio 的 back-channel 上开 form；modern/无 form 回落会保留 `question_id`，用户明确回复后直接 `interaction_submit`。原生/文本路径不声称 15s；MCP form 的 15s 是服务端截止，不是可见倒计时。
-- 安装器生成 `client-examples.json`、`codex-example.toml`、`host-profile.json`；不改写现有客户端配置，复制时按宿主保留 `env`。
+- ZCode 用 `zcode-example.json`；安装器另保留 `client-examples.json`、`codex-example.toml`、`host-profile.json` 供兼容配置或诊断，不改写现有客户端配置。
 
 ## 能力矩阵与验收层次
 
@@ -199,34 +183,40 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 工作包有终态：`COMPLETED`（主对话验收通过）和 `ABANDONED`（重复、被取代或放弃）。关闭必须带 `close_reason`，服务写入 `closed_at`、`closed_by_session` 和事件记录；关闭后不可修改，后续工作新建工作包。桌面管理器默认隐藏终态，可勾选“显示已关闭”；长期未更新的非终态显示“滞留 N 天”。
 
-## 长任务复核、执行角色与破坏性闸门（3.0.0）
+## 复核频率、路线与执行角色
 
-### codex_gate：仅长任务
+### 频率：何时复核
 
 长任务在验证范围确认后问一次 `codex_gate`，推荐 `packages` 但必须用户明确提交：
 
 | 值 | 含义 | MCP 行为 |
 | --- | --- | --- |
-| `none` | 不做 Codex 复核或收尾审查 | 不设置 `review_required`；收尾不执行 |
-| `closure` | 仅收尾一次 Codex 只读审查 | 不设置 `review_required`；收尾按 `codex-review` 执行 |
-| `packages` | 每个工作包复核 + 收尾审查（推荐） | 新包 `review_required=true`；`REVIEW_READY`/`COMPLETED` 需要当前 subject 的 PASS ACCEPT review |
+| `none` | 不做包级或收尾复核 | 不设置 `review_required`；收尾不执行 |
+| `closure` | 仅收尾一次原生只读复核 | 不设置 `review_required` |
+| `packages` | 每个工作包复核 + 收尾复核（推荐） | 新包 `review_required=true`；`REVIEW_READY`/`COMPLETED` 需要当前 subject 的 PASS ACCEPT review |
 
-标准执行和快速保持原 `codex_review` yes/no（仅注册已确认时）；长任务不再问 `codex_review`，MCP 返回 `SKIPPED/USE_CODEX_GATE`。只调查跳过。旧长会话没有 gate 时，首次创建/更新工作包或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次，不回退旧答案。
+标准/快速/只调查不问 SCS 复核题、不按历史值自动收尾复核。`codex_review` 仅保留兼容字段。旧 MCP 可能仍用该字段或旧路由状态阻塞可选工作包/手动刷新；说明并暂缓被挡操作，不补问、不代填或绕过，普通短模式任务仍走 ZCode 内建流程。详见 [MCP 兼容说明](single-conversation-subagent/references/mcp.md#问题顺序复核时机与-intake)。`codex_gate` 和 `codex_review` 不是外部运行时名称。
 
-### 三个执行子 Agent 角色 + Codex 技术复核者
+### 路线：使用哪个原生复核者
 
-- **侦察者（analyze）**：只读检索、依赖/调用链/日志分析，产出结论和 `file:line`。
-- **实施者（implement）**：只改 `allowed_files`，记录改动和最小自检。
-- **验证者（test）**：只跑指定验证命令，记录命令/退出码/通过数/证据。
-- **Codex 技术复核者**：外部只读审查，不是宿主子 Agent；只由主对话启动，用于方案指导、包级复核和收尾审查。
+- `review_route=gpt`：使用 `固定审阅员`，必须能确认配置了显式的 GPT 模型，绝不自动切路线。
+- `review_route=inherit`：使用 `继承审阅员`，继承主对话模型，不覆盖 `thoughtLevel`。
 
-职责、边界、返回 schema、persona 模板见 [roles.md](single-conversation-subagent/references/roles.md)。扇出预算：调查阶段起步 min(4, 只读子任务数) 个侦察者；实现阶段按 `allowed_files` 两两不相交取最大并行集合；默认并发上限 4，无宿主并发证据时取 1。
+只有主对话派发这两种原生复核者，用于包级、收尾或破坏性操作预审。两者都只允许 Read/Grep/Glob，不能跑命令、写文件或再委派；主对话保存证据和作最终验收。可选的实施前方案指导由独立的 `方案顾问` 提供，不受复核路线选择影响。
+
+### 三个执行子 Agent 角色
+
+- **侦察者（`查询侦察员` / `analyze`）**：固定 DeepSeek，只读检索、分析和引用 `file:line`。
+- **实施者（`实施工程师` / `implement`）**：继承主对话模型，仅改 `allowed_files`，返回改动和建议的验证命令。
+- **验证者（`测试验证员` / `test`）**：固定 DeepSeek，仅跑指定验证命令，记录命令、退出码、通过数和证据。
+
+扇出预算：调查阶段起步 min(4, 只读子任务数) 个侦察者；实现阶段按 `allowed_files` 两两不相交取最大并行集合；默认并发上限 4，无宿主并发证据时取 1。
 
 ### 包级复核（review 子任务）
 
-`packages` 包应声明一个 `review` 子任务。其他子任务完成且无活动 attempt 后，单独 prepare review attempt 取得 `review_subject`；主对话启动 Codex 只读复核，证据是严格 JSON manifest + 原始最终消息。ACCEPT 记 PASS、REJECT 记 FAIL，两者都可落账，只有 ACCEPT 放行 `REVIEW_READY`。未声明 review 子任务时 `REVIEW_READY` 返回 `REVIEW_REQUIRED`；复核窗口内禁止其他 attempt；文件、定义或非 review 结果变化即 `REVIEW_STALE`，用新 review attempt 重审。`review` 不能用 `work_package_update(results=...)` 直接写。
+`packages` 包应声明一个 `review` 子任务。其他子任务完成且无活动 attempt 后，单独 prepare review attempt 取得 `review_subject`；主对话按已确认路线派发原生只读复核者，并把原始最终消息和证据清单落盘。ACCEPT 记 PASS、REJECT 记 FAIL，只有 ACCEPT 放行 `REVIEW_READY`。未声明 review 子任务时 `REVIEW_READY` 返回 `REVIEW_REQUIRED`；复核窗口内禁止其他 attempt；文件、定义或非 review 结果变化即 `REVIEW_STALE`，用新 review attempt 重审。`review` 不能用 `work_package_update(results=...)` 直接写。
 
-manifest 字段恰好：`verdict`、`session_id`、`model`、`subject_sha256`、`final_message_sha256`、`command`、`exit_code`（int 0）、`raw_path`；原始最终消息必须恰好一行 `结论: ACCEPT` 或 `结论: REJECT` 且与 verdict 一致。`review_subject` 覆盖修订定义、非 review 结果和 `allowed_files` 有界文件快照，排除 `.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 与 `<docs_root>/agent/evidence`，上限 500 文件/100 MB。
+原始最终消息必须恰有一行 `结论: ACCEPT` 或 `结论: REJECT`，且与证据清单一致。按 [MCP 参考](single-conversation-subagent/references/mcp.md) 记录原生复核证据，不伪造命令、退出码或宿主没有提供的信息。`review_subject` 覆盖修订定义、非 review 结果和 `allowed_files` 有界文件快照，排除 `.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 与 `<docs_root>/agent/evidence`，上限 500 文件/100 MB。
 
 ### 批量、备注与运行地图
 
@@ -241,21 +231,22 @@ manifest 字段恰好：`verdict`、`session_id`、`model`、`subject_sha256`、
 
 ### 破坏性操作闸门（全模式）
 
-删除/覆盖用户数据或系统关键配置、擦除/烧录、drop 数据库/表、不可逆 git、递归 `chmod`/`chown`、卸载关键包、`allowed_files` 外大范围改写等，先准备命令/`cwd`/目标/影响/备份/回滚/`baseline` →（需要时）Codex 只读预审 → `operation_gate_record` → 执行前 `operation_gate_check` 为 `APPROVED`，并保留用户独立确认。ACCEPT 需报告唯一结论 + `user_confirmed=true`；REJECT 对同 `operation_id`/digest 是终态；Codex 不可用只能记 `UNAVAILABLE_OVERRIDE`，不得伪记 ACCEPT。MCP 不执行、不拦截宿主命令；没有宿主 Hook 时是协议级约束（`PROTOCOL_ONLY`）。
+删除/覆盖用户数据或系统关键配置、擦除/烧录、drop 数据库/表、不可逆 git、递归 `chmod`/`chown`、卸载关键包、`allowed_files` 外大范围改写等均需闸门。标准/快速先阻塞该操作，说明须由用户明确切换长任务才能启动原生预审；不自动升级或绕过。只调查不执行此类操作。
+
+长任务准备命令/`cwd`/目标/影响/备份/回滚/`baseline` → 确认适用路由并做原生只读预审 → `operation_gate_record` → 执行前 `operation_gate_check` 为 `APPROVED`，并保留用户独立确认。`codex_gate=none` 不免除操作预审。ACCEPT 需当前 digest、真实报告唯一结论及 `user_confirmed=true`；REJECT 对同 `operation_id`/digest 是终态；复核不可用时只能在用户独立确认后如实记 `UNAVAILABLE_OVERRIDE`，不是放行。MCP 不执行、不拦截宿主命令；没有宿主 Hook 时是协议级约束（`PROTOCOL_ONLY`）。纯 Skill 保持相同模式边界；没有当前 `APPROVED` 就不执行。
 
 ### 兼容性
 
-- **无 schema 变更**：`codex_gate` 存 `questions` 行，破坏性闸门记录存 `events`，`user_version=3`、`sessions` 表与九值 INSERT 不变；旧库/旧会话直接可用，无需迁移。
+- **无 schema 变更**：`codex_gate` 和 `review_route` 使用 `questions` 行，破坏性闸门记录存 `events`，`user_version=3`、`sessions` 表与九值 INSERT 不变；复用旧库时，已有频率不等于已确认复核路线。
 - 旧长会话首次进入会补问一次 gate；旧包没有 `review_required` 按 false；旧 `test`/`analyze` 证据语义不变。
 - 桌面管理器版本检查仍为 1/2/3（worker 2/3），只改会话选择器：long 使用 gate 已确认或旧 `codex_review` 回退显示，其他模式不变。
 - **已知限制**：`closure`/`none` 的收尾审查是 Skill 规则，MCP 只强制 `packages` 的包级复核；无宿主 Hook 时闸门不能拦截真实命令；本版无共享读租约。
 
-## 高危/长任务 Codex 方案指导（2.9.0）
+## 长任务的只读方案指导
 
-- **触发**：即将修改系统关键配置、删除/覆盖关键数据、做不可逆的系统级操作，或模式为长任务。
-- **频率**：同一任务/会话只做一次，在实现前完成；用户拒绝或 Codex 不可用时说明并继续，不反复询问。实施中范围根本变化按新任务处理或先向用户确认。
-- **方式**：主对话用只读 `codex exec -m gpt-6.2-sol -s read-only -C <项目根> -c model_reasoning_effort=high`，brief 覆盖目标、计划改动、高危点、约束、验证和回滚；结果纳入方案并记录到项目协作/证据。它不是子 Agent，也不能替代收尾审查。
-- **收尾审查推荐**：按项目情况决定，大多数普通/小型/已验证任务推荐不审查；高风险、跨仓库或大范围改动、验证不足，或方案指导发现重大风险时推荐使用。2.9 的 `codex_review` 接受 `recommendation=["yes"]` 或 `["no"]`；3.0 起长任务改用 `codex_gate`，标准/快速仍用 `codex_review`。
+- **触发**：仅长任务自动推荐；短模式遇见高危操作不自动询问或派发顾问，按破坏性操作闸门处理。
+- **频率**：征得用户确认后，在实现前做一次。用户拒绝或 `方案顾问` 不可用时记录原因，不反复询问或改用其他角色；这不放宽破坏性操作闸门。
+- **方式**：主对话派发使用固定 GPT 模型的只读 `方案顾问`，简报覆盖目标、计划改动、高危点、约束、验证和回滚。将反馈纳入方案并记录证据；方案指导不替代破坏性操作预审、包级复核或收尾复核。
 
 ## 本机任务看板与项目总览（2.8.0）
 
@@ -346,6 +337,7 @@ Inspector 属于手工诊断工具，本次未安装/运行；不能用 Inspecto
 
 ```text
 single-conversation-subagent/   Skill、执行协议、MCP 使用参考
+zcode-agents/                  ZCode 4 原生执行和复核 Agent 模板
 mcp_server/src/scs_mcp/        SDK 服务、交互、状态、SQLite、路径、证据、租约、交接
 mcp_server/tests/              自动协议/状态/并发/安装回归
 AGENTS.snippet.md / install.sh  轻量入口、兼容安装/检查/卸载
@@ -359,6 +351,6 @@ docs/                         设计与验收报告（运行记忆不打包）
 
 `desktop_tool/` 提供独立 PyQt5 管理器：项目添加/发现、目录浏览、Obsidian 跳转、工作包与 MCP 记录、短期连接自检、视图刷新和可恢复归档，并提供**项目总览卡片 / 我的待办 / 本机待办看板**（会话选择、认领冲突回退、工作包强制关闭、复制 Agent 入口/任务包特征）。参照本机 PyQt 工具风格；不进入 MCP 的安装器和依赖，不强制安装，也不管理宿主进程。运行 `bash desktop_tool/run.sh`，详情见 [管理器说明](desktop_tool/README.md)。
 
-多项目根：管理器添加项目时选任务项目根（配置工作区边界内），每个项目独立 `<项目>/.scs`；当前四选一只是 session/question，不是工作包，工作包树要等标准/长任务创建 WP 才出现。
+多项目根：管理器添加项目时选任务项目根（配置工作区边界内），每个项目独立 `<项目>/.scs`；当前四选一只是 session/question，不是工作包，工作包树只在实际创建 WP 后出现。
 
 2.2 的管理器项目栏支持项目展开/收起并记住状态，按最后 MCP 活动或显式打开时间自动排序（可见时每 8 秒更新）。点击工作包子项直达记录。Obsidian 按钮使用项目 `.scs-obsidian/<库ID>/` 独立启动配置，首次无需手工登记；MCP `initialize_vault=true` 也会准备这套配置，不写全局库列表。

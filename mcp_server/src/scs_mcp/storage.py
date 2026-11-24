@@ -94,6 +94,7 @@ class Store:
     def __init__(self, root: str | Path, busy_timeout_ms: int = 3000):
         self.paths = Paths(root)
         self.root = self.paths.root
+        self.native_review = os.environ.get("SCS_NATIVE_REVIEW") == "1"
         self.timeout = busy_timeout_ms
         # Keep DB and all SQLite companions under the configured root only.
         with self.paths.directory((".scs",), create=True):

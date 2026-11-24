@@ -6,7 +6,7 @@
 
 ## 交互与 MCP 边界
 
-Skill 管策略；本地 Python MCP 管确定性状态、交互与证据；宿主原生 Subagent 执行，主对话验收。MCP 不创建 Agent，不成为独立 Agent 桥接器。
+Skill 管策略；本地 Python MCP 管确定性状态、交互与证据；ZCode `Agent` 运行执行和复核角色，主对话验收。stdio 启用 `SCS_NATIVE_REVIEW=1`；MCP 不创建 Agent，不作为执行或复核桥接器。
 
 宿主原生提问 > 声明支持的 MCP 表单 > 文本回退。只使用一路 UI；失败后再明确切换。工具不可见不是默认模式；TEXT_FALLBACK_REQUIRED 必须完整显示选项并结束当轮等待。无法可靠观察 UI 时记 UI_NOT_OBSERVABLE，不宣称已弹窗。
 
@@ -18,7 +18,7 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 
 ## 结构
 
-主对话是第一级协调者，直接负责目标、决策、阶段记忆、拆分、调度、汇总和验收；执行子 Agent 是第二级，只做分析/实现/测试，不再委派。不创建“协调子 Agent”。
+主对话是第一级协调者，负责目标、决策、记忆、调度、证据和验收；第二级是执行子 Agent（分析/实现/测试）、可选的只读 `方案顾问` 或独立只读审阅员，均不再委派。不创建“协调子 Agent”。
 
 设计初衷：隔离长执行线，让主对话只保留目标、决策、未决问题、下一步和证据路径；执行细节留在子 Agent 和证据文件。它不是缓存清理机制，主对话仍会随轮次增长。
 
@@ -26,16 +26,16 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 
 ## 开场四选一
 
-每个对话只在首个任务问一次，包括“推送吧/改一下/跑一下”这类直接命令；同一对话后续交互沿用已选模式，不重问；只有用户明确要求改变执行方式，或任务性质明显需要另一模式时，直接切换并说明。只有用户明确说“不用问，直接做”才可跳过。不得因为任务看起来是纯问答、小改、单文件、简单查询或时间紧而自动跳过；任务大小只影响首次推荐项，不决定是否提问；推荐项由主对话在必要只读调查后按范围/风险/改动面/验证成本选择，不固定同一项。
+每个对话只在首个任务问一次，包括“推送吧/改一下/跑一下”这类直接命令；同一对话后续交互沿用已选模式，不重问；只有用户明确要求改变执行方式才显式 reopen 对应模式题并记录新选择。只有用户明确说“不用问，直接做”才可跳过。不得因为任务看起来是纯问答、小改、单文件、简单查询或时间紧而自动跳过；任务大小只影响首次推荐项，不决定是否提问；推荐项由主对话在必要只读调查后按范围/风险/改动面/验证成本选择，不固定同一项。
 
-1. **快速处理**：主对话直接做，不启子 Agent（纯问答、搜索、小改、简单 Excel、快速查询）。
-2. **标准执行**：先问验证范围，再给工作包/计划，然后实现和验证。
-3. **长任务**：分阶段，计划前问验证范围；所有任务性查找、分析、实现、测试都派执行子 Agent，主对话只保留目标、决策、未决问题、下一步、工作包修订、证据路径和协调记录。
-4. **只调查**：只读分析，不改文件；范围大时用分析子 Agent。
+1. **快速处理**：走 ZCode 内建流程，主对话直接处理，按需用默认/内建 Agent；不问验证范围。
+2. **标准执行**：先确认验证范围，再按 ZCode 内建流程计划、实现和验证，按需用默认/内建 Agent；不依赖 SCS 工作包。
+3. **长任务**：分阶段，计划前问验证范围；只有此模式自动编排六个专用角色。任务性查找、分析、实现、测试均按角色委派，主对话只保留目标、决策、未决问题、下一步、工作包修订、证据路径和协调记录。
+4. **只调查**：保持只读，按需用内建 `Explore`，不自动用专用角色、不问验证范围。
 
-只给一个按范围/风险/成本动态决定的推荐项。优先真实调用宿主原生提问；其次 MCP 结构化交互；两者不可用则完整文本展示并结束当轮，等待明确回复。推荐勾选不等于确认，取消和拒绝均不采用默认项。快速处理不建子 Agent；只调查只读、范围大可派分析子 Agent，两者不询问验证范围。明确“不用问，直接做”可跳过模式选择，危险操作仍另确认。
+只给一个按范围/风险/成本动态决定的推荐项。优先真实调用宿主原生提问；其次 MCP 结构化交互；两者不可用则完整文本展示并结束当轮，等待明确回复。推荐勾选不等于确认，取消和拒绝均不采用默认项。明确“不用问，直接做”可跳过模式选择进入快速；不改变破坏性操作闸门。
 
-3.0 起，长任务在验证范围之后追加唯一的 `codex_gate` 题（`none|closure|packages`，推荐 `packages`，推荐不是确认）；`standard` 和快速仍按原规则使用 `codex_review`（仅 codex-review 注册已确认时），只调查跳过。长任务不再问 `codex_review`。旧长会话没有 gate 时，首次创建工作包/更新或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次即可，不迁移旧答案。显式 reopen 上游题只 supersede 未完成的下游题；已确认的下游答案保留，但 intake 按当前模式重新判定。
+仅长任务在验证范围后问 `codex_gate`（`none|closure|packages`）。启用复核后用 ZCode 原生问答确认 `review_route`（`gpt|inherit`）再派发；缺 gate 或所需路由的长任务按 `INTAKE_REQUIRED` 补适用题，不从旧答案推断。其他模式不问 SCS 复核时机、路由或方案指导，不因旧 `codex_review` 或其他历史值自动派审。显式 reopen 上游题只 supersede 未完成的下游题；已确认下游答案保留，只在适用模式中沿用。旧服务产生不适用的复核阻塞时按 [MCP 兼容说明](mcp.md#问题顺序复核时机与-intake) 处理，不补问、代填或绕过。
 
 推荐不是固定映射：主对话先看范围/风险/成本，再选一项并说明理由；例如简单只读/小改常快速处理，需改代码或验证常标准执行，跨阶段/长测试常长任务，纯只读定位常只调查；拿不准可推荐标准执行。
 
@@ -44,9 +44,9 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 长任务不是“主对话多干活”，而是把执行线整体下沉：
 
 - 必须派执行子 Agent：代码/文件检索、依赖与调用链分析、日志分析、方案调研、实现/重构、构建/测试/运行验证、大范围文档阅读。
-- 执行角色固定为侦察者（`analyze`，只读）、实施者（`implement`，只改 `allowed_files`）、验证者（`test`，只跑命令）；职责、边界、返回 schema 和 persona 见 [roles.md](roles.md)。`review` 子任务是主对话启动的 Codex 复核记录，不是第四种宿主子 Agent。
-- Codex 技术复核者只由主对话启动；子 Agent 不得启动 Codex，也不得再委派。
-- 主对话可自己做：与用户交互和提问，session/工作包/证据/记录等状态操作，验收所需的少量关键证据核对，以及为下一步调度读取工作包与证据索引。
+- 三执行角色按 `kind` → ZCode `Agent.subagent_type` 派发：`analyze` → `查询侦察员`（固定 DeepSeek，只读），`implement` → `实施工程师`（继承模型，只改 `allowed_files`），`test` → `测试验证员`（固定 DeepSeek，只跑指定命令）。职责、提示和返回 schema 见 [roles.md](roles.md)。
+- 只有主对话派独立只读复核角色 `固定审阅员` / `继承审阅员`，不替代执行角色；`方案顾问` 只用于单独、可选的只读建议。所有子 Agent 不再委派、不调用外部复核技能或工具。
+- 主对话与用户交互，维护 session/工作包/证据/记录，准备有界 diff/哈希和证据索引，持久化原始结果并核对关键证据。
 - 主对话发现自己要持续检索、读大文件或动手实现时，先建工作包再派子 Agent，不直接做。
 - 每次派发范围有界；子 Agent 回传状态、实际动作、证据路径、首异常、剩余问题、资源释放，不贴原始日志。
 - 子 Agent 不提问、不做验收、不写顶层规划和记忆；需要用户决策时回主对话。
@@ -65,15 +65,17 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 ### 调度
 
 - 先 `work_attempt_prepare` 原子占用资源并建立 attempt；成功后才启动宿主 Agent，禁止先派发后登记。
-- prepare 返回 `attempt_id`、`evidence_dir` 和 leases；子 Agent 在证据目录落盘。
+- prepare 返回 `attempt_id`、`evidence_dir` 和 leases；主对话在证据目录保存结果。子 Agent 不主动写 `allowed_files` 外的证据；复核角色不落盘。
 - 生命周期：`PREPARED → LAUNCHING → RUNNING → DRAINING → ENDED`，另有 `UNKNOWN`；`UNKNOWN` 不释放执行槽/资源，也不自动重派。
-- 结束用 `work_attempt_update(state="ENDED", result=..., operation_id=...)`；主对话串行提交。`VERSION_CONFLICT` 后重读版本，只补未登记结果。
+- 宿主受理派发后保留用于查询的原任务 ID，并与 SCS `attempt_id` 对应。优先由宿主的最终通知驱动后续步骤；等待期间可推进不依赖该结果的工作。只剩依赖项时继续等待，保留一次等待状态，有实质变化再更新用户。
+- **通知保底**：经过合理间隔仍未收到通知、会话恢复，或怀疑通知漏达时，对原任务做一次非阻塞状态查询（`TaskOutput(task_id=..., block=false)`，或宿主等价接口）。`running` / `not_ready` 继续等待并拉开检查间隔。等待或查询超时表示本次没拿到结果，不登记任务失败，也不连续调用阻塞等待刷出超时。宿主明确报告成功、失败或停止时，核对实际终态和证据后登记。任务丢失或状态无法可靠确认时用 `UNKNOWN`，维持隔离，等待核实原任务；不能根据等待超时、静默或租约到期重派。
+- 结束用 `work_attempt_update(state="ENDED", result=..., operation_id=...)`；主对话串行提交。重复通知只补未登记结果，必要时复用同一 `operation_id`。`VERSION_CONFLICT` 后重读版本，只补未登记结果。
 - 默认并发上限 4；没有宿主真实并发证据时取 1。优先级：用户明确事项 > 关键路径 > 解除阻塞的短任务 > 等待时间。
 - 依赖未满足或资源未获得时不启动，换其他就绪任务；失败节点停止其后继，独立分支继续。
 
 ### 扇出预算
 
-- 调查阶段有 n 个独立只读子任务时，起步并行 min(4, n) 个侦察者（`analyze`）；主对话可按依赖和资源追加，但不超过并发上限。
+- 调查阶段有 n 个独立只读子任务时，起步并行 min(4, n) 个 `查询侦察员`（`analyze`）；主对话可按依赖和资源追加，但不超过并发上限。
 - 实现阶段按 `allowed_files` 两两不相交取最大并行集合；同一文件或目录覆盖范围视为相交，串行。
 - 默认并发上限 4；没有宿主真实并发证据时取 1。依赖未满足、资源未获得、版本冲突或复核窗口不允许时不启动。
 - 文件不相交只是必要条件，仍以 `work_attempt_prepare` 的资源原子占用和依赖校验为准。
@@ -151,71 +153,49 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 - 每次问只给一个推荐路径；未选中的长耗时操作不执行，新增操作走新修订；烧录/擦除单独确认。
 - 未回复不采用推荐项。仅认可宿主真实可观测的超时结果与事先告知的配置策略；本版服务只记录 TIMED_OUT，不自动确认。文本回退结束当轮等待下一轮输入；取消/拒绝/工具失败不授权继续。
 
-## Codex 方案指导与收尾审查
+## 原生方案指导、复核时机与收尾审查
 
-### 高危/长任务方案指导（仅一次）
+### 时机和路由
 
-触发：即将修改系统关键配置、删除或覆盖关键数据、做不可逆的系统级操作，或模式为长任务。开工前用宿主原生问答（没有原生工具时文本回退）问一次：**是否先用 Codex 做一次只读项目方案指导？** 推荐使用。用户同意后，主对话运行一次 `codex exec -m gpt-6.2-sol -s read-only -C <项目根> -c model_reasoning_effort=high`，brief 包含目标、计划改动、高危点、约束、验证和回滚；结果纳入方案并记录到项目协作/证据。同一任务只做一次，不重复；Codex 不可用或用户拒绝时说明并继续；只调查、快速/标准且非高危跳过。方案指导不写入 MCP question，不是子 Agent，也不替代收尾审查。
-
-### 长任务复核策略（codex_gate）
-
-长任务在验证范围确认后问一次 `interaction_request(kind="codex_gate", recommendation=["packages"])`。值只有三档，推荐 `packages` 但必须用户明确确认，推荐不写成答案：
-
-| 值 | 含义 | MCP 约束 |
+| 模式 | 兼容时机字段 | 行为 |
 | --- | --- | --- |
-| `none` | 不做 Codex 复核或收尾审查 | 不设置 `review_required`；收尾不执行 Codex 审查 |
-| `closure` | 仅收尾做一次 Codex 只读审查 | 不设置 `review_required`；收尾按 `codex-review` 执行 |
-| `packages` | 每个工作包复核，并在收尾再审查（推荐） | 新建工作包写入 `review_required=true`；`REVIEW_READY`/`COMPLETED` 需要当前子集的 PASS + ACCEPT review |
+| 长任务 | `codex_gate=none` | 无包级或收尾审查 |
+| 长任务 | `codex_gate=closure` | 仅收尾一次原生只读审查 |
+| 长任务 | `codex_gate=packages` | 每包复核，并在收尾再审；Reviewer 可用时推荐 |
+| 标准/快速/只调查 | 无 | 不询问 SCS 复核时机或路由，不自动派方案顾问或审阅员 |
 
-- 只有 `packages` 由 MCP 强制包级复核；`closure`/`none` 的收尾审查是 Skill 规则。
-- `review_required` 在创建工作包时按当时的 gate 冻结，新修订沿用；旧包缺失该字段按 `false`。
-- `packages` 包若没有声明 `review` 子任务，`REVIEW_READY` 明确返回 `REVIEW_REQUIRED`；需在新修订补声明，不能伪造复核结果。
-- 旧长会话没有 gate 时（验证范围已确认），`session_get.intake` 为 `CODEX_GATE_REQUIRED`，创建/更新/刷新被 `INTAKE_REQUIRED` 拒绝；补问一次，不回退旧 `codex_review`，也不自动写 `packages`。
+- `packages` 新包冻结 `review_required=true`，新修订沿用；旧包缺失按 `false`。未声明 `review` 子任务时 `REVIEW_READY` 返回 `REVIEW_REQUIRED`，须用新修订补声明。
+- 新流程不问 `codex_review`；该字段仅保留旧服务/会话兼容，不是短模式确认项。
+- 长任务启用复核时，在派发前通过 `interaction_request(kind="review_route", channel="native")` 确认协议值 `gpt`（正式复核派 `固定审阅员`，固定 GPT）或 `inherit`（正式复核派 `继承审阅员`，`model: inherit`）；开场确认仍须在开始实现、执行测试或派发前完成。沿用已确认路由；不可用不换路由，按相应步骤阻塞。只有用户明确变更才 reopen。长任务操作预审尚无路由时用同一个 `review_route` 题单独确认，不改变时机字段；方案指导独立于该路由。
+- 推荐不是确认，未答、取消、失败或超时不得自动选项。迟到回复绑定原问题、工作包与修订；先核对，只调整未执行部分。收尾已过但未实际审查时标 `NOT_RUN`，不得补记通过。
 
-### 标准/快速收尾审查（codex_review）
+### 长任务方案指导（可选，仅一次）
 
-前置条件：`codex-review` 的注册状态可确认已装（本会话技能列表或等效宿主证据确定可用；磁盘文件仅证明已安装；无法确认可用时记 unknown）。满足时，在同一对话首次标准/快速任务的验证范围问完（以及需要时的一次方案指导完成）后追加一问：**收尾是否用 Codex 独立审查？** 后续任务沿用该答案，不重问。用户已明确要求 Codex 审查时不问此问，直接按 `codex-review` 技能执行。长任务不再问 `codex_review`：MCP 在 long 返回 `SKIPPED/USE_CODEX_GATE`。
+长任务开工前用原生问答推荐一次只读方案指导（无工具则文本）。用户同意后，主对话单独调用 `Agent(subagent_type="方案顾问")`（固定 GPT）；brief 包括目标、计划改动、风险、约束、验证和回滚。顾问只给建议、不出正式判定；主对话记录原始结果并纳入方案。不可用或拒绝时说明并跳过指导，不改派正式审阅员，不解除正式审查或操作闸门。同一任务不重复；不因短模式出现高风险操作而自动询问或派发。同意不写入时机字段，指导不依赖或改变 `review_route`，也不替代包级、收尾或操作预审。
 
-推荐由 Skill 按项目情况给出单个 `recommendation`：高风险（系统关键配置、删除关键数据、安全相关）、跨仓库或大范围改动、验证不足，或方案指导发现重大风险时推荐 `["yes"]`；大多数普通/小型/已验证任务推荐 `["no"]`。MCP 接受 yes/no，不再强制只推荐 no。
+### 正式收尾
 
-| 选项 | 时机 | 耗时 | 资源 | 说明 |
-| --- | --- | --- | --- | --- |
-| 不使用 | — | 0 | 无 | 按项目推荐，多数普通任务适用；须明确提交；超时不自动确认 |
-| 使用：收尾 Codex 独立审查 | 收尾 | 视范围（一次深度审查约 5–10 万 token） | Codex 配额 | 高风险、大范围或验证不足时推荐；按 `codex-review` 技能执行：只读审查、逐项判定、ACCEPT/REJECT 落档 |
-
-- 未回复不采用推荐项。仅认可宿主真实可观测的超时结果与事先告知的配置策略；本版服务只记录 TIMED_OUT，不自动确认。文本回退结束当轮等待下一轮输入；取消/拒绝/工具失败不授权继续。
-- 迟到回复绑定所问问题（四选一/验证范围/codex_gate/codex_review）、工作包与修订号；先核对当前状态，只调整尚未执行的部分，并报告已发生的操作。选“使用”且尚未收尾的，收尾时执行；收尾已完成的标 `NOT_RUN`，要补审走新修订。
-- 收尾审查每个任务一次；包级复核按修订的 review attempt 记录，整改后可用新 attempt 重审。已被启动的审查者不再启动新的 Codex 会话；引用或讨论 `codex-review` 技能名不等于调用它。
-- 当前会话明确未注册时显示未注册并跳过；未知时显示尚未确认可用并跳过。补登记成功后，只询问尚未确认的审查选择。
-- Codex 是外部只读审查者，不是子 Agent；只能由主对话启动，子 Agent 不得启动。方案指导同样只读；审查期间不改源码、不构建/烧录、不碰串口/板卡，结论只认 Codex 最终消息里的 ACCEPT/REJECT。
+实现和所选验证结束后，主对话按时机字段和确认路由派一次独立 Reviewer；提供有界 diff/哈希、验收标准和原始证据索引，保存实际原始最终消息与宿主完成证据。只认唯一结论行 `结论: ACCEPT` 或 `结论: REJECT`；未实际完成、缺证据、无明确判定或 REJECT 不得报告通过。收尾是 Skill 规则，MCP 只强制 `packages` 的包级复核，不能把包级 ACCEPT 或方案指导冒充收尾。
 
 ## 工作包复核（review 子任务）
 
-仅 `codex_gate=packages` 的长任务包需要。`review` 是子任务 `kind`，记录主对话启动的外部 Codex 只读复核，不是第四种宿主子 Agent。
+仅 `codex_gate=packages` 的长任务包必须做。`review` 是子任务 `kind`，记录已确认路由的原生独立复核。
 
 ### 顺序与窗口
 
-1. 非 review 子任务按计划完成（`PASS`/`SUBSTITUTED`），包内没有活动 attempt。MCP 强制复核窗口和子任务声明的 `depends_on`；未声明的完成顺序由主对话保证，后续结果变化会使旧 ACCEPT 变成 `REVIEW_STALE`。
-2. `work_attempt_prepare` 单独准备 review attempt；成功返回 `review_subject`。prepare/end review 时其他活动 attempt 返回 `REVIEW_WINDOW_ACTIVE`；review 活动期间也不得准备其他子任务。批量 prepare/update 中 review 必须单独一项/一批。
-3. 主对话按 `review_subject` 启动 Codex 只读复核，把严格 JSON manifest 和原始最终消息写入该 attempt 的 `evidence_dir`。
-4. `work_attempt_update(state="ENDED", result=...)`：ACCEPT 用 `PASS` + manifest；REJECT 用 `FAIL` + manifest。两者都是合法报告，只有 ACCEPT 映射 PASS。
-5. `REVIEW_READY`/`COMPLETED` 检查 review 子任务的最新结果：需要 `PASS`、verdict=ACCEPT 且 subject 等于当前值；无 → `REVIEW_REQUIRED`，旧 → `REVIEW_STALE`。`COMPLETED` 和 `handoff_export` 还会重算 subject。
-- `work_package_update(results=...)` 直接写 review 子任务 → `REVIEW_ATTEMPT_REQUIRED`；必须经 attempt 绑定 subject。
-- 旧 ACCEPT 不能复用；文件、定义或非 review 结果变化后用新 review attempt 重审，最新结果决定状态。
-- Codex 不可用/超时/输出残缺：review 不能 `PASS`，保持 `REVIEW_REQUIRED`；不得伪造 ACCEPT。
+1. 非 review 子任务按计划完成（`PASS`/`SUBSTITUTED`），包内没有活动 attempt。MCP 强制复核窗口和 `depends_on`；主对话保证其余顺序，后续结果变化会使旧 ACCEPT 变成 `REVIEW_STALE`。
+2. `work_attempt_prepare` 单独准备 review attempt；成功返回 `review_subject`，`input_snapshot` 锁定当前 `review_route`。窗口内不得 prepare 其他子任务（`REVIEW_WINDOW_ACTIVE`）。
+3. 主对话准备有界 diff、哈希、允许文件、工作包/修订、当前 subject、验收和非 review 证据索引，再按锁定路由派 Agent；按实际宿主回执登记 `host_agent_id`，把原始最终消息与 v2 manifest 写入该 attempt 的 `evidence_dir`。
+4. 用单个 `work_attempt_update(state="ENDED", host_agent_id=<实际 ID>, result=...)` 结束：ACCEPT 用 `PASS` + manifest；REJECT 用 `FAIL` + manifest；manifest `agent_id` 与实际 `host_agent_id` 一致。
+5. `REVIEW_READY`/`COMPLETED` 要求当前 subject 的 `PASS` + ACCEPT；无 → `REVIEW_REQUIRED`，旧 → `REVIEW_STALE`。`COMPLETED` 和 `handoff_export` 还会重算 subject。
+
+- 不得直接 `work_package_update(results=...)` 写 review（`REVIEW_ATTEMPT_REQUIRED`）；文件、定义或非 review 结果变化后用新 review attempt 重审。
+- 角色不可用、超时、缺实际 Agent ID、原始输出残缺/无唯一判定时不得 PASS；停止后按实际状态记非通过，包保持未通过。未确认已经停止时不得假定 attempt 静止。
 - `force_close` 是操作员例外，不表示 review-accepted。
 
 ### 证据 manifest
 
-严格 JSON 对象，字段集恰好：
-
-`verdict`（`ACCEPT`|`REJECT`）、`session_id`、`model`、`subject_sha256`、`final_message_sha256`、`command`、`exit_code`（int 且为 0）、`raw_path`。
-
-- `session_id`/`model`/`command` 为非空字符串（上限 256/128/4000）；`subject_sha256`/`final_message_sha256` 为 64 位小写十六进制。
-- `subject_sha256` 必须等于 prepare 返回的 `review_subject`，否则 `REVIEW_STALE`。
-- `raw_path` 为相对 manifest 目录的路径，不得绝对路径、反斜杠或 `..`；解析后必须仍在本次 attempt 证据目录。
-- 原始最终消息必须存在、sha256 匹配、UTF-8，且恰好一行结论 `结论: ACCEPT` 或 `结论: REJECT`（支持 `**...**` 和中文冒号），与 `verdict` 一致。
-- review 忽略 `required_content`；不要用正文子串作为判据。
+严格 v2 JSON 对象：恰好 `schema_version`（整数 2）、`review_subject`、`agent_type`（锁定路由对应的派发 ID：`固定审阅员`/`继承审阅员`）、`agent_id`（实际宿主完成 ID）、`model`（可观测 `provider/model` 或 `unobserved`）、`status`（`completed`）、`verdict`（`ACCEPT`/`REJECT`）、`final_message`（`{path,sha256}`）。路径相对 manifest，须留在本 attempt 证据目录；原始 UTF-8 最终消息的哈希匹配且恰好一行结论，与 `verdict` 一致。不加 shell 退出码或命令；不接受正文子串代替结论。具体格式见 [MCP 用法](mcp.md#review-子任务与证据)。
 
 ### review_subject
 
@@ -239,7 +219,7 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 
 ## 破坏性操作闸门
 
-适用于所有模式（快速处理、标准执行、长任务；只调查如实际执行也适用），与是否启用 Codex 审查无关。
+闸门适用于所有模式，与开场的包级/收尾复核时机无关。只调查保持只读。标准/快速一旦遇到须走闸门的操作，阻塞该操作并说明原生预审须由用户明确切换长任务后才能启动；主对话不自动升模式，不发起短模式复核题，不用内建/手动角色、旧选择或已有批准绕过。只有用户明确要求切换后才按长任务完成适用确认及以下流程。
 
 ### 触发分类
 
@@ -257,13 +237,13 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 
 ### 流程
 
-1. 主对话准备：精确命令行（或 argv 拼接）、绝对 `cwd`（必须在项目根内）、目标列表（项目相对路径或 `device:`/`serial:`/`programmer:` 逻辑 ID）、影响面、备份、回滚方案，以及可选的 `baseline`（`{"head": "<sha>"}` 或 `{"files": {path: sha256}}`）。
-2. 需要时先做 Codex 只读预审。报告必须落项目内文件，正文最终结论有且仅有一行 `结论: ACCEPT` 或 `结论: REJECT`（允许 `**结论: ACCEPT**`）；报告以登记时的 sha256 固化。
-3. 调用 `operation_gate_record` 登记决定：
-   - `ACCEPT`：报告结论必须是 ACCEPT，且 `user_confirmed=true`；否则 `GATE_INVALID`。
-   - `REJECT`：报告结论必须是 REJECT；同一 `operation_id`/digest 之后是终态，任何 ACCEPT 返回 `GATE_REJECTED`。
-   - `UNAVAILABLE_OVERRIDE`：仅 Codex 不可用时使用；必须 `user_confirmed=true` 且原因不少于 10 字，可附失败/残缺报告；`operation_gate_check` 永远返回 `UNAVAILABLE_OVERRIDE`，不得当作 APPROVED。
-4. 执行前调用 `operation_gate_check`，只有 `status=APPROVED` 才继续；同时仍要保留用户的独立确认。命令、`cwd`、目标或 `baseline` 任一变化都会得到 `STALE`，必须重新登记。
+1. 主对话准备精确命令行（或 argv 拼接）、项目根内的绝对 `cwd`、目标（项目相对路径或设备逻辑 ID）、影响、备份、回滚和可选 `baseline`。用新 `operation_id` 与完整参数调用只读 `operation_gate_check`；`MISSING` 返回候选 `operation_digest`，不是放行。
+2. 主对话按已确认路由派原生 Reviewer 只读预审；无路由先单独确认（即使 `codex_gate=none`），再提供当前 digest、实际命令、范围、影响、备份、回滚和有界证据。主对话保存真实 Agent 的原始最终消息，以项目内路径及 sha256 固化。
+3. 调用 `operation_gate_record`：
+   - `ACCEPT`：原生 v2 `review_receipt` 必须绑定当前 `operation_digest`，唯一结论须为 ACCEPT，且有用户独立确认 `user_confirmed=true`；否则不批准。
+   - `REJECT`：以同样的原生回执记录 REJECT；同 `operation_id`/digest 是终态，后续 ACCEPT 返回 `GATE_REJECTED`。
+   - `UNAVAILABLE_OVERRIDE`：仅原生复核不可用时据实记录，需要明确用户确认且原因不少于 10 字，可附失败/残缺报告；该记录不是 APPROVED。
+4. 紧接执行前，以实际命令、`cwd`、目标和基线再次 `operation_gate_check`；仅 `APPROVED` 且仍有用户独立确认才执行。任一绑定参数变化得 `STALE`，必须重新预审与登记。回执格式见 [MCP 用法](mcp.md#破坏性操作闸门)。
 
 ### 绑定与幂等
 
@@ -275,8 +255,8 @@ SKILL_NOT_LOADED 仅靠安装/宿主证据判断；TOOL_NOT_CALLED 仅靠宿主�
 ### 不可绕过
 
 - `REJECT` 不可绕过；需要改方案时使用新的 `operation_id`，不得覆盖原记录。
-- Codex 超时、INCOMPLETE、输出残缺、报告缺失或结论行不唯一，都不得放行，也不得记为 ACCEPT。
-- Codex 不可用时只能记 `UNAVAILABLE_OVERRIDE`：必须用户明确二次确认并写明原因；该状态永远不等同于 `APPROVED`。
+- 原生复核超时、未完成、缺实际完成 ID、输出残缺、报告缺失或结论行不唯一，都不得放行，也不得记为 ACCEPT。
+- 复核不可用时只能记 `UNAVAILABLE_OVERRIDE`：必须用户明确二次确认并写明原因；该状态永远不等同于 `APPROVED`。
 - `operation_gate_check` 的 `APPROVED` 只表示“存在当前命令/目标/基线对应的 ACCEPT 记录且用户已确认”，不是执行授权本身。
 
 ### 诚实边界
@@ -285,15 +265,14 @@ MCP 不执行宿主命令，也没有执行前 Hook，无法拦截真实命令�
 
 ## 工作流程
 
-1. 四选一（每个对话只在首个任务问一次，后续沿用，不得按任务大小自动跳过）；同一对话首次标准/长任务再问验证范围；长任务随后问一次 `codex_gate`（none|closure|packages，推荐 packages），标准/快速在 codex-review 注册已确认时问 `codex_review` yes/no，只调查跳过；高危/长任务开工前做一次 Codex 方案指导（仅一次）；收尾按 gate/review 选择执行。快速/只调查只问四选一，但高危操作仍推荐一次方案指导，只调查不触发。
+先确认四选一。标准/长任务确认验证范围；标准/快速随后走 ZCode 内建流程，只调查保持只读。以下工作包编排仅为长任务的自动流程：
+
+1. 确认 `codex_gate` 和适用的 `review_route`；按条件推荐一次只读方案指导。
 2. 主对话定义工作包：目标、验收、目录、基线、允许/禁止操作、子 Agent 类型、证据要求；`packages` 包声明 `review` 子任务。
-3. 主对话负责 SQLite 与可审查 Markdown 的显式同步；服务只初始化缺失文件，不覆盖手工记录。断开 MCP 后纯 Skill 可维护文件；恢复时先核对，不盲目导入。主对话读写默认记忆：`<docs-root>/agent/AGENT_PROJECT.md`、`<docs-root>/agent/AGENT_COORDINATION.md`、`<docs-root>/agent/evidence/`。
-4. 拆分子任务；调查阶段按扇出预算起步 min(4, 只读子任务数) 个侦察者；实现按 `allowed_files` 两两不相交取最大并行集合（默认上限 4，无宿主并发证据取 1）；同文件/板卡/串口/烧录串行；review attempt 单独运行。
-5. 用 `Agent` 工具创建执行子 Agent，按侦察者/实施者/验证者写 prompt，含子任务、范围、禁止、检查、证据路径、“不得再委派/不得启动 Codex”。
-6. 子 Agent 执行并落证据；按 [roles.md](roles.md) 返回状态、动作、证据路径、首异常、剩余问题、资源释放，不贴原始日志。
-7. 主对话汇总：核对证据，区分 `PASS/FAIL/BLOCKED/NOT_RUN/SUBSTITUTED`，更新协作记录；`packages` 包在 `REVIEW_READY` 前完成 review ACCEPT（subject 当前）。
-8. 主对话独立验收 diff/日志/测试/产物；只有主对话更新验收结论。
-9. 同一工作包继续在主对话；压缩/重启时从 `AGENT_COORDINATION.md` 恢复。
+3. 主对话同步 SQLite 与 Markdown，服务只初始化缺失文件。断开 MCP 不改变模式边界；用文本/原生问答确认适用项，长任务仍用原生专用 Agent，并手工维护同样的工作包、attempt、静止窗口和证据；恢复时先核对，不盲目导入。缺真实角色或复核证据时标 `BLOCKED`/`NOT_RUN`；无法获得当前闸门 `APPROVED` 时不执行破坏性操作。
+4. 按扇出预算拆分和 prepare，再用实际 `subagent_type` 派执行子 Agent；提示含任务、范围、禁止事项、检查和返回格式。review attempt 单独运行。
+5. 子 Agent 按 [roles.md](roles.md) 回传状态、动作、证据来源、首异常、剩余问题和资源释放；主对话核对并持久化证据、串行登记。`packages` 包进 `REVIEW_READY` 前须当前 subject 的 ACCEPT。
+6. 按确认时机派收尾审查；主对话独立验收 diff/日志/测试/产物并更新结论。压缩/重启时从 `AGENT_COORDINATION.md` 恢复。
 
 ## 文档输出位置
 
@@ -317,7 +296,7 @@ docs-root = 首个存在的 `00_doc` / `00_docs` / `docs` / `doc`；均无则新
 | --- | --- | --- |
 | `<docs-root>/agent/AGENT_PROJECT.md` | 主对话 | 目标、决定、撤回方案、进度、验收 |
 | `<docs-root>/agent/AGENT_COORDINATION.md` | 主对话 | 阶段记忆、子任务、依赖、证据索引、异常 |
-| `<docs-root>/agent/evidence/WP-<id>/R<rev>/<subtask-id>/` | 子 Agent/主对话 | 完整日志、测试输出、截图、报告 |
+| `<docs-root>/agent/evidence/WP-<id>/R<rev>/<subtask-id>/` | 主对话 | 完整日志、测试输出、截图、原始复核消息与 manifest |
 
 - 三级记忆：主对话摘要 → 协作记录 → 证据文件；主对话只读关键证据。
 - 子 Agent 回传有界（建议 ≤1–2 KB），不贴原始日志。
@@ -364,12 +343,12 @@ docs-root = 首个存在的 `00_doc` / `00_docs` / `docs` / `doc`；均无则新
 11. 四选一仅本对话首次任务询问；后续沿用明确确认的选择，不跨新对话复制。
 12. 验证范围仅本对话首次标准/长任务确认；未选项不执行，推荐不是授权。
 13. 每个对话只在首个任务发起四选一；后续交互不重问；不得按任务大小/类型自动跳过。唯一例外是用户明确说“不用问，直接做”。
-14. 收尾审查仅明确已注册 codex-review 才问；未知/未装跳过；取消、拒绝、错误、超时保持未确认。长任务改用 `codex_gate`，标准/快速保留 `codex_review`。
+14. 只有长任务自动编排六个专用角色并询问 `codex_gate` 和适用的 `review_route`，不静默换路由。标准/快速/只调查不问 SCS 复核题。仅用户明确点名可在自动流程外手动调用角色，不改变模式或代替正式复核/闸门。取消、拒绝、错误、超时保持未确认。
 15. 生成的正式文档按 `00_doc/` → `00_docs/` → `docs/` → `doc/` → 新建 `docs/` 的顺序落盘；协议记忆、审查报告、证据保持既有路径，不改道。
 16. 四选一和验证范围各只标一个推荐，且由主对话在必要只读调查后按范围/风险/成本选择，不固定同一项；推荐不免问。
-17. 用户明确要求改变执行方式/验证范围，或任务性质明显需要另一模式时，直接切换并说明，不重新弹全套问题。
-18. `review` 子任务记录的是主对话启动的 Codex 只读复核，不是第四种宿主子 Agent；子 Agent 不得启动 Codex。
-19. 不得伪造 review ACCEPT、gate ACCEPT 或 `UNAVAILABLE_OVERRIDE`；Codex 不可用时如实记录并保持未通过。
+17. 用户明确要求改变执行方式/验证范围时重开对应题，不重新弹全套问题。
+18. `review` 子任务记录主对话派发的独立原生只读 Reviewer；执行子 Agent 不参与复核或落盘复核证据。
+19. 不得伪造 review ACCEPT、gate ACCEPT 或 `UNAVAILABLE_OVERRIDE`；原生复核不可用时如实记录并保持未通过。
 20. 3.0 不提供共享文件读租约；非 implement 默认不取文件租约，显式 `file:` read 被拒绝；旧包 read 资源在 prepare 时过滤并警告。
 
 ## 与桥接模式的区别
@@ -386,31 +365,23 @@ docs-root = 首个存在的 `00_doc` / `00_docs` / `docs` / `doc`；均无则新
 ```text
 Agent(
   description="<任务>子 Agent",
-  subagent_type="general-purpose",
+  subagent_type="<查询侦察员|实施工程师|测试验证员>",
   run_in_background=false,
   prompt="""
-你是工作包 WP-<id> / R<n> 的执行子 Agent，角色：<侦察者 analyze / 实施者 implement / 验证者 test>。
-主对话负责目标、阶段记忆、调度和验收；你不创建下一级 Agent，不启动 Codex。
-工作目录：<cwd>
-子任务：<...>
-输入上下文：<...>
-允许范围：<文件/设备/操作>
-禁止事项：<...>
-基线：<...>
-检查方法：<...>
-证据写入：<docs-root>/agent/evidence/WP-<id>/R<n>/<subtask-id>/<attempt-id>/
-最终消息：状态、实际动作、证据路径、首异常、剩余问题、资源释放（按 roles.md schema）。
+工作包 WP-<id> / R<n> / attempt <id>；工作目录 <cwd>；基线 <...>。
+任务与验收：<...>；允许的文件、设备和命令：<...>；禁止：<...>。
+不再委派、不修改工作包状态、不另写证据。返回状态、动作、已有证据、首异常、剩余问题和资源释放。
 """
 )
 ```
 
-模型：子 Agent 默认继承主对话 provider/model；若某个 agent 定义固定了 `model:`，先改为继承或按用户指定覆盖，再派发。
+不传 `model` 覆盖。正式复核用同一 `Agent` 工具，将 `subagent_type` 选为该次确认/锁定路由对应的 `固定审阅员`（`gpt`）或 `继承审阅员`（`inherit`），按 [roles.md](roles.md) 构造只读提示，不让执行 Agent 兼任。可选指导经用户同意后单独调用 `Agent(subagent_type="方案顾问")`，只给建议。
 
 ## 检查清单
 
-- [ ] 按适用条件完成提问：每个对话首个任务四选一，后续沿用；同一对话首次标准/长任务问验证范围；长任务问并确认 `codex_gate`（推荐 packages），标准/快速按 codex-review 注册状态问 `codex_review`，只调查跳过；高危/长任务是否只做一次方案指导；明确“不用问，直接做”/明确要求审查等例外已处理。
-- [ ] 快速/只调查没有验证多选或执行子 Agent；标准执行按计划实现/验证；长任务使用真实执行子 Agent 的侦察者/实施者/验证者三角色和扇出预算，无下一级委派，子 Agent 未启动 Codex。
-- [ ] `packages` 包声明了 `review` 子任务；review attempt 单独运行且子 Agent 未参与；`REVIEW_READY` 前的 PASS review 带当前 subject 的 ACCEPT manifest；`REVIEW_STALE` 已用新 attempt 重审。
+- [ ] 按模式确认四选一和适用验证；仅长任务确认复核时机和适用的 `review_route`，可选指导经同意后至多单独派一次 `方案顾问`，不替代任何正式复核。
+- [ ] 快速/只调查跳过验证题；只调查按需用只读内建 `Explore`；标准/快速按内建流程执行、只按需用默认/内建 Agent。长任务使用 ZCode 的 `查询侦察员`、`实施工程师`、`测试验证员` 和扇出预算，无下一级委派或外部复核回退。
+- [ ] `packages` 包声明 `review`；review attempt 单独运行，由所选只读角色执行；`REVIEW_READY` 前的 PASS review 带实际 Agent ID、当前 subject 和原始 ACCEPT 的 v2 manifest；`REVIEW_STALE` 已新开 attempt。
 - [ ] 批量 prepare/update 单包原子；`work_attempt_update_many` 的 `operation_id` 已提供；`work_attempt_note` 未被当作存活证明；`run_map` 有界且未写文件。
 - [ ] 非 implement 未声明文件读租约；旧包遗留 read 资源已被过滤并提示；同文件/同设备仍串行。
 - [ ] 未选中的长耗时操作没有进入计划；破坏性操作已按「破坏性操作闸门」登记，并在执行前 `operation_gate_check` 为 `APPROVED`；REJECT/UNAVAILABLE_OVERRIDE 未被当作放行。
