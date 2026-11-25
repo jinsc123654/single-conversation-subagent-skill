@@ -2,7 +2,9 @@
 
 ## 未发布
 
-- 子 Agent 权限矩阵落地：方案顾问/查询侦察员/固定审阅员/继承审阅员收紧为 `[Read, Grep, Glob]`，实施工程师移除通用 Bash，测试验证员保留受控验证命令；`zcode-agents/permissions.json` + `scripts/check_agent_permissions.py` 校验已注册身份，超出矩阵停止派发。
+- 方案顾问与查询侦察员恢复受控联网：`WebFetch/WebSearch` 仅用于公开文档/公开页面，禁止内网、私有 URL、凭据、源码/数据上传和下载执行；联网不可用时报告并继续本地分析。
+- 方案顾问与固定审阅员开放全部工具（含 `Bash`/`Edit`/`Write`/`WebFetch`/`WebSearch`/`TodoWrite`），用于最强性能；正文要求默认不修改项目文件，审查/方案结论仍需证据，只读保证降级为正文与事后审计。
+- 实施工程师、继承审阅员恢复受控 Bash：实施仅编译/测试/lint 自检，继承审阅仅只读核查；不得用 shell 绕过 `allowed_files` 或只读边界。
 - UI/用户可见交付加入用户旅程验收：在实际 URL/实例执行入口→主操作→可见结果，记录实例、动作、结果、截图；长驻 dev server 先观察原实例再刷新对照，不可达记 `NOT_RUN`/`BLOCKED`。
 - 复核判据与收敛：工作包声明输入契约/非目标输入；findings 带 `severity`/`reachability`/`blocking_reason`，只有可达且违反契约的才算阻塞；每修订默认最多两次自动复核派发，ZCode 手动包级复核轮次由用户确认，到限聚合交用户决策。
 - 证据增加 `kind`（test/build/lint/smoke）与 `source_sha256`/`log_path`/`artifacts` 来源元数据；build 不再要求伪造 `passed`。

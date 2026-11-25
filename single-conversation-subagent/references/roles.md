@@ -10,7 +10,7 @@
 | 正式审查 | `固定审阅员` | 包级、收尾和操作预审，独立只读 |
 | 方案指导 | `方案顾问` | 长任务确认选择后、拆包前调用一次，只提供方案建议 |
 
-ZCode 实际生效的工具集以 `zcode-agents/permissions.json` 为准，安装/派发前用 `scripts/check_agent_permissions.py` 校验；超出矩阵的角色停止派发。目标矩阵：方案顾问/查询侦察员/固定审阅员/继承审阅员只读 `[Read, Grep, Glob]`，实施工程师 `[Read, Grep, Glob, Edit, Write]`，测试验证员 `[Read, Grep, Glob, Bash]`（仅受控验证命令）。
+ZCode 实际生效的工具集以 `zcode-agents/permissions.json` 为准，安装/派发前用 `scripts/check_agent_permissions.py` 校验；超出矩阵的角色停止派发。目标矩阵：方案顾问/固定审阅员 `[Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch, TodoWrite]`（全工具；默认不改项目文件，只读边界降级为正文与事后审计），查询侦察员 `[Read, Grep, Glob, WebFetch, WebSearch]`（联网仅限公开资料），继承审阅员 `[Read, Grep, Glob, Bash]`（Bash 仅只读核查），实施工程师 `[Read, Grep, Glob, Edit, Write, Bash]`（Bash 仅自检），测试验证员 `[Read, Grep, Glob, Bash]`（仅受控验证命令）。Bash 是完整 shell，范围和只读边界靠正文约束与事后审计，不是工具级强制。
 
 派发 ID 就是表中的中文角色名。使用已注册的模型设置，主对话不传模型覆盖。长任务选择包含方案指导，按实际完成回执确认。需正式审查时只用 `固定审阅员`。这六个原始角色模板由 `zcode-agents/` 保存，`继承审阅员` 可作为宿主手动身份使用。其他宿主继续使用下面的通用角色契约。
 
@@ -141,7 +141,7 @@ ZCode 实际生效的工具集以 `zcode-agents/permissions.json` 为准，安�
 
 **边界**：
 
-- 只读；不改源码、不构建/烧录、不碰串口/板卡、不创建宿主 Agent。
+- 只读；不改源码、不构建/烧录、不碰串口/板卡、不创建宿主 Agent。ZCode `固定审阅员` 已开放全部工具，仍默认只读核查；必要验证命令可执行并报告，但不得修改项目文件或改变设备状态。
 - 只能由主对话启动；子 Agent 不得启动 Codex，也不得把 Codex 当作下一级 Agent。
 - 复核结论只认 Codex 最终消息中的唯一结论行 `结论: ACCEPT` 或 `结论: REJECT`；包级复核还必须落严格 JSON manifest（字段见 [mcp.md](mcp.md)）。findings 逐条给出 `id`、`category`、`severity`、`reachability`、关联验收项、`evidence_refs`、影响和 `blocking_reason`；只有可达且违反已声明输入契约/验收条件的问题才作为阻塞项，构造性或不可达输入列为 hardening backlog。
 - Codex 不可用、超时、输出残缺或报告缺失时不得伪记 `ACCEPT`；破坏性闸门只能记 `UNAVAILABLE_OVERRIDE`，包级复核不能据此 `PASS`。

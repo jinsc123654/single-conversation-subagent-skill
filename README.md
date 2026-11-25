@@ -297,7 +297,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 - **方案顾问** 在长任务开工前做一次只读方案指导。
 - **固定审阅员** 独立检查当前工作包、交付证据或预审操作，由主对话单独派发。通用宿主使用外部 `codex-review`。
 
-ZCode 实际工具集以 `zcode-agents/permissions.json` 为准：方案顾问/查询侦察员/固定审阅员/继承审阅员只读 `[Read, Grep, Glob]`，实施工程师 `[Read, Grep, Glob, Edit, Write]`，测试验证员 `[Read, Grep, Glob, Bash]`。运行 `python scripts/check_agent_permissions.py` 校验已注册身份；超出矩阵时停止派发。
+ZCode 实际工具集以 `zcode-agents/permissions.json` 为准：方案顾问/固定审阅员 `[Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch, TodoWrite]`（全工具，默认不改项目文件），查询侦察员 `[Read, Grep, Glob, WebFetch, WebSearch]`（仅公开资料），继承审阅员 `[Read, Grep, Glob, Bash]`（Bash 仅只读核查），实施工程师 `[Read, Grep, Glob, Edit, Write, Bash]`（Bash 仅自检），测试验证员 `[Read, Grep, Glob, Bash]`。运行 `python scripts/check_agent_permissions.py` 校验已注册身份；超出矩阵时停止派发。Bash 是完整 shell，只读/范围边界靠正文与事后审计。
 
 UI/用户可见交付收尾时必须完成用户旅程验收：在用户实际使用的 URL/实例执行入口→主操作→可见结果，记录实例、动作、结果和截图；长驻 dev server 先观察原实例再刷新对照，不能用冷启动测试代替现场验收。
 
