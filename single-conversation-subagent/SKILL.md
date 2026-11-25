@@ -42,6 +42,12 @@ description: 单对话两级 Subagent 协作；按模式确认验证和复核，
 
 删除/覆盖用户数据或系统关键配置、擦除/烧录、drop 数据库/表、不可逆 git 操作、递归 `chmod`/`chown`、卸载关键包、`allowed_files` 之外的大范围改写等，必须走闸门：主对话准备命令/`cwd`/目标/影响面/备份/回滚 → 审阅员只读预审 → `operation_gate_record` → 执行前 `operation_gate_check` 为 `APPROVED`，并保留用户独立确认。ACCEPT 需报告唯一结论 + `user_confirmed=true`；ZCode 先用实际参数 `operation_gate_check` 取得 `operation_digest`，派 `固定审阅员`，登记时提交对应的 v2 `review_receipt`；REJECT 对同 `operation_id`/digest 是终态，不可覆盖；审阅员不可用只能记 `UNAVAILABLE_OVERRIDE`，不得伪记 ACCEPT。MCP 不执行、不拦截宿主命令；没有宿主 Hook 时这是协议级约束（`PROTOCOL_ONLY`），不是执行级强制。普通代码编辑、证据写入和视图刷新不触发。详见 [完整协议](references/protocol.md)。
 
+## ZCode 子 Agent 上下文判断
+
+用户问子 Agent 上下文占用，或主对话准备 `SendMessage` 续跑已结束的子 Agent 时，由主对话查宿主记录：先调用 `ListModels`，再运行 [只读上下文探针](references/zcode-context.md)，用目标子会话最近一次请求的用量和该子 Agent 实际 `provider/model` 的窗口计算。不要借用主对话模型窗口，也不要按轮数、累计账单或缓存未命中数估算。
+
+只有原工作线、角色、基线和授权仍相容，且探针给出 `REUSE`，才允许考虑续跑；长任务仍先 prepare 新 attempt。`ROTATE` 或 `UNKNOWN` 时不续旧实例，需要继续就新开同角色，只带必要交接。包级复核、正式收尾和操作预审仍独立新开 `固定审阅员`，不受占用比例影响。
+
 ## 执行与收尾
 
 快速由主对话直接处理；只调查保持只读，范围大时可派只读子 Agent。标准执行由主对话按计划实现和验证，按需建工作包与证据，收尾按已确认的选择派审阅员。长任务按上节三角色与复核策略执行。子 Agent 继承主对话的授权和验证范围。未选的测试标 `NOT_RUN`；不做测试与只记录方法互斥，均不标 PASS。主对话核对关键证据后验收，省略全量日志。
