@@ -12,10 +12,11 @@ from .locks import Leases
 from .state import State, identifier
 from .storage import Store, encode, now
 
-STATES = {"PENDING": {"IN_PROGRESS", "BLOCKED", "ABANDONED"},
-          "IN_PROGRESS": {"REVIEW_READY", "BLOCKED", "ABANDONED"},
-          "BLOCKED": {"IN_PROGRESS", "ABANDONED"},
-          "REVIEW_READY": {"IN_PROGRESS", "BLOCKED", "COMPLETED", "ABANDONED"},
+STATES = {"PENDING": {"IN_PROGRESS", "BLOCKED", "SUSPENDED", "ABANDONED"},
+          "IN_PROGRESS": {"REVIEW_READY", "BLOCKED", "SUSPENDED", "ABANDONED"},
+          "BLOCKED": {"IN_PROGRESS", "SUSPENDED", "ABANDONED"},
+          "REVIEW_READY": {"IN_PROGRESS", "BLOCKED", "SUSPENDED", "COMPLETED", "ABANDONED"},
+          "SUSPENDED": {"IN_PROGRESS", "ABANDONED"},
           "COMPLETED": set(), "ABANDONED": set()}
 RESULTS = {"PASS", "FAIL", "BLOCKED", "NOT_RUN", "SUBSTITUTED"}
 CLOSED_STATES = {"COMPLETED", "ABANDONED"}
@@ -255,7 +256,7 @@ class Work:
                 original["subtasks"] = [
                     {**self._normalize_task(self._definition_task(task)),
                      "status": "NOT_RUN", "evidence": []}
-                    for task in original["subtasks"]]
+                    for task in original["subtasks"] if not task.get("manual_review_slot")]
                 if original != definition or old["revision"] != 1:
                     raise ScsError("IDEMPOTENCY_CONFLICT", "request_key was already used for another definition or revision.")
                 return self._snapshot(old)
@@ -265,17 +266,18 @@ class Work:
                 self.store.paths.mkdir(f"{docs}/agent/evidence/{pid}/R1/{task['id']}")
             data = {**definition,
                     "review_required": session["mode"] == "long" and intake["policy"] == "packages"}
-            if self.store.native_review and data["review_required"]:
-                data["native_review_required"] = True
             con.execute("INSERT INTO work_packages VALUES(?,?,?,?,?,?,?,?)", (pid, session_id, 1, 1, "PENDING", encode(data), docs, now()))
             self.store.event(con, session_id, None, "work_package_create", "PACKAGE_CREATED")
             row = self._get(con, pid)
             self.store.revision_snapshot(con, row)
             return self._snapshot(row)
 
+    def _requires_review(self, data: dict) -> bool:
+        return not self.store.native_review and bool(data.get("review_required"))
+
     def _snapshot(self, row) -> dict:
         data = json.loads(row["data"])
-        data.setdefault("review_required", False)  # legacy packages without the freeze
+        data["review_required"] = self._requires_review(data)
         return {"status": "OK", "id": row["id"], "owner_session": row["session_id"], "revision": row["revision"],
                 "version": row["version"], "state": row["state"], **data,
                 "docs_root": row["docs_root"], "records": [row["docs_root"] + "/agent/AGENT_PROJECT.md", row["docs_root"] + "/agent/AGENT_COORDINATION.md"],
@@ -392,10 +394,23 @@ class Work:
                 raise ScsError("HOST_AGENT_ACTIVE", "This ZCode Agent already has an active attempt.")
 
     def _prepare_in_tx(self, con, session_id: str, row, data: dict, task: dict,
-                       host_agent_id: str | None, ttl_seconds: float) -> dict:
+                       host_agent_id: str | None, ttl_seconds: float, user_requested: bool = False) -> dict:
         """Create one attempt inside the caller's write transaction."""
         package_id, revision = row["id"], row["revision"]
+        if row["state"] == "SUSPENDED":
+            raise ScsError("PACKAGE_SUSPENDED", "Resume the work package before preparing another attempt.")
         self._assert_review_window(con, row, data, task)
+        if task["kind"] == "review" and self.store.native_review:
+            if not user_requested:
+                raise ScsError("REVIEW_MANUAL_REQUIRED", "Only an explicit user request for this package can start review.")
+        if task["kind"] == "review" and not self.store.native_review and not user_requested:
+            used = con.execute(
+                "SELECT COUNT(*) FROM work_attempts WHERE package_id=? AND revision=? AND subtask_id=?",
+                (package_id, revision, task["id"])).fetchone()[0]
+            if used >= 2:
+                raise ScsError("REVIEW_BUDGET_EXHAUSTED",
+                               "This revision has used its two automatic review attempts; ask the user before starting another.",
+                               {"attempts_used": used})
         if task["kind"] == "review" and data.get("native_review_required") and not self.store.native_review:
             raise ScsError("NATIVE_REVIEW_DISABLED", "This package uses the fixed ZCode reviewer.")
         self._assert_host_idle(con, host_agent_id)
@@ -444,6 +459,8 @@ class Work:
             # manifest must match this baseline and the current recomputation.
             review_subject = self._review_subject(row, data)
             input_snapshot["review_subject"] = review_subject
+            if self.store.native_review:
+                input_snapshot["user_requested"] = True
         self.store.paths.mkdir(evidence_dir)
         con.execute("INSERT INTO work_attempts(id,package_id,revision,subtask_id,attempt_no,state,host_agent_id,controller_session,input_snapshot,resources,result_state,result_data,created_at,updated_at,last_observed_at) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,?)",
                     (attempt_id, package_id, revision, task["id"], attempt_no, state,
@@ -455,14 +472,14 @@ class Work:
                  "warnings": warnings}
         if review_subject is not None:
             entry["review_subject"] = review_subject
-            entry["review_required"] = bool(data.get("review_required"))
+            entry["review_required"] = self._requires_review(data)
         if self.store.native_review:
             entry["agent_type"] = input_snapshot["agent_type"]
         return entry
 
     def prepare_attempt(self, session_id: str, package_id: str, expected_version: int,
                         subtask_id: str, host_agent_id: str | None = None,
-                        ttl_seconds: float = 120) -> dict:
+                        ttl_seconds: float = 120, *, user_requested: bool = False) -> dict:
         self._validate_host(host_agent_id)
         with self.store.transaction(True) as con:
             row = self._get(con, package_id)
@@ -473,9 +490,30 @@ class Work:
                 raise ScsError("VERSION_CONFLICT", "Refresh the work package before preparing an attempt.")
             data = json.loads(row["data"])
             task = next((t for t in data["subtasks"] if t["id"] == subtask_id), None)
+            added = False
+            if self.store.native_review and user_requested and subtask_id == "review":
+                task = next((t for t in data["subtasks"] if t["kind"] == "review"), None)
+                if task is None:
+                    ids = {t["id"] for t in data["subtasks"]}
+                    review_id = "review"
+                    if review_id in ids:
+                        review_id = next(f"review-{i}" for i in range(1, len(ids) + 1)
+                                         if f"review-{i}" not in ids)
+                    task = {"id": review_id, "kind": "review", "allowed_files": [],
+                            "acceptance": ["Independent review of the current package"],
+                            "depends_on": [], "resources": [], "required": False,
+                            "status": "NOT_RUN", "evidence": [], "manual_review_slot": True}
+                    data["subtasks"].append(task)
+                    added = True
             if task is None:
                 raise ScsError("SUBTASK_INVALID", "Subtask does not exist in this revision.")
-            prepared = self._prepare_in_tx(con, session_id, row, data, task, host_agent_id, ttl_seconds)
+            prepared = self._prepare_in_tx(con, session_id, row, data, task, host_agent_id, ttl_seconds,
+                                           user_requested=user_requested)
+            if added:
+                con.execute("UPDATE work_packages SET data=?, version=version+1 WHERE id=?",
+                            (encode(data), package_id))
+                row = self._get(con, package_id)
+                self.store.revision_snapshot(con, row)
             return {"status": "OK", "package_id": package_id, "revision": row["revision"],
                     "version": row["version"], **prepared}
 
@@ -568,9 +606,9 @@ class Work:
                 # recomputes, so a broken file set cannot trap an open attempt.
                 current = self._review_subject(row, data)
                 if frozen is not None and frozen != current:
-                    raise ScsError("REVIEW_STALE",
-                                   "The reviewed subject changed after the attempt was prepared; "
-                                   "run a new review attempt.")
+                    raise ScsError("REVIEW_STALE", "The reviewed subject changed after preparation; "
+                                   + ("end this attempt without a current verdict; do not retrigger package review."
+                                      if self.store.native_review else "run a new review attempt."))
                 expected = frozen if frozen is not None else current
             elif evidence:
                 expected = frozen if frozen is not None else self._review_subject(row, data)
@@ -848,7 +886,7 @@ class Work:
                 else:
                     map_revision, map_state = current_revision, current_state
                 data = json.loads(current_data)
-                review_required = bool(data.get("review_required"))
+                review_required = self._requires_review(data)
                 package_entry = {"id": row["id"], "revision": map_revision, "version": map_version,
                                  "state": map_state, "goal": data.get("goal", ""),
                                  "review_required": review_required,
@@ -867,6 +905,8 @@ class Work:
                         reviews.append({"subtask_id": task["id"], "status": task.get("status"),
                                         "verdict": (task.get("review") or {}).get("verdict"),
                                         "subject_sha256": (task.get("review") or {}).get("subject_sha256")})
+                    if self.store.native_review and task.get("kind") == "review":
+                        continue
                     if task.get("status") == "FAIL":
                         blockers.append({"package_id": row["id"], "code": "SUBTASK_FAIL",
                                          "subtask_id": task["id"]})
@@ -1228,6 +1268,8 @@ class Work:
                        "review_required: complete a review attempt with an ACCEPT manifest first.")
 
     def _assert_review_current(self, data: dict, row, revision: int):
+        if self.store.native_review:
+            return  # A one-time review is historical evidence, not an acceptance gate.
         # Only a PASS review, or a review that recorded an explicit subject
         # digest, is an approval bound to the current subject. A PASS record
         # without a stored digest cannot prove freshness, so it is treated as
@@ -1256,6 +1298,8 @@ class Work:
 
     def _verify_reports(self, data: dict, row, revision: int):
         for task in data["subtasks"]:
+            if self.store.native_review and task["kind"] == "review":
+                continue  # The receipt is verified at recording, not as an acceptance prerequisite.
             review = (task.get("review") or {}) if task["kind"] == "review" else {}
             native = review.get("agent_type") is not None
             if task["status"] != "PASS" and not (native and task["status"] == "FAIL"):
@@ -1286,17 +1330,23 @@ class Work:
     def update(self, session_id: str, package_id: str, expected_version: int,
                state: str | None = None, results: list[dict] | None = None,
                new_revision: bool = False, close_reason: str | None = None,
-               definition: dict | None = None, operation_id: str | None = None) -> dict:
+               definition: dict | None = None, operation_id: str | None = None,
+               suspension_reason: str | None = None, resume_condition: str | None = None,
+               known_limitations: list[str] | None = None) -> dict:
         operation_id = self._operation_id(operation_id)
-        if not new_revision and state is None and not results and close_reason is None:
-            raise ScsError("INPUT_INVALID", "Specify a state, results, close reason, or a new revision.")
-        if new_revision and (state is not None or results or close_reason is not None):
+        if not new_revision and state is None and not results and close_reason is None and suspension_reason is None:
+            raise ScsError("INPUT_INVALID", "Specify a state, results, close reason, suspension reason, or a new revision.")
+        if new_revision and (state is not None or results or close_reason is not None or suspension_reason is not None
+                             or resume_condition is not None or known_limitations):
             raise ScsError("INPUT_INVALID", "Start a revision separately from reporting results.")
         if definition is not None and not new_revision:
             raise ScsError("INPUT_INVALID", "A new definition is only valid when starting a revision.")
         payload = encode({"package_id": package_id, "expected_version": expected_version,
                           "state": state, "results": results, "new_revision": new_revision,
-                          "close_reason": close_reason, "definition": definition})
+                          "close_reason": close_reason, "definition": definition,
+                          "suspension_reason": suspension_reason,
+                          "resume_condition": resume_condition,
+                          "known_limitations": known_limitations})
         with self.store.transaction(True) as con:
             row = self._get(con, package_id)
             self._access(con, session_id, row)
@@ -1327,6 +1377,26 @@ class Work:
                 close_reason = close_reason.strip()
             elif close_reason is not None:
                 raise ScsError("INPUT_INVALID", "A close reason is only valid with COMPLETED or ABANDONED.")
+            suspending = target == "SUSPENDED"
+            if suspending:
+                if results:
+                    raise ScsError("INPUT_INVALID", "Suspend without new subtask results.")
+                if not isinstance(suspension_reason, str) or not suspension_reason.strip():
+                    raise ScsError("SUSPENSION_REASON_REQUIRED", "Record why this work package is suspended.")
+                if len(suspension_reason.strip()) > 2000:
+                    raise ScsError("INPUT_INVALID", "Suspension reason exceeds 2000 characters.")
+                if resume_condition is not None and (not isinstance(resume_condition, str) or len(resume_condition.strip()) > 2000):
+                    raise ScsError("INPUT_INVALID", "Resume condition must be a bounded string.")
+                if known_limitations is not None:
+                    if (not isinstance(known_limitations, list) or len(known_limitations) > 50
+                            or any(not isinstance(item, str) or not item.strip() or len(item.strip()) > 500
+                                   for item in known_limitations)):
+                        raise ScsError("INPUT_INVALID", "Known limitations must be at most 50 bounded strings.")
+                suspension_reason = suspension_reason.strip()
+                resume_condition = resume_condition.strip() if isinstance(resume_condition, str) else None
+                known_limitations = [item.strip() for item in known_limitations or []]
+            elif suspension_reason is not None or resume_condition is not None or known_limitations:
+                raise ScsError("INPUT_INVALID", "Suspension details are only valid with SUSPENDED.")
             revision = row["revision"]
             if new_revision:
                 self._assert_quiescent(con, package_id, revision, "starting a new revision")
@@ -1343,6 +1413,8 @@ class Work:
                     data.update({"goal": goal, "allowed_files": allowed, "acceptance": acceptance,
                                  "subtasks": self._tasks(definition["subtasks"], allowed)})
                 else:
+                    if self.store.native_review:
+                        data["subtasks"] = [task for task in data["subtasks"] if not task.get("manual_review_slot")]
                     for task in data["subtasks"]:
                         # A new revision must not inherit the previous review
                         # verdict/subject: exports and run_map see one revision.
@@ -1358,7 +1430,7 @@ class Work:
             elif target != row["state"] and target not in STATES.get(row["state"], set()):
                 raise ScsError("STATE_INVALID", "Invalid work package transition; final acceptance belongs to the main conversation.")
             if not new_revision:
-                if target in {"REVIEW_READY", "COMPLETED", "ABANDONED", "BLOCKED"}:
+                if target in {"REVIEW_READY", "COMPLETED", "ABANDONED", "BLOCKED", "SUSPENDED"}:
                     self._assert_quiescent(con, package_id, revision, "moving to " + target)
                 if results:
                     self._assert_quiescent(con, package_id, revision,
@@ -1389,10 +1461,12 @@ class Work:
                     if check["status"] != "VERIFIED" or entry.get("sha256") != check["sha256"]:
                         raise ScsError("EVIDENCE_INVALID", "Evidence is invalid, insufficient or changed since verification.")
                 task.update(status=result["status"], evidence=evidence)
-            if target in {"REVIEW_READY", "COMPLETED"} and any(t["status"] in {"FAIL", "BLOCKED"} for t in data["subtasks"]):
+            if target in {"REVIEW_READY", "COMPLETED"} and any(
+                    t["status"] in {"FAIL", "BLOCKED"}
+                    for t in data["subtasks"] if not (self.store.native_review and t["kind"] == "review")):
                 raise ScsError("RESULT_BLOCKED", "Resolve failed/blocked subtasks before reporting review readiness or completion.")
             self._verify_reports(data, row, revision)
-            if target in {"REVIEW_READY", "COMPLETED"} and data.get("review_required"):
+            if target in {"REVIEW_READY", "COMPLETED"} and self._requires_review(data):
                 self._review_gate(data, row, revision)
             if target in {"REVIEW_READY", "COMPLETED"}:
                 # review_required only controls whether a review is mandatory.
@@ -1401,6 +1475,17 @@ class Work:
                 # not require one. No-op when no review result exists.
                 self._assert_review_current(data, row, revision)
             data["updated_at"] = now()
+            if suspending:
+                data["suspension"] = {
+                    "reason": suspension_reason,
+                    "resume_condition": resume_condition,
+                    "known_limitations": known_limitations or [],
+                    "at": data["updated_at"],
+                }
+            elif row["state"] == "SUSPENDED":
+                previous = data.pop("suspension", None)
+                if previous is not None:
+                    data.setdefault("suspension_history", []).append(previous)
             if closing:
                 data["closed_at"] = data["updated_at"]
                 data["close_reason"] = close_reason
@@ -1468,6 +1553,7 @@ class Work:
             self._verify_reports(data, row, row["revision"])
             self._assert_review_current(data, row, row["revision"])
             snapshot = self._snapshot(row)
+            snapshot["suspended"] = row["state"] == "SUSPENDED"
             # Preferences and identity are deliberately absent: a new chat does intake.
             snapshot.pop("owner_session")
             raw = encode(snapshot)

@@ -170,6 +170,30 @@ def _native_review_check(store: Store, text: str, clean: str, prefix: str,
     return {"status": "VERIFIED", "review": {**receipt, "final_message": {**final, "path": raw}}}
 
 
+def _safe_relative(value) -> bool:
+    return (isinstance(value, str) and 0 < len(value) <= 512
+            and not value.startswith("/") and "\\" not in value and "\x00" not in value
+            and ".." not in PurePosixPath(value).parts)
+
+
+def _valid_source(value) -> bool:
+    if isinstance(value, str):
+        return bool(re.fullmatch(r"[0-9a-f]{64}", value))
+    if isinstance(value, dict):
+        return (len(value) <= 100
+                and all(_safe_relative(key) and isinstance(digest, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", digest) for key, digest in value.items()))
+    return False
+
+
+def _valid_artifacts(value) -> bool:
+    if not isinstance(value, list) or len(value) > 200:
+        return False
+    return all(isinstance(item, dict) and set(item) == {"path", "sha256"}
+               and _safe_relative(item["path"]) and isinstance(item["sha256"], str)
+               and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) for item in value)
+
+
 def verify_file(store: Store, path: str, prefix: str, kind: str,
                 required_content: list[str] | None = None,
                 subject_sha256: str | None = None, *, native_review: bool = False,
@@ -211,8 +235,29 @@ def verify_file(store: Store, path: str, prefix: str, kind: str,
             return {"status": "INSUFFICIENT", "error_code": "TEST_MANIFEST_REQUIRED"}
         if not isinstance(manifest, dict):
             return {"status": "INVALID", "error_code": "TEST_MANIFEST_INVALID"}
+        declared = manifest.get("kind", "test")
+        if declared not in ("test", "build", "lint", "smoke"):
+            return {"status": "INVALID", "error_code": "EVIDENCE_KIND_INVALID"}
         if type(manifest.get("exit_code")) is not int or manifest["exit_code"] != 0:
             return {"status": "INVALID", "error_code": "TEST_EXIT_NONZERO_OR_UNKNOWN"}
-        if type(manifest.get("passed")) is not int or manifest["passed"] <= 0 or not isinstance(manifest.get("command"), str) or not manifest["command"].strip():
+        if not isinstance(manifest.get("command"), str) or not manifest["command"].strip():
             return {"status": "INSUFFICIENT", "error_code": "TEST_RESULT_MISSING"}
+        if declared == "test" and (type(manifest.get("passed")) is not int or manifest["passed"] <= 0):
+            return {"status": "INSUFFICIENT", "error_code": "TEST_RESULT_MISSING"}
+        if declared == "smoke":
+            observation = manifest.get("observations") or manifest.get("journey")
+            if not observation:
+                return {"status": "INSUFFICIENT", "error_code": "SMOKE_OBSERVATION_MISSING"}
+        source = manifest.get("source_sha256")
+        if source is not None and not _valid_source(source):
+            return {"status": "INVALID", "error_code": "EVIDENCE_KIND_INVALID"}
+        log_path = manifest.get("log_path")
+        if log_path is not None and not _safe_relative(log_path):
+            return {"status": "INVALID", "error_code": "EVIDENCE_KIND_INVALID"}
+        artifacts = manifest.get("artifacts")
+        if artifacts is not None and not _valid_artifacts(artifacts):
+            return {"status": "INVALID", "error_code": "EVIDENCE_KIND_INVALID"}
+        base["kind"] = declared
+        base["provenance"] = {
+            "source_sha256": source, "log_path": log_path, "artifacts": artifacts}
     return {"status": "VERIFIED", **base}

@@ -49,11 +49,11 @@ flowchart TD
   Advice -->|已完成| Plan["主对话记录建议、定方案、拆工作包"]
   Plan --> Prepare["按依赖和资源准备独立的 attempt"]
   Prepare -->|成功| Dispatch["用对应 Agent 身份派发这一批"]
-  Prepare -->|资源冲突或依赖未就绪| Hold["等待资源释放或依赖结果"] --> Prepare
-  Dispatch --> Report["核对 Agent 真正结束，提交结果与证据"]
+  Prepare -->|资源冲突或依赖未就绪| Hold["推进独立工作；条件变化后再准备"]
+  Dispatch --> Report["核对 Agent 结束，提交结果与证据，汇报已完成阶段"]
   Report --> Next{"本包执行状态"}
   Next -->|有已就绪的后续子任务| Prepare
-  Next -->|失败或受阻| Fix["修正问题或等待条件，再准备 attempt"] --> Prepare
+  Next -->|失败或受阻| Fix["只处理受影响分支；无新进展时报告阻塞"]
   Next -->|执行完成且无活动 attempt| Review["进入工作包复核与验收"]
 ```
 
@@ -69,7 +69,6 @@ flowchart TD
 
 | 模式 | 用户选择 | 包级复核 | 收尾审查 |
 | --- | --- | --- | --- |
-| 长任务 | 包级复核 + 收尾审查 | 每个工作包 | 一次 |
 | 长任务 | 仅收尾审查 | — | 一次 |
 | 长任务 | 不做独立复核 | — | — |
 | 快速或标准 | 使用固定审阅员 | — | 一次 |
@@ -77,28 +76,27 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  Done["当前工作包执行完成，已无活动 attempt"] --> Required{"本包要求正式复核？"}
-  Required -->|需要| Snapshot["单独准备 review attempt，冻结 review_subject"]
-  Snapshot --> Reviewer["固定审阅员只读复核，登记回执"]
-  Reviewer --> Verdict{"当前审查对象得到 ACCEPT？"}
-  Verdict -->|是| Ready["检查证据后进入 REVIEW_READY"]
-  Verdict -->|拒绝或审查对象变化| Rework["修正并验证，结束相关 attempt"] --> Required
-  Verdict -->|审阅员未完成| Block["等待或报告本包阻塞"]
-  Required -->|无需| Ready
-  Ready --> Accept{"主对话验收工作包"}
+  Done["当前工作包执行完成，已无活动 attempt"] --> Requested{"用户点名复核且本包未复核过？"}
+  Requested -->|是| Snapshot["用户确认轮次后，准备该轮 review attempt，冻结 review_subject"]
+  Snapshot --> Reviewer["固定审阅员只读复核，登记结果，不自动重试"]
+  Reviewer --> Ready["检查实施与验证证据"]
+  Requested -->|否| Ready
+  Ready --> Accept{"主对话按原标准验收工作包"}
   Accept -->|通过| Package["登记 COMPLETED"]
-  Accept -->|退回| Rework
+  Accept -->|未通过| Block["报告实际未达标的验收项"]
   Package --> More{"还需要执行工作包？"}
   More -->|需要| Continue["处理下一包，重复该流程"]
   More -->|全部完成| Closing{"所选策略要求收尾审查？"}
   Closing -->|需要| Final["固定审阅员独立收尾审查"]
   Final -->|通过| Deliver["主对话最终验收和交付"]
-  Final -->|退回| FinalFix["修正与验证后重新审查"] --> Final
+  Final -->|退回| FinalFix["仅处理明确阻塞项，默认最多自动复审一次"]
+  FinalFix -->|有明确修正且未用复审机会| Final
+  FinalFix -->|仍受阻或需扩大范围| FinalBlock
   Final -->|未完成| FinalBlock["保留未完成状态，报告阻塞"]
   Closing -->|无需| Deliver
 ```
 
-如果包级 `REJECT`，保存原始回执并记 `FAIL`。文件、工作定义或非复核结果变更会使先前结果变成 `REVIEW_STALE`，需要重新准备复核。显式结束重复或被取代的包时用 `ABANDONED` 并记录原因。快速或标准任务从开场图直接进入收尾判断；只调查直接汇报只读发现。详见 [固定审阅员回执](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
+包级复核仅在用户点名时启动，首轮前询问计划轮次和是否作为收尾审查，每新增一轮都要用户再次确认；不自动复审，也不默认阻塞正常验收。`REJECT` 保存原始回执并记 `FAIL`；如果意见揭示了真实验收缺陷，按原验收标准处理。历史 `packages` 只保留收尾选择，不继承任何包级授权。详见 [固定审阅员回执](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
 
 ### 4. 破坏性操作预审
 
@@ -117,7 +115,7 @@ flowchart TD
   Check -->|否| Held
 ```
 
-这项预审与包级、收尾策略独立。只调查保持只读。`STALE` 和 `UNAVAILABLE_OVERRIDE` 都不能放行；后者仅用于记录已说明的审阅不可用。MCP 保存决定并提供执行前核对，由主对话遵守结果。内部字段及选项值见 [MCP 用法](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
+仅高风险刷写及其他破坏性操作进入上图；符合 [日常开发板烧录条件](single-conversation-subagent/references/protocol.md#烧录按实际写入范围分类) 时不走预审，但仍须用户明确授权。这项预审与包级、收尾策略独立。只调查保持只读。`STALE` 和 `UNAVAILABLE_OVERRIDE` 都不能放行；后者仅用于记录已说明的审阅不可用。MCP 保存决定并提供执行前核对，由主对话遵守结果。内部字段及选项值见 [MCP 用法](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
 
 ## 安装
 
@@ -275,19 +273,19 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 “已完成子任务”表示已报告通过且本次核对证据未变；工作包仍需主对话最终验收。旧版只保留当前工作包的数据库升级时，仅回填实际当前修订；不虚构早期历史。迁移升级到 schema 3，原会话、工作包、证据保持不变；旧版程序不能读取更高 schema，升级前应备份状态，回滚时恢复对应备份。**3.0 不改变 schema 3**：`codex_gate` 存 `questions` 行，破坏性闸门记录存 `events`，旧库无需迁移即可使用。
 
-工作包有终态：`COMPLETED`（主对话验收通过）和 `ABANDONED`（重复、被取代或放弃）。关闭必须带 `close_reason`，服务写入 `closed_at`、`closed_by_session` 和事件记录；关闭后不可修改，后续工作新建工作包。桌面管理器默认隐藏终态，可勾选“显示已关闭”；长期未更新的非终态显示“滞留 N 天”。
+工作包有终态：`COMPLETED`（主对话验收通过）和 `ABANDONED`（重复、被取代或放弃）。关闭必须带 `close_reason`，服务写入 `closed_at`、`closed_by_session` 和事件记录；关闭后不可修改，后续工作新建工作包。用户叫停、等待决策或复核预算耗尽时用可恢复的 `SUSPENDED`，记录暂停原因、继续条件和已知限制；暂停不等于验收通过。桌面管理器默认隐藏终态，可用“显示已关闭”查看；暂停态在包详情中按 `state` 与 `suspension` 字段展示。长期未更新的非终态显示“滞留 N 天”。
 
 ## 长任务复核、执行角色与破坏性闸门（3.0.0）
 
 ### MCP 的长任务复核策略
 
-长任务在验证范围确认后问一次审查时机，提交到 `codex_gate`。推荐逐包复核加收尾，等待用户明确选择。
+长任务在验证范围确认后问一次审查时机，提交到 `codex_gate`。通常推荐集中收尾审查（`closure`）；只有非原生宿主需要独立高风险/发布边界的逐包把关时才选 `packages`。
 
 | 值 | 含义 | MCP 行为 |
 | --- | --- | --- |
 | `none` | 不做独立复核 | 不设置 `review_required`，跳过收尾审查 |
 | `closure` | 仅收尾审查 | 不设置 `review_required`，由固定审阅员在收尾审查 |
-| `packages` | 每个工作包复核 + 收尾审查（推荐） | 新包 `review_required=true`；`REVIEW_READY`/`COMPLETED` 需要当前 subject 的 PASS ACCEPT review |
+| 历史 `packages` | 只保留收尾审查 | 不继承包级复核或验收门槛 |
 
 标准执行和快速保持原 `codex_review` yes/no（仅注册已确认时）；长任务不再问 `codex_review`，MCP 返回 `SKIPPED/USE_CODEX_GATE`。只调查跳过。旧长会话没有 gate 时，首次创建/更新工作包或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次，不回退旧答案。
 
@@ -295,15 +293,19 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 - **侦察者（analyze）**：只读检索、依赖/调用链/日志分析，产出结论和 `file:line`。
 - **实施者（implement）**：只改 `allowed_files`，记录改动和最小自检。
-- **验证者（test）**：只跑指定验证命令，记录命令/退出码/通过数/证据。
+- **验证者（test）**：只跑指定验证命令，记录命令/退出码/通过数/证据；UI 交付执行用户旅程冒烟。
 - **方案顾问** 在长任务开工前做一次只读方案指导。
 - **固定审阅员** 独立检查当前工作包、交付证据或预审操作，由主对话单独派发。通用宿主使用外部 `codex-review`。
 
-职责、边界、返回 schema、persona 模板见 [roles.md](single-conversation-subagent/references/roles.md)。扇出预算：调查阶段起步 min(4, 只读子任务数) 个侦察者；实现阶段按 `allowed_files` 两两不相交取最大并行集合；默认并发上限 4，无宿主并发证据时取 1。
+ZCode 实际工具集以 `zcode-agents/permissions.json` 为准：方案顾问/查询侦察员/固定审阅员/继承审阅员只读 `[Read, Grep, Glob]`，实施工程师 `[Read, Grep, Glob, Edit, Write]`，测试验证员 `[Read, Grep, Glob, Bash]`。运行 `python scripts/check_agent_permissions.py` 校验已注册身份；超出矩阵时停止派发。
+
+UI/用户可见交付收尾时必须完成用户旅程验收：在用户实际使用的 URL/实例执行入口→主操作→可见结果，记录实例、动作、结果和截图；长驻 dev server 先观察原实例再刷新对照，不能用冷启动测试代替现场验收。
+
+职责、边界、返回 schema、persona 模板见 [roles.md](single-conversation-subagent/references/roles.md)。只有存在会影响实施的未知点时才派侦察。已就绪且写范围、资源互不冲突的任务可并行，默认上限为 4，无宿主并发证据时取 1。范围内低风险小改和证据更正可直接处理或并入当前实施。
 
 ### 包级复核（review 子任务）
 
-`packages` 包应声明一个 `review` 子任务。其他子任务完成且无活动 attempt 后，单独 prepare review attempt 取得 `review_subject`；主对话派固定审阅员做只读复核，保存 [原生 v2 manifest](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执) 和原始最终消息。ACCEPT 记 PASS、REJECT 记 FAIL，两者都可落账，只有 ACCEPT 放行 `REVIEW_READY`。未声明 review 子任务时 `REVIEW_READY` 返回 `REVIEW_REQUIRED`；复核窗口内禁止其他 attempt；文件、定义或非 review 结果变化即 `REVIEW_STALE`，用新 review attempt 重审。`review` 不能用 `work_package_update(results=...)` 直接写。
+用户明确点名工作包后，主对话先根据项目风险、范围和交付阶段询问“本次计划几轮、是否作为收尾审查”，记录后调用 `work_attempt_prepare(subtask_id="review", user_requested=true)` 冻结当前摘要，再派固定审阅员一次，保存 [原生 v2 回执](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。每次新增轮次都要用户再次确认，不自动重试；启动失败或中断消耗当轮。包级意见保留为历史记录，是否作为关包条件由用户本轮决定（默认不作为门槛），工作包按实际交付和验证验收。
 
 通用宿主的 Codex manifest 字段为`verdict`、`session_id`、`model`、`subject_sha256`、`final_message_sha256`、`command`、`exit_code`（int 0）、`raw_path`；原始最终消息必须恰好一行 `结论: ACCEPT` 或 `结论: REJECT` 且与 verdict 一致。`review_subject` 覆盖修订定义、非 review 结果和 `allowed_files` 有界文件快照，排除 `.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 与 `<docs_root>/agent/evidence`，上限 500 文件/100 MB。
 
@@ -320,14 +322,14 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 ### 破坏性操作闸门（全模式）
 
-删除/覆盖用户数据或系统关键配置、擦除/烧录、drop 数据库/表、不可逆 git、递归 `chmod`/`chown`、卸载关键包、`allowed_files` 外大范围改写等，先准备命令/`cwd`/目标/影响/备份/回滚/`baseline` → 固定审阅员只读预审 → `operation_gate_record` → 执行前 `operation_gate_check` 为 `APPROVED`，并保留用户独立确认。ACCEPT 需报告唯一结论 + `user_confirmed=true`；REJECT 对同 `operation_id`/digest 是终态；审阅员不可用只能记 `UNAVAILABLE_OVERRIDE`，不得伪记 ACCEPT。MCP 不执行、不拦截宿主命令；没有宿主 Hook 时是协议级约束（`PROTOCOL_ONLY`）。
+日常开发板烧录，仅在目标和写入范围可核实、只更新可回刷的应用分区且保留持久数据时免预审和登记；仍须取得用户对该次烧录的明确授权。整片擦除、写引导程序／分区表／OTA 状态／安全配置、可能丢失持久数据、生产设备或范围不明等高风险刷写，和删除/覆盖用户数据或系统关键配置、drop 数据库/表、不可逆 git、递归 `chmod`/`chown`、卸载关键包、`allowed_files` 外大范围改写一样走完整闸门：准备命令/`cwd`/目标/影响/备份/回滚/`baseline` → 固定审阅员只读预审 → `operation_gate_record` → 执行前 `operation_gate_check` 为 `APPROVED`，并保留用户独立确认。ACCEPT 需报告唯一结论 + `user_confirmed=true`；REJECT 对同 `operation_id`/digest 是终态；审阅员不可用只能记 `UNAVAILABLE_OVERRIDE`，不得伪记 ACCEPT。MCP 不执行、不拦截宿主命令；没有宿主 Hook 时是协议级约束（`PROTOCOL_ONLY`）。
 
 ### 兼容性
 
 - **无 schema 变更**：`codex_gate` 存 `questions` 行，破坏性闸门记录存 `events`，`user_version=3`、`sessions` 表与九值 INSERT 不变；旧库/旧会话直接可用，无需迁移。
 - 旧长会话首次进入会补问一次 gate；旧包没有 `review_required` 按 false；旧 `test`/`analyze` 证据语义不变。
 - 桌面管理器版本检查仍为 1/2/3（worker 2/3），只改会话选择器：long 使用 gate 已确认或旧 `codex_review` 回退显示，其他模式不变。
-- **已知限制**：`closure`/`none` 的收尾审查是 Skill 规则，MCP 只强制 `packages` 的包级复核；无宿主 Hook 时闸门不能拦截真实命令；本版无共享读租约。
+- **已知限制**：收尾审查是 Skill 规则，MCP 限制每包最多一次手动复核；无宿主 Hook 时闸门不能拦截真实命令；本版无共享读租约。
 
 ## 通用宿主的 Codex 方案指导（2.9.0）
 
@@ -353,7 +355,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 - 生命周期 `PREPARED → LAUNCHING → RUNNING → DRAINING → ENDED`，另有 `UNKNOWN`；`UNKNOWN` 不释放资源、不自动重派。
 - 结果用 `work_attempt_update(state="ENDED", result=...)` 登记；主对话串行提交，`operation_id` 保证重试幂等。
 - 文件目录覆盖后代；R/W、W/W 冲突；3.0 起非 implement 默认不取文件读租约，详见 3.0.0 节；资源集合原子获取；TTL 到期不等于进程停止。
-- `REVIEW_READY` / `COMPLETED` / `ABANDONED` / 新修订 / handoff 前必须有静止屏障；有活动 attempt 时拒绝关闭或直接写结果。
+- `REVIEW_READY` / `COMPLETED` / `ABANDONED` / `SUSPENDED` / 新修订 / handoff 前必须有静止屏障；有活动 attempt 时拒绝关闭或直接写结果。
 - 默认并发上限 4，无宿主并发证据时取 1；首版不支持跨项目联合调度和设备共享域。
 
 SQLite 升级到 schema 3：新增 `work_attempts`、`work_operations`，`leases` 增加 `mode/attempt_id/package_id`；旧库自动迁移，旧工作包不虚构历史 attempt。3.0 继续使用 schema 3，不新增迁移。
@@ -368,7 +370,7 @@ SQLite 升级到 schema 3：新增 `work_attempts`、`work_operations`，`leases
 | interaction_request / interaction_submit / interaction_reopen | Skill 原生提问的记录/提交/显式重试；不是默认 UI；支持文本回退与幂等提交；`analysis` 显示在 display_text/原生记账 |
 | interaction_ask | 仅 `mcp` 兜底 channel 的 legacy form 服务端 `timeout_seconds`（默认 15s）；`analysis`/中文 title/选项注释/推荐标记/15s/question_id 显示在 form；超时返回 `TIMED_OUT` + 推荐项；modern/无 form 保持 `WAITING_USER`，同一 `question_id` 直接 submit；ZCode 不默认使用 |
 | diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
-| work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告；`packages` 包写入 `review_required`；review 结果须经 attempt；`COMPLETED`/`ABANDONED` 终态需 `close_reason` |
+| work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告；手动 review 结果须经 attempt；`SUSPENDED` 可恢复并记录原因/继续条件/已知限制；`COMPLETED`/`ABANDONED` 终态需 `close_reason` |
 | work_package_close | 本地管理器/操作员关闭滞留或重复工作包；从包内读取 owner session，仍校验版本、终态和原因，保留审计；`force=true` 用于确认过的游离/卡住包，绕过状态/证据/活动 attempt 检查并写 `PACKAGE_FORCE_CLOSED` |
 | work_attempt_prepare / update / list | 并发执行 attempt：原子占资源、生命周期与结果登记、查询；不创建 Agent；review 返回 `review_subject` |
 | work_attempt_prepare_many / update_many | 单包原子批量：prepare 全有或全无且不增版本；update 全有或全无且只增一次版本，review 单独运行 |

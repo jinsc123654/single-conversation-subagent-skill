@@ -10,6 +10,8 @@
 | 正式审查 | `固定审阅员` | 包级、收尾和操作预审，独立只读 |
 | 方案指导 | `方案顾问` | 长任务确认选择后、拆包前调用一次，只提供方案建议 |
 
+ZCode 实际生效的工具集以 `zcode-agents/permissions.json` 为准，安装/派发前用 `scripts/check_agent_permissions.py` 校验；超出矩阵的角色停止派发。目标矩阵：方案顾问/查询侦察员/固定审阅员/继承审阅员只读 `[Read, Grep, Glob]`，实施工程师 `[Read, Grep, Glob, Edit, Write]`，测试验证员 `[Read, Grep, Glob, Bash]`（仅受控验证命令）。
+
 派发 ID 就是表中的中文角色名。使用已注册的模型设置，主对话不传模型覆盖。长任务选择包含方案指导，按实际完成回执确认。需正式审查时只用 `固定审阅员`。这六个原始角色模板由 `zcode-agents/` 保存，`继承审阅员` 可作为宿主手动身份使用。其他宿主继续使用下面的通用角色契约。
 
 
@@ -36,6 +38,8 @@
   "changed_files": ["仅 implement，项目相对路径"],
   "commands": [{"command": "...", "exit_code": 0, "evidence": "<绝对证据路径>"}],
   "evidence": ["<docs-root>/agent/evidence/WP-.../R<n>/<subtask>/<attempt>/..."],
+  "evidence_kind": "test|build|lint|smoke",
+  "journey": {"url": "...", "instance": "...", "actions": ["..."], "observed": "...", "screenshot": "..."},
   "first_error": "首个异常或 null",
   "remaining": ["剩余问题/风险"],
   "resources": {"processes_stopped": true, "devices_released": [], "notes": ""}
@@ -108,11 +112,11 @@
 
 - 只运行指定命令；不改源码、配置、测试断言或验收标准；不重建镜像、不换固件。
 - 不自行扩大验证范围；未选中的测试不执行并标 `NOT_RUN`。不做测试/只记录方法时不得输出 `PASS`。
-- 需要设备/串口/烧录器时只在声明的资源和授权内使用；烧录/擦除另走破坏性操作闸门。
+- 需要设备/串口/烧录器时只在声明的资源和授权内使用。由主对话按 [烧录分类](protocol.md#烧录按实际写入范围分类) 判断并取得用户对该次操作的明确授权；高风险刷写另走完整闸门。验证者不自行决定授权或复核。
 - 不启动 Codex、不创建子 Agent、不做最终验收；`VERIFIED`/测试通过不等于主对话接受。
 - 3.0 不为 test 取默认租约；同设备/同串口仍由主对话串行编排。
 
-**返回重点**：完整命令、退出码、通过数、失败用例、日志证据路径、首异常、环境差异、资源释放。
+**返回重点**：完整命令、退出码、通过数、失败用例、日志证据路径、首异常、环境差异、资源释放。UI/用户可见交付另报 `journey`（实际 URL/实例、动作、可见结果、必要截图）；证据 JSON 用 `kind` 区分 `test`（需正整数 passed）、`build`/`lint`（只需 command/exit_code）、`smoke`（另记运行实例和观测）。
 
 **persona 模板**：
 
@@ -132,14 +136,14 @@
 **定位**：外部只读技术复核者，由主对话启动，用于三种场景：
 
 1. 高危/长任务开工前的一次只读方案指导；
-2. `codex_gate=packages` 的包级复核（对应 `review` 子任务）；
-3. `codex_gate=packages|closure` 或 `codex_review=yes` 的收尾审查。
+2. 用户明确点名的包级复核（ZCode 每轮需用户确认；非原生宿主按 `packages` 协议）；
+3. `codex_gate=closure` 或 `codex_review=yes` 的收尾审查（非原生宿主也可选 `packages`）。
 
 **边界**：
 
 - 只读；不改源码、不构建/烧录、不碰串口/板卡、不创建宿主 Agent。
 - 只能由主对话启动；子 Agent 不得启动 Codex，也不得把 Codex 当作下一级 Agent。
-- 复核结论只认 Codex 最终消息中的唯一结论行 `结论: ACCEPT` 或 `结论: REJECT`；包级复核还必须落严格 JSON manifest（字段见 [mcp.md](mcp.md)）。
+- 复核结论只认 Codex 最终消息中的唯一结论行 `结论: ACCEPT` 或 `结论: REJECT`；包级复核还必须落严格 JSON manifest（字段见 [mcp.md](mcp.md)）。findings 逐条给出 `id`、`category`、`severity`、`reachability`、关联验收项、`evidence_refs`、影响和 `blocking_reason`；只有可达且违反已声明输入契约/验收条件的问题才作为阻塞项，构造性或不可达输入列为 hardening backlog。
 - Codex 不可用、超时、输出残缺或报告缺失时不得伪记 `ACCEPT`；破坏性闸门只能记 `UNAVAILABLE_OVERRIDE`，包级复核不能据此 `PASS`。
 - Codex 的 ACCEPT 不是最终验收；主对话仍核对原始证据并对工作包负责。
 

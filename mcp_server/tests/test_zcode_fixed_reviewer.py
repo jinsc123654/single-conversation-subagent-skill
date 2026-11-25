@@ -31,7 +31,7 @@ def test_parallel_attempts_and_fixed_reviewer_proof(zcode, tmp_path):
     state = zcode.state
     _, _, session = zcode.roots.open(str(tmp_path), "zcode", "parallel", "registered", False)
     sid = session["id"]
-    for kind, answer in (("mode", "long"), ("verification", "targeted"), ("codex_gate", "packages")):
+    for kind, answer in (("mode", "long"), ("verification", "targeted"), ("codex_gate", "closure")):
         question = state.request(sid, kind, [answer], "native")
         assert state.submit(sid, question["id"], "accept", [answer], "native")["status"] == "CONFIRMED"
     assert state.get(sid)["intake"]["ready"]
@@ -54,7 +54,10 @@ def test_parallel_attempts_and_fixed_reviewer_proof(zcode, tmp_path):
         write_evidence(tmp_path, item["evidence_dir"] + "/work.md", "Implementation report\n")]}}
         for item in batch["attempts"]]
     version = work.update_attempts(sid, updates, "batch-complete")["version"]
-    review = work.prepare_attempt(sid, pid, version, "review")
+    with pytest.raises(ScsError) as automatic:
+        work.prepare_attempt(sid, pid, version, "review")
+    assert automatic.value.code == "REVIEW_MANUAL_REQUIRED"
+    review = work.prepare_attempt(sid, pid, version, "review", user_requested=True)
     assert review["agent_type"] == review["input_snapshot"]["agent_type"] == "固定审阅员"
     aid = review["attempt"]["id"]
     final = write_evidence(tmp_path, review["evidence_dir"] + "/final-message.md", "Reviewed\n结论: ACCEPT\n")
@@ -100,7 +103,7 @@ async def test_zcode_long_review_text_fallback_uses_display_labels(zcode):
                               recommendation=["packages"], channel="text")
         assert "长任务什么时候请固定审阅员审查？" in question["display_text"]
         assert [(option["label"], option["value"]) for option in question["options"]] == [
-            ("包级复核 + 收尾审查", "packages"), ("不做独立复核", "none"), ("仅收尾审查", "closure"),
+            ("仅收尾审查", "closure"), ("不做独立复核", "none"),
         ]
         for option in question["options"]:
             assert option["label"] in question["display_text"]
@@ -108,6 +111,54 @@ async def test_zcode_long_review_text_fallback_uses_display_labels(zcode):
         assert (await call("interaction_submit", session_id=sid, question_id=question["question_id"],
                            action="accept", choices=["仅收尾审查"], source="text"))["status"] == "CONFIRMED"
         assert (await call("session_get", session_id=sid))["codex_gate"] == "closure"
+
+
+async def test_manual_review_is_advisory_and_repeatable_by_user(zcode, tmp_path):
+    async with Client(zcode, mode="legacy") as client:
+        async def call(tool, **args):
+            return (await client.call_tool(tool, args)).structured_content
+
+        opened = await call("session_open", conversation_id="one-time", explicit_skip=True)
+        sid = opened["id"]
+        (tmp_path / "sample.txt").write_text("Sample evidence\n")
+        definition = {"session_id": sid, "goal": "Check evidence", "allowed_files": ["sample.txt"],
+                      "acceptance": ["Record findings"], "request_key": "one-time",
+                      "subtasks": [{"id": "check", "kind": "analyze", "allowed_files": ["sample.txt"],
+                                    "acceptance": ["Inspected"]}]}
+        pkg = await call("work_package_create", **definition)
+        pid = pkg["id"]
+        state = zcode.state
+        # Emulate an active package frozen under the old packages policy.
+        with state.store.transaction(True) as con:
+            data = json.loads(con.execute("SELECT data FROM work_packages WHERE id=?", (pid,)).fetchone()[0])
+            data.update(review_required=True, native_review_required=True)
+            con.execute("UPDATE work_packages SET data=? WHERE id=?", (json.dumps(data), pid))
+        args = {"session_id": sid, "package_id": pid}
+        assert not (await call("work_package_get", **args))["review_required"]
+        rev = {**args, "expected_version": pkg["version"], "subtask_id": "review"}
+        review = await call("work_attempt_prepare", **rev, user_requested=True)
+        assert review["input_snapshot"]["user_requested"] and not review["review_required"]
+        assert (await call("work_package_create", **definition))["id"] == pid
+        final = write_evidence(tmp_path, review["evidence_dir"] + "/final.md", "结论: REJECT\n")
+        final["path"] = "final.md"
+        manifest = receipt("review_subject", review["review_subject"], final, verdict="REJECT")
+        evidence = write_evidence(tmp_path, review["evidence_dir"] + "/manifest.json", json.dumps(manifest))
+        ended = await call("work_attempt_update", session_id=sid, attempt_id=review["attempt"]["id"],
+                           expected_version=review["version"], state="ENDED", host_agent_id="reviewer-1",
+                           result={"status": "FAIL", "evidence": [evidence]})
+        assert ended["task_status"] == "FAIL"
+        assert not (await call("run_map", **args))["blockers"]
+        progress = await call("work_package_update", **args, expected_version=ended["version"], state="IN_PROGRESS")
+        ready = await call("work_package_update", **args, expected_version=progress["version"], state="REVIEW_READY")
+        assert ready["state"] == "REVIEW_READY"
+        revised = await call("work_package_update", **args, expected_version=ready["version"], new_revision=True)
+        assert revised["revision"] == 2
+        handoff = await call("handoff_export", **args, expected_version=revised["version"])
+        other = await call("session_open", conversation_id="handoff", explicit_skip=True)
+        await call("handoff_resume", session_id=other["id"], handoff_id=handoff["handoff_id"], sha256=handoff["sha256"])
+        repeat = await call("work_attempt_prepare", session_id=other["id"], package_id=pid,
+                            expected_version=revised["version"], subtask_id="review", user_requested=True)
+        assert repeat["attempt"]["id"].startswith("A-")
 
 
 async def test_main_questions_and_operation_gate_use_fixed_reviewer(zcode, tmp_path):

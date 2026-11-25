@@ -55,7 +55,6 @@ NATIVE_OPTIONS = {
     "codex_gate": [
         {"value": "none", "label": "不做独立复核", "desc": "不做包级复核或收尾审查"},
         {"value": "closure", "label": "仅收尾审查", "desc": "由固定审阅员在收尾做一次只读审查"},
-        {"value": "packages", "label": "包级复核 + 收尾审查", "desc": "固定审阅员逐包审查并在收尾再审查"},
     ],
     "codex_review": [
         {"value": "no", "label": "不使用", "desc": "收尾不追加独立审查"},
@@ -138,7 +137,10 @@ class State:
         if session["mode"] == "long":
             gate = self._confirmed(con, session_id, "codex_gate")
             if gate:
-                return {"ready": True, "policy": gate[0], "source": "codex_gate", "reason": None}
+                # A historical 'packages' answer included closure, but no
+                # longer grants or requires any package review in ZCode.
+                policy = "closure" if self.store.native_review and gate[0] == "packages" else gate[0]
+                return {"ready": True, "policy": policy, "source": "codex_gate", "reason": None}
             return {"ready": False, "policy": None, "source": "codex_gate",
                     "reason": "CODEX_GATE_REQUIRED"}
         if session["review_registration"] == "registered" and session["codex_review"] is None:
@@ -214,7 +216,7 @@ class State:
         # legacy long session without one stays null and is asked once.
         gate = next((q["answer"][0] for q in questions
                      if q["kind"] == "codex_gate" and q["state"] == "CONFIRMED" and q["answer"]), None)
-        session["codex_gate"] = gate
+        session["codex_gate"] = intake["policy"] if self.store.native_review and gate == "packages" else gate
         return {"status": "OK", **session, "questions": questions, "native_review": self.store.native_review,
                 "unresolved": [q["id"] for q in questions if q["state"] != "CONFIRMED"],
                 "question_states": {k: next((q["state"] for q in questions if q["kind"] == k), "NOT_ASKED") for k in KINDS},
@@ -252,6 +254,8 @@ class State:
         if kind not in KINDS or channel not in {"auto", "native", "text"}:
             raise ScsError("INPUT_INVALID", "Unknown question kind or interaction channel.")
         recommendation = check_selection(kind, recommendation)
+        if self.store.native_review and kind == "codex_gate" and recommendation == ["packages"]:
+            recommendation = ["closure"]
         with self.store.transaction(True) as con:
             s = self._session(con, session_id)
             if s["mode"] == "long":
@@ -350,7 +354,11 @@ class State:
                 raise ScsError("QUESTION_NOT_FOUND", "Question is not part of this conversation.")
             if not q["current"] or q["kind"] not in KINDS:
                 raise ScsError("LATE_REPLY", "A reply for a replaced question is isolated.")
-            answer = encode(check_selection(q["kind"], choices or [])) if action == "accept" else None
+            selected = check_selection(q["kind"], choices or []) if action == "accept" else None
+            if (self.store.native_review and q["kind"] == "codex_gate"
+                    and selected == ["packages"] and q["answer"] != '["packages"]'):
+                raise ScsError("CHOICE_INVALID", "Choose closure or none. Package review is manual and one-time.")
+            answer = encode(selected) if selected is not None else None
             if q["state"] in TERMINAL:
                 if q["state"] == target and q["answer"] == answer:
                     return {"status": target, "question_id": question_id, "idempotent": True}

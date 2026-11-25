@@ -6,7 +6,7 @@
 
 | 模式 | 界面问题 | 提交字段和值 |
 | --- | --- | --- |
-| 长任务 | 什么时候请固定审阅员审查？ | `codex_gate`，逐包并收尾 `packages` / 仅收尾 `closure` / 不做独立复核 `none` |
+| 长任务 | 要请固定审阅员做收尾审查吗？ | `codex_gate`，仅收尾 `closure` / 不做独立复核 `none` |
 | 标准或快速 | 收尾要请固定审阅员吗？ | `codex_review`，使用 `yes` / 不使用 `no` |
 
 长任务在确认后派 **方案顾问** 做一次开工前的只读方案指导，取得实际回执后拆包派发。
@@ -28,7 +28,7 @@
 ```
 
 - 操作预审先用精确命令和范围调用 `operation_gate_check` 获取 `operation_digest`。同一回执结构用 `operation_digest` 替换 `review_subject`，`final_message.path` 用项目相对路径。将它作为 `operation_gate_record.review_receipt` 提交。只有 `APPROVED` 且有独立用户确认才执行。主对话核对真实角色、实际完成和原件，MCP 校验结构、身份绑定和哈希。
-- 收尾审查由主对话按已选策略单独派发，原样留存宿主回执和最终消息。已经存档的 Codex 回执可查看；当前 native `packages` 放行和预审授权要求固定审阅员回执。下面的 Codex JSON 和命令说明供通用宿主使用。
+- 收尾审查由主对话按已选策略单独派发，原样留存宿主回执和最终消息。包级复核只接受当前用户点名请求，调用 `work_attempt_prepare(subtask_id="review", user_requested=true)`；仅成功 prepare 扣除一次机会，使用返回的 `version`。同包的历史尝试、切修订和跨会话均不重新发放次数。旧 `packages` 仅保留收尾含义。以下自动包级复核与验收门槛供非原生宿主使用。
 
 
 纯 Skill 无 Python/MCP 依赖。混合模式只在工具可见时使用；可见不代表模型一定调用，也不证明 UI 显示。服务无原生 Agent 调度工具。
@@ -64,11 +64,11 @@
 | 值 | 含义 | MCP 行为 |
 | --- | --- | --- |
 | `none` | 不做 Codex 复核或收尾审查 | 不设置 `review_required` |
-| `closure` | 仅收尾一次 Codex 只读审查 | 不设置 `review_required`；收尾由 Skill 执行 |
-| `packages` | 每个工作包复核 + 收尾审查（推荐） | 新包 `review_required=true`；`REVIEW_READY`/`COMPLETED` 需当前 subject 的 PASS ACCEPT review |
+| `closure` | 仅收尾一次 Codex 只读审查（通常推荐） | 不设置 `review_required`；收尾由 Skill 执行 |
+| `packages` | 每个工作包复核 + 收尾审查（仅非原生宿主；独立高风险或发布边界时可选） | 新包 `review_required=true`；`REVIEW_READY`/`COMPLETED` 需当前 subject 的 PASS ACCEPT review |
 
-- 推荐 `["packages"]` 只是建议，必须用户明确提交；不会自动写入。
-- `packages` 依赖 Codex 可用；codex-review 未注册时 Skill 应说明并推荐 `none`/`closure`，但 MCP 仍接受三种值。
+- ZCode 只推荐和接受 `["closure"]` 或 `["none"]` 作为新选择。下述 `packages` 选项和验收门槛仅适用于非原生宿主；普通单点 UI 修复用一次 `closure` 收尾即可。
+- `packages` 依赖 Codex 可用；codex-review 未注册时只能推荐 `none`（`closure` 同样需要审阅员），MCP 仍接受三种值。
 - long 的 `codex_review` 返回 `SKIPPED/USE_CODEX_GATE`；其他模式的 `codex_review` 保持 yes/no 原语义。
 - 旧长会话没有 gate（验证范围已确认）：`session_get.codex_gate=null`，`intake.ready=false`、`reason=CODEX_GATE_REQUIRED`；创建/更新或手动 `project_view_refresh` 返回 `INTAKE_REQUIRED`，补问一次即可。不迁移旧 `codex_review`，也不自动写 `packages`。
 
@@ -120,11 +120,11 @@ ZCode 长任务必须先取得一次 `方案顾问` 的真实回执，再拆包�
 
 传给 work_package_create，返回唯一 WP ID、revision=1、version=1、docs_root、`review_required` 和待同步记录路径。request_key 在同对话内幂等；不同定义同键冲突。subtask kind 为 analyze/implement/test/review；review 记录主对话启动的 Codex 只读复核，不是宿主子 Agent。文件范围为明确相对文件/目录，不是 glob；子任务不可扩大父范围。服务不授予文件或执行权限。
 
-`work_package_update` 需 expected_version，成功加一，旧版本 VERSION_CONFLICT；不要盲重试。状态 PENDING → IN_PROGRESS → REVIEW_READY，BLOCKED 可恢复为 IN_PROGRESS；验收通过用 COMPLETED、重复/被取代用 ABANDONED 关闭，终态必须带 close_reason 且不可修改。`packages` 包在 REVIEW_READY/COMPLETED 需要 review，`REVIEW_REQUIRED`/`REVIEW_STALE` 分别表示缺少和过期；`work_package_update(results=...)` 直接写 review 子任务返回 `REVIEW_ATTEMPT_REQUIRED`。桌面管理器关闭滞留/重复包时调用 `work_package_close(project_root, package_id, expected_version, state, close_reason)`；它是本地操作员路径，仍从包内读取 owner session 并写审计，主对话仍应优先用 `work_package_update`。`force=true` 是操作员例外，`force_closed` 不表示 review-accepted。
+`work_package_update` 需 expected_version，成功加一，旧版本 VERSION_CONFLICT；不要盲重试。状态 PENDING → IN_PROGRESS → REVIEW_READY，BLOCKED 可恢复为 IN_PROGRESS；用户叫停、等待决策或复核预算耗尽时用可恢复的 `SUSPENDED`，带 `reason`、`resume_condition` 和 `known_limitations`，暂停不等于验收通过。验收通过用 COMPLETED、重复/被取代用 ABANDONED 关闭，终态必须带 close_reason 且不可修改。`packages` 包在 REVIEW_READY/COMPLETED 需要 review，`REVIEW_REQUIRED`/`REVIEW_STALE` 分别表示缺少和过期；`work_package_update(results=...)` 直接写 review 子任务返回 `REVIEW_ATTEMPT_REQUIRED`。桌面管理器关闭滞留/重复包时调用 `work_package_close(project_root, package_id, expected_version, state, close_reason)`；它是本地操作员路径，仍从包内读取 owner session 并写审计，主对话仍应优先用 `work_package_update`。`force=true` 是操作员例外，`force_closed` 不表示 review-accepted。
 
 ### 并发 attempt
 
-- `work_attempt_prepare(session_id, package_id, expected_version, subtask_id, host_agent_id?=None, ttl_seconds=120)`：校验依赖已 `PASS`/`SUBSTITUTED` 且无活动 attempt，原子占用子任务声明的完整资源集合，建立 `.../R<rev>/<subtask>/<attempt>/` 证据目录；返回 `attempt`、`leases`、`evidence_dir`、`warnings`。成功后才调用宿主 Agent。工作包 version 不变。
+- `work_attempt_prepare(session_id, package_id, expected_version, subtask_id, host_agent_id?=None, ttl_seconds=120, user_requested=false)`：校验依赖已 `PASS`/`SUBSTITUTED` 且无活动 attempt，原子占用子任务声明的完整资源集合，建立 `.../R<rev>/<subtask>/<attempt>/` 证据目录；返回 `attempt`、`leases`、`evidence_dir`、`warnings`。成功后才调用宿主 Agent。工作包 version 不变。ZCode 原生 review 每一轮都必须 `user_requested=true`（用户点名并确认轮次），成功 prepare 只占用当轮，不设固定每包上限；每新增一轮都要用户再次确认，不自动重试。非原生 `packages` 每修订默认最多两次自动 review 派发（含中断和无效回执），到限返回 `REVIEW_BUDGET_EXHAUSTED`，需用户明确决策后新开修订。
 - `work_attempt_prepare_many(session_id, package_id, expected_version, subtask_ids, host_agent_ids?=None, ttl_seconds=120)`：单包单事务批量 prepare，全有或全无；成功后 version 不变；返回 `attempts[]`。重复 ID 返回 INPUT_INVALID，缺失子任务 SUBTASK_INVALID；同批依赖按波次；含 review 且多于一项返回 REVIEW_WINDOW_ACTIVE。`host_agent_ids` 可选，提供时与 `subtask_ids` 一一对应。
 - `work_attempt_update(session_id, attempt_id, expected_version, state?, result?, host_agent_id?, operation_id?)`：`PREPARED → LAUNCHING → RUNNING → DRAINING → ENDED`，另有 `UNKNOWN`；`ENDED` 写入子任务结果并让工作包 version+1，`PASS` 必须有 attempt 目录内可验证证据；`UNKNOWN` 不释放资源、不自动重派。`operation_id` 同载荷重试返回原回执。
 - `work_attempt_update_many(session_id, updates=[{attempt_id,result}], operation_id)`：只接受 ENDED 结果；同包当前修订；全有或全无；成功只 version+1；`operation_id` 必填且重放先于状态/版本检查；review 不能与其他项混批。跨包/跨修订返回 BATCH_PACKAGE_MISMATCH/BATCH_REVISION_MISMATCH。
@@ -133,7 +133,7 @@ ZCode 长任务必须先取得一次 `方案顾问` 的真实回执，再拆包�
 - 子任务定义支持 `depends_on`、`resources`（`file:`/`device:`/`serial:`/`programmer:` + `read`/`write`；3.0 文件只支持 `write`）和 `required`。目录资源覆盖后代。
 - **读租约限制（3.0）**：只有 implement 默认对每个 scope 取独占写租约；analyze/test/review 默认 `[]`。显式 `file:` + `read` 返回 `RESOURCE_READ_UNSUPPORTED`；设备类 read 未禁用。旧包已存的文件 read 资源在 prepare 时过滤并返回 `warnings[]`（`READ_LEASE_SKIPPED`），不阻断。本版没有共享文件读保护。
 - review attempt 必须单独运行：prepare 时包内不得有其他活动 attempt；review 活动期间不得 prepare 其他子任务；批量中 review 必须单独一批，否则 REVIEW_WINDOW_ACTIVE。
-- `REVIEW_READY`/`COMPLETED`/`ABANDONED`/`new_revision`/`handoff_export` 前必须有静止屏障；有活动 attempt 时 `work_package_update` 不接受直接子任务结果。结果 PASS/FAIL/BLOCKED/NOT_RUN/SUBSTITUTED；PASS 是子任务证据报告，不是最终接受。new_revision=true 单独调用，清空结果并分配新证据目录，不删除旧文件；`review_required` 沿用。
+- `REVIEW_READY`/`COMPLETED`/`ABANDONED`/`SUSPENDED`/`new_revision`/`handoff_export` 前必须有静止屏障；有活动 attempt 时 `work_package_update` 不接受直接子任务结果。结果 PASS/FAIL/BLOCKED/NOT_RUN/SUBSTITUTED；PASS 是子任务证据报告，不是最终接受。new_revision=true 单独调用，清空结果并分配新证据目录，不删除旧文件；`review_required` 沿用。
 
 ### review 子任务与证据
 
@@ -162,16 +162,17 @@ review manifest 是严格 JSON 对象，字段集恰好：
 - `raw_path` 相对 manifest 目录且解析后仍在本次 attempt 证据目录；不得绝对路径、反斜杠或 `..`。
 - 原始最终消息必须存在、sha256 匹配、UTF-8，且恰好一行 `结论: ACCEPT` 或 `结论: REJECT`（允许 `**...**` 和中文冒号），与 verdict 一致。
 - ACCEPT/REJECT 都是合法报告；REJECT 以 FAIL 落账，整改后用新 review attempt。Codex 不可用/超时/输出残缺时不能 PASS，保持 REVIEW_REQUIRED，不得伪造 ACCEPT。
+- 复核 findings 以伴生文件 `findings.json` 放在同一 attempt 证据目录（不改变 manifest 的严格字段集）：`[{"id","category","severity","reachability","acceptance","evidence_refs","impact","blocking_reason"}]`。只有“可达且违反已声明输入契约/验收条件”的条目可标为 blocking；构造性或不可达输入标 `hardening`。主对话核对原始回执与 findings，MCP 仍以 manifest verdict 为唯一放行判据。
 
 `review_subject` 覆盖修订定义（goal/allowed_files/acceptance/非 review 子任务，按 id 排序）、非 review 子任务的 status+evidence(path,sha256)、包 allowed_files 的有界快照：regular 文件 path→sha256；范围内每个符号链接记录相对路径→`readlink` 目标的原始字节的十六进制（有链接时才出现 `links` 字段），不跟随、不读取目标内容；目标按原始字节无损编码，不经过带替换的文本解码，任何字节级改向（含非 UTF-8 目标）都会改变 subject。payload 顶层含显式 `subject_version`（当前 `2`），参与摘要；升级后旧 ACCEPT 因缺少版本字段而一律 `REVIEW_STALE`。路径名称（文件名、链接名、目录名）按 JSON 转义无损编码：非 UTF-8 名称经 surrogateescape 得到的字符以 `\uXXXX` 写出，canonical JSON 为纯 ASCII，不再抛 `UnicodeEncodeError`；转义可逆且单射，不使用 `surrogatepass` 生成非法 UTF-8。scope 路径的每一级部件（祖先和末级）不得是符号链接，任一级为符号链接返回 `REVIEW_SUBJECT_INCOMPLETE`。新增、删除或改向链接都会改变 subject；排除树内的链接跳过、不记录；fifo/socket/设备等非 regular/dir/symlink 的特殊文件返回 `REVIEW_SUBJECT_INCOMPLETE`。排除 `.git`/`.venv`/`.venv-mcp`/`.scs`/`.archify` 和 `<docs_root>/agent/evidence`；上限 500 条目/100 MB（链接也计入条目上限），超限 `REVIEW_SUBJECT_TOO_LARGE`；读取失败/不可读 `REVIEW_SUBJECT_INCOMPLETE`。快照后文件或链接变化会在下一次重算表现为 `REVIEW_STALE`。
 
 ### 证据与资源
 
-证据路径 `<docs-root>/agent/evidence/WP-.../R1/T1/<attempt>/result.json`。`evidence_verify(session_id,package_id,revision,subtask_id,path,required_content=[])` 返回 VERIFIED/INVALID/INSUFFICIENT。UTF-8、非空、普通文件、最大 2 MB；测试证据 JSON 必须有非空 command、整数 exit_code=0、正整数 passed；review 证据按上述 manifest 校验。独立 `evidence_verify` 不传 subject，只校验 manifest 结构/原始消息，不判定 subject 是否当前；最终 fresh 判定以 review attempt 提交时的 `REVIEW_STALE` 为准。不能证明命令真实执行；主对话核原始日志和环境。PASS 更新引用 `{path,sha256,required_content?}`，更新时再次验证，内容变动则拒绝。未测写 NOT_RUN；不把测试方法当通过。
+证据路径 `<docs-root>/agent/evidence/WP-.../R1/T1/<attempt>/result.json`。`evidence_verify(session_id,package_id,revision,subtask_id,path,required_content=[])` 返回 VERIFIED/INVALID/INSUFFICIENT。UTF-8、非空、普通文件、最大 2 MB；证据 JSON 用 `kind` 区分：`test` 必须有非空 command、整数 exit_code=0、正整数 passed；`build`/`lint` 必须有 command、exit_code=0，不要求 passed；`smoke` 同样要求 command/exit_code，并记录运行实例、动作、可见结果和必要截图；缺省 `kind` 按 `test` 兼容。可附加 `source_sha256`、`log_path`、`artifacts[{path,sha256}]` 作为来源元数据，由主对话核对，不替代原始日志。review 证据按上述 manifest 校验。独立 `evidence_verify` 不传 subject，只校验 manifest 结构/原始消息，不判定 subject 是否当前；最终 fresh 判定以 review attempt 提交时的 `REVIEW_STALE` 为准。不能证明命令真实执行；主对话核原始日志和环境。PASS 更新引用 `{path,sha256,required_content?}`，更新时再次验证，内容变动则拒绝。未测写 NOT_RUN；不把测试方法当通过。
 
 `resource_acquire(session_id,resource="file:src/parser.py",ttl_seconds=120)`；资源类型 file/device/serial/programmer。3.0 该工具仍登记写租约；不提供共享读租约。续租携带 lease_token，释放也须 token；过期新 token 防止旧持有人释放新租约。同资源竞争返回 CONFLICT。锁为建议性，不阻止外部进程；目录范围锁不自动锁子文件，应采用同一具体文件/设备键，调用者统一资源命名。
 
-`handoff_export(session_id,package_id,expected_version)` 返回本地审计 handoff_id 与 sha256；新对话 session_open 后 `handoff_resume(session_id,handoff_id,sha256)` 显式附加。只支持同 canonical 项目和同本地 DB；工作包已变更则 HANDOFF_STALE；review 已登记但 subject 变化时 export 返回 REVIEW_STALE。新对话必须自行确认 intake 才能修改工作包，不复制个人选择。handoff 不用于授权危险操作。
+`handoff_export(session_id,package_id,expected_version)` 返回本地审计 handoff_id 与 sha256；新对话 session_open 后 `handoff_resume(session_id,handoff_id,sha256)` 显式附加。只支持同 canonical 项目和同本地 DB；工作包已变更则 HANDOFF_STALE；review 已登记但 subject 变化时 export 返回 REVIEW_STALE。`SUSPENDED` 包在静止时可导出，handoff 标记 `suspended=true`、暂停原因、继续条件和已知限制；恢复后仍需按原验收与复核条件处理。新对话必须自行确认 intake 才能修改工作包，不复制个人选择。handoff 不用于授权危险操作。
 
 只读 Resources：`scs://session/{session_id}`、`scs://work-package/{package_id}`。本地服务无用户认证，知道 ID 的同一项目客户端可读取这些资源；不适用于不互信用户。
 
@@ -186,7 +187,7 @@ review manifest 是严格 JSON 对象，字段集恰好：
 
 ## 破坏性操作闸门
 
-MCP 只登记决定并回答执行前查询，不执行、不拦截宿主命令；没有宿主 Hook 时是协议级约束（`protocol_only=true`、`execution_intercepted=false`）。
+操作分类由主对话按 [协议](protocol.md#破坏性操作闸门) 判断。日常开发板烧录仍须用户明确授权，但不调用闸门工具；需要完整闸门的操作才使用本节接口。MCP 只登记决定并回答执行前查询，不执行、不拦截宿主命令；没有宿主 Hook 时是协议级约束（`protocol_only=true`、`execution_intercepted=false`）。
 
 ```text
 operation_gate_record(
@@ -252,7 +253,13 @@ MCP 断开：纯 Skill 继续合法文本交互，工作包/修订/证据按原�
 | `GATE_REJECTED` | 同 operation_id+digest 已有 REJECT，后续写 ACCEPT/override |
 | `OPERATION_CONFLICT` | 同 operation_id 不同 digest/载荷，或 gate 已有 ACCEPT 再写 override |
 | `VERSION_CONFLICT` | expected_version 过期；重读后再试 |
-| `PACKAGE_CLOSED` / `ATTEMPT_CLOSED` | 终态包/已结束 attempt 不可再改 |
+| `PACKAGE_CLOSED` / `ATTEMPT_CLOSED` | 终态包/已结束 attempt 不可再改；`SUSPENDED` 需先恢复为 `IN_PROGRESS` 再继续 |
+| `PACKAGE_SUSPENDED` | 包处于 `SUSPENDED`，不能 prepare 新 attempt |
+| `REVIEW_BUDGET_EXHAUSTED` | 非原生 `packages` 每修订已用满两次自动 review 派发；需用户决策后新开修订 |
+| `REVIEW_MANUAL_REQUIRED` / `REVIEW_AGENT_MISMATCH` / `REVIEW_AGENT_REQUIRED` | 未收到用户明确点名 / 回执角色或 Agent ID 不符 / 缺少宿主 Agent ID |
+| `EVIDENCE_KIND_INVALID` | 证据 `kind` 不在 test/build/lint/smoke，或该 kind 缺少必需字段 |
+| `SMOKE_OBSERVATION_MISSING` | `kind=smoke` 缺少 `observations`/`journey` |
+| `SUSPENSION_REASON_REQUIRED` | 转 `SUSPENDED` 未提供暂停原因 |
 | `DEPENDENCY_NOT_READY` / `REVISION_CONFLICT` | 依赖未 PASS 或无活动 attempt；attempt 属于旧修订 |
 | `EVIDENCE_REQUIRED` / `EVIDENCE_INVALID` / `EVIDENCE_CHANGED` | PASS 无证据/证据不合法或改动 |
 | `INPUT_INVALID` / `SUBTASK_INVALID` | 参数、ID、子任务定义不合法 |

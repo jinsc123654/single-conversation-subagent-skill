@@ -21,7 +21,7 @@ TITLES = {
 }
 NATIVE_MESSAGES = {
     **MESSAGES,
-    "codex_gate": "长任务什么时候请固定审阅员审查？",
+    "codex_gate": "长任务什么时候请固定审阅员审查？此处只选收尾审查，包级复核需另点名。",
     "codex_review": "收尾要请固定审阅员做一次只读独立审查吗？",
 }
 NATIVE_TITLES = {
@@ -100,7 +100,8 @@ def schema_for(question: dict, analysis: str | None = None, timeout_seconds: flo
     default = (
         [_display(x, recommended, analysis) for x in ordered if x["value"] in recommended]
         if is_multi
-        else _display(next(x for x in ordered if x["value"] == recommended[0]), recommended, analysis)
+        else _display(next((x for x in ordered if x["value"] == recommended[0]), ordered[0]),
+                      recommended, analysis)
     )
 
     def alias_codes(value):

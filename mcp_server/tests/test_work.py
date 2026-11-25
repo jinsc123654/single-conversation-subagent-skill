@@ -71,6 +71,47 @@ def test_test_evidence_return_code_and_required_content(setup, value, expected):
     assert work.evidence(sid, p["id"], 1, "T1", path, ["absent marker"])["status"] == "INSUFFICIENT"
 
 
+@pytest.mark.parametrize("value,expected", [
+    ({"kind": "build", "exit_code": 0, "command": "npm run build"}, "VERIFIED"),
+    ({"kind": "lint", "exit_code": 0, "command": "eslint ."}, "VERIFIED"),
+    ({"kind": "smoke", "exit_code": 0, "command": "node smoke.mjs"}, "INSUFFICIENT"),
+    ({"kind": "smoke", "exit_code": 0, "command": "node smoke.mjs",
+      "observations": "clicked copy; status shows copied"}, "VERIFIED"),
+    ({"kind": "unknown", "exit_code": 0, "command": "x"}, "INVALID"),
+    ({"kind": "build", "exit_code": 0, "command": "x",
+      "artifacts": [{"path": "dist/a.js", "sha256": "a" * 64}]}, "VERIFIED"),
+    ({"kind": "build", "exit_code": 0, "command": "x",
+      "artifacts": [{"path": "../x", "sha256": "a" * 64}]}, "INVALID"),
+    ({"kind": "build", "exit_code": 0, "command": "x",
+      "source_sha256": {"src/a.py": "b" * 64}}, "VERIFIED"),
+])
+def test_evidence_kinds_and_provenance(setup, value, expected):
+    _, _, sid, work = setup
+    p = package(work, sid)
+    path = evidence_file(setup, p, value)
+    check = work.evidence(sid, p["id"], 1, "T1", path)
+    assert check["status"] == expected
+
+
+def test_suspend_resume_and_block_new_attempts(setup):
+    _, _, sid, work = setup
+    p = package(work, sid)
+    suspended = work.update(sid, p["id"], p["version"], "SUSPENDED",
+                            suspension_reason="user paused",
+                            resume_condition="user confirms",
+                            known_limitations=["edge inputs deferred"])
+    assert suspended["state"] == "SUSPENDED"
+    assert suspended["suspension"]["reason"] == "user paused"
+    assert suspended["suspension"]["known_limitations"] == ["edge inputs deferred"]
+    with pytest.raises(ScsError) as err:
+        work.prepare_attempt(sid, p["id"], suspended["version"], "T1")
+    assert err.value.code == "PACKAGE_SUSPENDED"
+    resumed = work.update(sid, p["id"], suspended["version"], "IN_PROGRESS")
+    assert resumed["state"] == "IN_PROGRESS"
+    assert "suspension" not in resumed
+    assert resumed["suspension_history"][0]["reason"] == "user paused"
+
+
 def test_missing_empty_traversal_and_symlink_never_verify(setup, tmp_path):
     store, _, sid, work = setup
     p = package(work, sid)

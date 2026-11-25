@@ -263,8 +263,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
 
         Supply one recommended path: mode=[quick|standard|long|investigate],
         verification=[smoke,targeted,...] or [none] or [method-only],
-        codex_gate=[none|closure|packages] (long mode only; packages is the
-        recommendation, never an implicit confirmation), codex_review=[no|yes]
+        codex_gate=[none|closure] in ZCode long mode; packages is a legacy
+        option for other hosts. A recommendation never confirms a choice. codex_review=[no|yes]
         (quick/standard; long returns SKIPPED/USE_CODEX_GATE).
         channel=auto follows SCS_QUESTION_CHANNEL; use channel=native/text only
         for an explicit route. analysis is a short rationale shown with the
@@ -392,8 +392,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         subtasks=[{id,kind:analyze|implement|test|review,allowed_files,acceptance}].
         review is a record of an external Codex review launched by the main
         conversation, not a fourth host subagent. Only implement defaults to a
-        write lease; analyze/test/review default to no lease. When the long-mode
-        gate is packages the package stores review_required=true.
+        write lease; analyze/test/review default to no lease. In ZCode, package
+        review is optional and created on an explicit, one-time user request.
+        Other hosts retain the legacy packages gate.
         Scope is project-relative; no scheduling occurs. Missing Markdown records are
         initialized only; main conversation must explicitly sync reviewed records.
         """
@@ -407,14 +408,19 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
 
     @mcp.tool(structured_output=True)
     async def work_package_update(session_id: str, package_id: str, expected_version: int,
-                                  state: Literal["PENDING", "IN_PROGRESS", "REVIEW_READY", "BLOCKED", "COMPLETED", "ABANDONED"] | None = None,
+                                  state: Literal["PENDING", "IN_PROGRESS", "REVIEW_READY", "BLOCKED", "SUSPENDED", "COMPLETED", "ABANDONED"] | None = None,
                                   results: list[SubtaskResult] | None = None, new_revision: bool = False,
                                   close_reason: str | None = None,
                                   definition: WorkPackageDefinition | None = None,
-                                  operation_id: str | None = None) -> dict[str, Any]:
+                                  operation_id: str | None = None,
+                                  suspension_reason: str | None = None,
+                                  resume_condition: str | None = None,
+                                  known_limitations: list[str] | None = None) -> dict[str, Any]:
         """Update with a version precondition. COMPLETED/ABANDONED are terminal and need close_reason.
 
-        results=[{id,status:PASS|FAIL|BLOCKED|NOT_RUN|SUBSTITUTED,
+        SUSPENDED is recoverable and needs suspension_reason; it may carry
+        resume_condition and known_limitations. A suspended package must be
+        resumed to IN_PROGRESS before preparing attempts. results=[{id,status:PASS|FAIL|BLOCKED|NOT_RUN|SUBSTITUTED,
         evidence:[{path,sha256,required_content?}]}]. A PASS report needs reverified
         unchanged evidence. new_revision resets results and allocates fresh evidence
         directories; it preserves every earlier file. Supplying definition with
@@ -431,24 +437,30 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         result = roots.work(session_id).update(session_id, package_id, expected_version, state,
                              [r.model_dump() for r in results] if results is not None else None,
                              new_revision, close_reason,
-                             definition.model_dump() if definition is not None else None, operation_id)
+                             definition.model_dump() if definition is not None else None, operation_id,
+                             suspension_reason, resume_condition, known_limitations)
         return refresh_enabled_view(session_id, result)
 
     @mcp.tool(structured_output=True)
     async def work_attempt_prepare(session_id: str, package_id: str, expected_version: int,
                                    subtask_id: str, host_agent_id: str | None = None,
-                                   ttl_seconds: float = 120) -> dict[str, Any]:
+                                   ttl_seconds: float = 120, user_requested: bool = False) -> dict[str, Any]:
         """Atomically reserve resources and register an execution attempt before launching an agent.
 
         Dependencies must already have a verified PASS/SUBSTITUTED result and no
         active attempt. Returns attempt_id, evidence_dir and lease tokens; launch the
-        host Agent only after this returns. The work package version is unchanged.
+        host Agent only after this returns. Use the version from the response.
         A review attempt must run alone (REVIEW_WINDOW_ACTIVE otherwise), takes no
         default lease, and returns review_subject; the manifest must echo it.
+        In native ZCode, set user_requested=true only after the user explicitly
+        names this package for review. Use subtask_id='review'; an optional slot
+        is created if missing, in which case the returned version increments.
+        A successful prepare consumes the package's one review across revisions.
         Legacy stored read resources are skipped with warnings.
         """
         result = roots.work(session_id).prepare_attempt(session_id, package_id, expected_version,
-                                                        subtask_id, host_agent_id, ttl_seconds)
+                                                        subtask_id, host_agent_id, ttl_seconds,
+                                                        user_requested=user_requested)
         return refresh_enabled_view(session_id, result)
 
     @mcp.tool(structured_output=True)
@@ -624,14 +636,16 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
                               path: str, required_content: list[str] | None = None) -> dict[str, Any]:
         """Verify a bounded UTF-8 file inside this package/revision/subtask evidence directory.
 
-        Test evidence is JSON with command, exit_code=0, and passed>0. Review
-        evidence is a strict JSON manifest with exactly verdict, session_id,
-        model, subject_sha256, final_message_sha256, command, exit_code=0 and
-        raw_path; raw_path stays inside the evidence directory, its sha256 must
-        match, and the raw final message must contain exactly one conclusion
-        line (结论: ACCEPT|REJECT) agreeing with verdict. VERIFIED is
-        file/content validation, not proof of execution or final main-agent
-        acceptance.
+        Evidence JSON uses kind=test|build|lint|smoke (default test). test needs
+        command, exit_code=0 and passed>0; build/lint need command and exit_code=0;
+        smoke also needs observations or journey. Optional source_sha256, log_path
+        and artifacts are validated as provenance metadata. Review evidence is a
+        strict JSON manifest with exactly verdict, session_id, model,
+        subject_sha256, final_message_sha256, command, exit_code=0 and raw_path;
+        raw_path stays inside the evidence directory, its sha256 must match, and
+        the raw final message must contain exactly one conclusion line
+        (结论: ACCEPT|REJECT) agreeing with verdict. VERIFIED is file/content
+        validation, not proof of execution or final main-agent acceptance.
         """
         return roots.work(session_id).evidence(session_id, package_id, revision, subtask_id, path, required_content)
 

@@ -96,6 +96,21 @@ def test_review_manifest_accept_and_reject_are_both_verified(env):
     assert rejected["review"]["verdict"] == "REJECT"
 
 
+def test_review_budget_limits_automatic_attempts(env):
+    store, _, sid, work = env
+    package = make(work, sid, "budget")
+    for _ in range(2):
+        current = work.get(sid, package["id"])
+        attempt = work.prepare_attempt(sid, package["id"], current["version"], REVIEW)
+        end_review(store, work, sid, current, attempt, "REJECT", "FAIL")
+    current = work.get(sid, package["id"])
+    with pytest.raises(ScsError) as err:
+        work.prepare_attempt(sid, package["id"], current["version"], REVIEW)
+    assert err.value.code == "REVIEW_BUDGET_EXHAUSTED"
+    explicit = work.prepare_attempt(sid, package["id"], current["version"], REVIEW, user_requested=True)
+    assert explicit["attempt"]["id"].startswith("A-")
+
+
 @pytest.mark.parametrize("case,kwargs,expected", [
     ("missing_conclusion", {"raw": "# no conclusion\n"},
      "REVIEW_CONCLUSION_MISSING_OR_AMBIGUOUS"),
