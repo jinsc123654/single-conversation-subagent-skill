@@ -36,13 +36,13 @@ class Leases:
         return parent == child or child.startswith(parent + "/")
 
     def _conflict(self, left: str, left_mode: str, right: str, right_mode: str) -> bool:
-        # R/R may share a resource; any writer conflicts with readers and writers.
-        if left_mode == "read" and right_mode == "read":
+        left_kind, left_id = left.split(":", 1)
+        right_kind, right_id = right.split(":", 1)
+        if left_kind != "file" and right_kind != "file":
+            return left_id == right_id
+        if left_kind != right_kind or left_mode == right_mode == "read":
             return False
-        if left.startswith("file:") and right.startswith("file:"):
-            a, b = left[5:], right[5:]
-            return self._covers(a, b) or self._covers(b, a)
-        return left == right
+        return self._covers(left_id, right_id) or self._covers(right_id, left_id)
 
     def _validate_ttl(self, ttl_seconds: float) -> float:
         if not math.isfinite(ttl_seconds) or not 1 <= ttl_seconds <= 3600:
@@ -63,13 +63,14 @@ class Leases:
                 merged[key] = mode
         return [{"resource": key, "mode": merged[key]} for key in sorted(merged)]
 
-    def _expired_active(self, con, row, stamp: float) -> bool:
-        if row["expires"] > stamp:
-            return True
+    def _attempt_active(self, con, row) -> bool:
         if not row["attempt_id"]:
             return False
         attempt = con.execute("SELECT state FROM work_attempts WHERE id=?", (row["attempt_id"],)).fetchone()
         return attempt is None or attempt["state"] != "ENDED"
+
+    def _expired_active(self, con, row, stamp: float) -> bool:
+        return row["expires"] > stamp or self._attempt_active(con, row)
 
     def acquire_many(self, con, session_id: str, attempt_id: str, package_id: str,
                      resources: list[dict], ttl_seconds: float = 120) -> list[dict]:
@@ -117,22 +118,29 @@ class Leases:
         with self.store.transaction(True) as con:
             self.state._session(con, session_id)
             exact = con.execute("SELECT * FROM leases WHERE resource=?", (resource,)).fetchone()
-            if exact and self._expired_active(con, exact, stamp):
+            expires = stamp + ttl_seconds
+            active = exact is not None and self._expired_active(con, exact, stamp)
+            if active:
                 if exact["owner"] != session_id or exact["token"] != lease_token:
                     return {"status": "CONFLICT", "resource": resource, "owner_session": exact["owner"],
                             "expires_at": exact["expires"], "advisory_only": True}
-            for row in con.execute("SELECT * FROM leases"):
-                if row["resource"] == resource or not self._expired_active(con, row, stamp):
-                    continue
-                if self._conflict(resource, "write", row["resource"], row["mode"]):
-                    raise ScsError("RESOURCE_BUSY",
-                        "Resource conflicts with an active lease.",
-                        {"resource": resource, "holder": row["resource"], "owner_session": row["owner"]})
-            token = exact["token"] if exact and exact["owner"] == session_id and exact["token"] == lease_token else identifier("L-")
-            con.execute("INSERT OR REPLACE INTO leases(resource,owner,token,expires,mode,attempt_id,package_id) VALUES(?,?,?,?,'write',NULL,NULL)",
-                        (resource, session_id, token, stamp + ttl_seconds))
+            if active and self._attempt_active(con, exact):
+                # A renewal cannot detach an attempt or conflict with its own alias leases.
+                token = exact["token"]
+                con.execute("UPDATE leases SET expires=? WHERE resource=?", (expires, resource))
+            else:
+                for row in con.execute("SELECT * FROM leases"):
+                    if row["resource"] == resource or not self._expired_active(con, row, stamp):
+                        continue
+                    if self._conflict(resource, "write", row["resource"], row["mode"]):
+                        raise ScsError("RESOURCE_BUSY",
+                            "Resource conflicts with an active lease.",
+                            {"resource": resource, "holder": row["resource"], "owner_session": row["owner"]})
+                token = exact["token"] if active else identifier("L-")
+                con.execute("INSERT OR REPLACE INTO leases(resource,owner,token,expires,mode,attempt_id,package_id) VALUES(?,?,?,?,'write',NULL,NULL)",
+                            (resource, session_id, token, expires))
             return {"status": "ACQUIRED", "resource": resource, "lease_token": token,
-                    "expires_at": stamp + ttl_seconds, "advisory_only": True,
+                    "expires_at": expires, "advisory_only": True,
                     "external_processes_excluded": False}
 
     def release(self, session_id: str, resource: str, lease_token: str) -> dict:
@@ -144,5 +152,7 @@ class Leases:
                 return {"status": "ALREADY_RELEASED", "resource": resource}
             if row["owner"] != session_id or row["token"] != lease_token:
                 raise ScsError("LEASE_OWNER_MISMATCH", "A stale owner/token cannot release this lease.")
+            if self._attempt_active(con, row):
+                raise ScsError("LEASE_ACTIVE_ATTEMPT", "End the active attempt before releasing its lease.")
             con.execute("DELETE FROM leases WHERE resource=?", (resource,))
             return {"status": "RELEASED", "resource": resource}

@@ -11,7 +11,7 @@ AGENT_HOME="$HOME/.zcode" bash install.sh --host zcode --mode hybrid \
   --with-default-rule --project-root "$HOME"
 ```
 
-ZCode 示例在 `~/.zcode/mcp/single-conversation-subagent/zcode-example.json`；合并单个 MCP 条目。要补装缺少的角色，加 `--with-zcode-agents`，并用 `--zcode-gpt-model`、`--zcode-deepseek-model` 指定自己已配置的 `provider/model`。现有角色配置优先。安装器有 `--zcode-agents-dir` 和可选 `--zcode-gpt-thought-level`、`--zcode-deepseek-thought-level`。六个角色模板保存在 `zcode-agents/`。角色协议、固定审阅员回执和旧证据兼容方式见 [MCP 用法](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
+ZCode 示例在 `~/.zcode/mcp/single-conversation-subagent/zcode-example.json`；合并单个 MCP 条目。要补装缺少的角色，加 `--with-zcode-agents`，并用 `--zcode-gpt-model`、`--zcode-deepseek-model` 指定自己已配置的 `provider/model`。现有角色配置优先。安装器有 `--zcode-agents-dir` 和可选 `--zcode-gpt-thought-level`、`--zcode-deepseek-thought-level`。七个角色模板保存在 `zcode-agents/`。角色协议、固定审阅员回执和旧证据兼容方式见 [MCP 用法](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
 
 ## ZCode 工作流程
 
@@ -69,14 +69,14 @@ flowchart TD
 
 | 模式 | 用户选择 | 包级复核 | 收尾审查 |
 | --- | --- | --- | --- |
-| 长任务 | 仅收尾审查 | — | 一次 |
+| 长任务 | 仅收尾审查 | 用户点名并确认轮次 | 按收尾预算 |
 | 长任务 | 不做独立复核 | — | — |
-| 快速或标准 | 使用固定审阅员 | — | 一次 |
+| 快速或标准 | 使用固定审阅员 | 用户点名并确认轮次 | 按收尾预算 |
 | 快速或标准 | 不使用，或审阅员未确认可用 | — | — |
 
 ```mermaid
 flowchart TD
-  Done["当前工作包执行完成，已无活动 attempt"] --> Requested{"用户点名复核且本包未复核过？"}
+  Done["当前工作包执行完成，已无活动 attempt"] --> Requested{"用户点名并确认本轮包级复核？"}
   Requested -->|是| Snapshot["用户确认轮次后，准备该轮 review attempt，冻结 review_subject"]
   Snapshot --> Reviewer["固定审阅员只读复核，登记结果，不自动重试"]
   Reviewer --> Ready["检查实施与验证证据"]
@@ -87,16 +87,16 @@ flowchart TD
   Package --> More{"还需要执行工作包？"}
   More -->|需要| Continue["处理下一包，重复该流程"]
   More -->|全部完成| Closing{"所选策略要求收尾审查？"}
-  Closing -->|需要| Final["固定审阅员独立收尾审查"]
+  Closing -->|需要| Final["跨包冻结后派固定审阅员做收尾审查"]
   Final -->|通过| Deliver["主对话最终验收和交付"]
-  Final -->|退回| FinalFix["仅处理明确阻塞项，默认最多自动复审一次"]
-  FinalFix -->|有明确修正且未用复审机会| Final
+  Final -->|退回| FinalFix["走新修订或后继包处理明确阻塞项"]
+  FinalFix -->|修正和验证完成且整改链仍有自动派发预算| Final
   FinalFix -->|仍受阻或需扩大范围| FinalBlock
   Final -->|未完成| FinalBlock["保留未完成状态，报告阻塞"]
   Closing -->|无需| Deliver
 ```
 
-包级复核仅在用户点名时启动，首轮前询问计划轮次和是否作为收尾审查，每新增一轮都要用户再次确认；不自动复审，也不默认阻塞正常验收。`REJECT` 保存原始回执并记 `FAIL`；如果意见揭示了真实验收缺陷，按原验收标准处理。历史 `packages` 只保留收尾选择，不继承任何包级授权。详见 [固定审阅员回执](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
+包级复核仅在用户点名时启动，首轮前询问计划轮次和是否作为收尾审查，每新增一轮都要用户再次确认。`REJECT` 原始回执记为 `FAIL`，影响验收的缺陷按原标准处理。收尾从派发前冻结到回执核对和最终验收结束，期间禁止相交包写入和设备操作。派发前保存 `closure_subject`，回执和验收前重算，中途变化即作废本轮覆盖并登记 `STALE`。已选收尾需要当前 `ACCEPT` 或有效 `WAIVED`。ZCode 历史 `packages` 只保留收尾选择。详见 [固定审阅员回执](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
 
 ### 4. 破坏性操作预审
 
@@ -293,15 +293,16 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 
 - **侦察者（analyze）**：只读检索、依赖/调用链/日志分析，产出结论和 `file:line`。
 - **实施者（implement）**：只改 `allowed_files`，记录改动和最小自检。
-- **验证者（test）**：只跑指定验证命令，记录命令/退出码/通过数/证据；UI 交付执行用户旅程冒烟。
+- **验证者（test）**：只跑指定验证命令，记录命令/退出码/通过数/证据。
+- **设备与端到端验证员**：在授权设备/浏览器范围内执行 ADB、串口、烧录或现场旅程，归档截图/UI dump/命令/观测。
 - **方案顾问** 在长任务开工前做一次只读方案指导。
-- **固定审阅员** 独立检查当前工作包、交付证据或预审操作，由主对话单独派发。通用宿主使用外部 `codex-review`。
+- **固定审阅员** 独立检查当前工作包、交付证据或预审操作，由主对话单独派发；默认只读。通用宿主使用外部 `codex-review`。
 
-ZCode 实际工具集以 `zcode-agents/permissions.json` 为准：方案顾问/固定审阅员 `[Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch, TodoWrite]`（全工具，默认不改项目文件），查询侦察员 `[Read, Grep, Glob, WebFetch, WebSearch]`（仅公开资料），继承审阅员 `[Read, Grep, Glob, Bash]`（Bash 仅只读核查），实施工程师 `[Read, Grep, Glob, Edit, Write, Bash]`（Bash 仅自检），测试验证员 `[Read, Grep, Glob, Bash]`。运行 `python scripts/check_agent_permissions.py` 校验已注册身份；超出矩阵时停止派发。Bash 是完整 shell，只读/范围边界靠正文与事后审计。
+ZCode 实际工具集以 `zcode-agents/permissions.json` 为准：方案顾问/固定审阅员/继承审阅员 `[Read, Grep, Glob]`，查询侦察员 `[Read, Grep, Glob, WebFetch, WebSearch]`（仅公开资料），实施工程师 `[Read, Grep, Glob, Edit, Write, Bash]`（Bash 仅自检），测试验证员/设备与端到端验证员 `[Read, Grep, Glob, Bash]`（仅受控验证/设备命令）。运行 `python scripts/check_agent_permissions.py` 校验已注册身份；超出矩阵时停止派发。Bash 是完整 shell，只读/范围边界靠正文与事后审计。
 
-UI/用户可见交付收尾时必须完成用户旅程验收：在用户实际使用的 URL/实例执行入口→主操作→可见结果，记录实例、动作、结果和截图；长驻 dev server 先观察原实例再刷新对照，不能用冷启动测试代替现场验收。
+UI、App 和设备交付收尾前须验证现场旅程。确认验证范围时选择 `journey`，在 `test` 子任务定义中声明 `execution_profile=journey` 与目标设备写租约，单项 prepare 成功后派设备与端到端验证员。该角色在实际 URL、实例或设备上完成入口→主操作→可见结果，提交与 attempt 绑定的证据。主对话抽核并验收。长驻 dev server 先观察原实例，再刷新对照。
 
-职责、边界、返回 schema、persona 模板见 [roles.md](single-conversation-subagent/references/roles.md)。只有存在会影响实施的未知点时才派侦察。已就绪且写范围、资源互不冲突的任务可并行，默认上限为 4，无宿主并发证据时取 1。范围内低风险小改和证据更正可直接处理或并入当前实施。
+职责、边界、返回 schema、persona 模板见 [roles.md](single-conversation-subagent/references/roles.md)。只有存在会影响实施的未知点时才派侦察。已就绪且写范围、资源互不冲突的任务可并行，默认上限为 4，无宿主并发证据时取 1。长任务代码小改仅限冻结前、同一工作包同一验收目标累计一次、一个既有文件、一个 diff hunk、增删合计不超过 10 行，且无行为变化。超出上限或涉及构建、回归、启停服务、计划内设备交互时先 prepare 再派发。
 
 ### 包级复核（review 子任务）
 
@@ -329,7 +330,8 @@ UI/用户可见交付收尾时必须完成用户旅程验收：在用户实际�
 - **无 schema 变更**：`codex_gate` 存 `questions` 行，破坏性闸门记录存 `events`，`user_version=3`、`sessions` 表与九值 INSERT 不变；旧库/旧会话直接可用，无需迁移。
 - 旧长会话首次进入会补问一次 gate；旧包没有 `review_required` 按 false；旧 `test`/`analyze` 证据语义不变。
 - 桌面管理器版本检查仍为 1/2/3（worker 2/3），只改会话选择器：long 使用 gate 已确认或旧 `codex_review` 回退显示，其他模式不变。
-- **已知限制**：收尾审查是 Skill 规则，MCP 限制每包最多一次手动复核；无宿主 Hook 时闸门不能拦截真实命令；本版无共享读租约。
+- **复核预算**。收尾沿同一整改链最多两次自动派发（含中断/无效回执），切修订不重置。按修订计数的两次自动派发仅适用于非原生 `packages` 的包级复核。ZCode 手动包级轮次由用户确认。
+- **执行边界**。收尾冻结由 Skill 执行。外部进程需遵守协作约定，宿主没有 Hook 时闸门是协议级约束。
 
 ## 通用宿主的 Codex 方案指导（2.9.0）
 
@@ -371,7 +373,7 @@ SQLite 升级到 schema 3：新增 `work_attempts`、`work_operations`，`leases
 | interaction_ask | 仅 `mcp` 兜底 channel 的 legacy form 服务端 `timeout_seconds`（默认 15s）；`analysis`/中文 title/选项注释/推荐标记/15s/question_id 显示在 form；超时返回 `TIMED_OUT` + 推荐项；modern/无 form 保持 `WAITING_USER`，同一 `question_id` 直接 submit；ZCode 不默认使用 |
 | diagnostics_check | 依赖、数据库、工具注册、声明能力、脱敏事件；不推断 UI |
 | work_package_create / get / update | 可选工作包，修订、乐观版本、范围和子任务证据报告；手动 review 结果须经 attempt；`SUSPENDED` 可恢复并记录原因/继续条件/已知限制；`COMPLETED`/`ABANDONED` 终态需 `close_reason` |
-| work_package_close | 本地管理器/操作员关闭滞留或重复工作包；从包内读取 owner session，仍校验版本、终态和原因，保留审计；`force=true` 用于确认过的游离/卡住包，绕过状态/证据/活动 attempt 检查并写 `PACKAGE_FORCE_CLOSED` |
+| work_package_close | 本地管理器/操作员关闭滞留或重复工作包；从包内读取 owner session，仍校验版本、终态和原因，保留审计；`force=true` 用于确认过的游离/卡住包，绕过状态与普通报告检查并写 `PACKAGE_FORCE_CLOSED`，强制 `COMPLETED` 仍校验旅程 |
 | work_attempt_prepare / update / list | 并发执行 attempt：原子占资源、生命周期与结果登记、查询；不创建 Agent；review 返回 `review_subject` |
 | work_attempt_prepare_many / update_many | 单包原子批量：prepare 全有或全无且不增版本；update 全有或全无且只增一次版本，review 单独运行 |
 | work_attempt_note | 追加 attempt 审计备注；不改版本、不续租、不证明存活 |

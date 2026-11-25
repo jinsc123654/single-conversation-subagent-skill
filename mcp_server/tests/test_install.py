@@ -118,7 +118,8 @@ def test_zcode_installs_missing_agents_and_preserves_existing_models(tmp_path):
     result = install(tmp_path, *args)
     assert result.returncode == 0, result.stderr
     assert {p.stem for p in agents.glob("*.md")} == {
-        "固定审阅员", "方案顾问", "继承审阅员", "查询侦察员", "实施工程师", "测试验证员"}
+        "固定审阅员", "方案顾问", "继承审阅员", "查询侦察员", "实施工程师", "测试验证员",
+        "设备与端到端验证员"}
     assert 'model: "local/existing"' in existing.read_text()
     advisor = (agents / "方案顾问.md").read_text()
     assert 'model: "local/gpt"' in advisor and "长任务在确认验证与复核策略后派发一次" in advisor

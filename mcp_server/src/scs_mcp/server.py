@@ -389,7 +389,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
                                   acceptance: list[str], subtasks: list[SubtaskDefinition], request_key: str) -> dict[str, Any]:
         """Create an optional bounded package after intake. request_key makes retries safe.
 
-        subtasks=[{id,kind:analyze|implement|test|review,allowed_files,acceptance}].
+        subtasks=[{id,kind:analyze|implement|test|review,allowed_files,acceptance,execution_profile?}].
+        Declare execution_profile=journey on a test subtask to enable the journey workflow.
         review is a record of an external Codex review launched by the main
         conversation, not a fourth host subagent. Only implement defaults to a
         write lease; analyze/test/review default to no lease. In ZCode, package
@@ -425,8 +426,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         unchanged evidence. new_revision resets results and allocates fresh evidence
         directories; it preserves every earlier file. Supplying definition with
         new_revision replaces the DAG, scope and acceptance after revalidation.
-        Direct results are refused for review subtasks: end a prepared review
-        attempt instead. Direct results are refused while attempts are active.
+        End a prepared attempt to record a review or journey result. Direct
+        results are refused while attempts are active. Required journeys need
+        a verified PASS from their ended attempt for REVIEW_READY/COMPLETED.
         COMPLETED requires REVIEW_READY; when review_required is true,
         REVIEW_READY/COMPLETED need a PASS review whose ACCEPT manifest matches
         the current subject (REVIEW_REQUIRED/REVIEW_STALE otherwise), and
@@ -444,23 +446,29 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
     @mcp.tool(structured_output=True)
     async def work_attempt_prepare(session_id: str, package_id: str, expected_version: int,
                                    subtask_id: str, host_agent_id: str | None = None,
-                                   ttl_seconds: float = 120, user_requested: bool = False) -> dict[str, Any]:
+                                   ttl_seconds: float = 120, user_requested: bool = False,
+                                   execution_profile: Literal["standard", "journey"] | None = None) -> dict[str, Any]:
         """Atomically reserve resources and register an execution attempt before launching an agent.
 
         Dependencies must already have a verified PASS/SUBSTITUTED result and no
         active attempt. Returns attempt_id, evidence_dir and lease tokens; launch the
         host Agent only after this returns. Use the version from the response.
+        An explicit execution_profile must match the subtask definition.
+        A journey requires completed intake, the journey verification choice,
+        and one device:<id> write lease. Optional serial/programmer leases must
+        also be write leases for that id. ZCode routes to the device verifier.
         A review attempt must run alone (REVIEW_WINDOW_ACTIVE otherwise), takes no
         default lease, and returns review_subject; the manifest must echo it.
         In native ZCode, set user_requested=true only after the user explicitly
-        names this package for review. Use subtask_id='review'; an optional slot
-        is created if missing, in which case the returned version increments.
-        A successful prepare consumes the package's one review across revisions.
+        names the package and confirms this review round. Use subtask_id='review';
+        an optional slot is created if missing, in which case the returned version
+        increments. Each manual round needs a fresh explicit user request.
         Legacy stored read resources are skipped with warnings.
         """
         result = roots.work(session_id).prepare_attempt(session_id, package_id, expected_version,
                                                         subtask_id, host_agent_id, ttl_seconds,
-                                                        user_requested=user_requested)
+                                                        user_requested=user_requested,
+                                                        execution_profile=execution_profile)
         return refresh_enabled_view(session_id, result)
 
     @mcp.tool(structured_output=True)
@@ -607,8 +615,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         events are still enforced. COMPLETED requires REVIEW_READY; ABANDONED may
         close a pending, active or blocked package. force=True is an operator
         reconciliation path for orphan/stuck packages: it bypasses the state
-        machine, evidence reports and active attempts, ends active attempts and
-        records PACKAGE_FORCE_CLOSED. Prefer work_package_update in the owning
+        machine and ordinary report checks, ends active attempts and records
+        PACKAGE_FORCE_CLOSED. Forced COMPLETED still verifies journey results.
+        Prefer work_package_update in the owning
         conversation; use force only after checking the package identity.
         """
         root = roots.resolve(project_root)
@@ -636,10 +645,16 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
                               path: str, required_content: list[str] | None = None) -> dict[str, Any]:
         """Verify a bounded UTF-8 file inside this package/revision/subtask evidence directory.
 
-        Evidence JSON uses kind=test|build|lint|smoke (default test). test needs
-        command, exit_code=0 and passed>0; build/lint need command and exit_code=0;
-        smoke also needs observations or journey. Optional source_sha256, log_path
-        and artifacts are validated as provenance metadata. Review evidence is a
+        Evidence JSON uses kind=test|build|lint|smoke|journey (default test).
+        test needs command, exit_code=0 and passed>0; build/lint need command and
+        exit_code=0; smoke needs observations or journey; journey also needs
+        channel=adb|serial|browser, non-empty assertions with boolean ok, and
+        artifacts relative to the registered journey attempt directory. The
+        manifest path must identify an attempt for this package/revision/subtask.
+        On verification, journey_attempt_id identifies the bound attempt.
+        A journey PASS requires all assertions ok and exit_code=0; failed
+        journeys may still be archived. Optional source_sha256, log_path and
+        artifacts are validated as provenance metadata. Review evidence is a
         strict JSON manifest with exactly verdict, session_id, model,
         subject_sha256, final_message_sha256, command, exit_code=0 and raw_path;
         raw_path stays inside the evidence directory, its sha256 must match, and
@@ -655,14 +670,16 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         """Acquire/renew a token-fenced advisory lease. Supply the returned token to renew.
 
         resource=file:relative/path or device:/serial:/programmer:logical-id.
-        External processes are not blocked. TTL is 1..3600 seconds; expired leases
-        get a fresh token so a stale owner cannot release a successor's lease.
+        Device, serial and programmer resources conflict by physical ID.
+        TTL is 1..3600 seconds. Renewal of an active attempt lease preserves its
+        binding and mode. Expired standalone leases get a fresh token.
+        External processes are not blocked.
         """
         return roots.leases(session_id).acquire(session_id, resource, ttl_seconds, lease_token)
 
     @mcp.tool(structured_output=True)
     async def resource_release(session_id: str, resource: str, lease_token: str) -> dict[str, Any]:
-        """Release only the matching owner and token; repeated release is safe."""
+        """Release with the matching owner and token. End active attempts to release their leases."""
         return roots.leases(session_id).release(session_id, resource, lease_token)
 
     @mcp.tool(structured_output=True)

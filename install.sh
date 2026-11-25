@@ -23,7 +23,7 @@ ZCODE_GPT_THOUGHT_LEVEL=""
 ZCODE_DEEPSEEK_MODEL=""
 ZCODE_DEEPSEEK_THOUGHT_LEVEL=""
 ZCODE_AGENT_OPTIONS=0
-ZCODE_PROFILE_NAMES=(实施工程师 继承审阅员)
+ZCODE_PROFILE_NAMES=(实施工程师 继承审阅员 设备与端到端验证员)
 BEGIN='<!-- single-conversation-subagent begin -->'
 END='<!-- single-conversation-subagent end -->'
 

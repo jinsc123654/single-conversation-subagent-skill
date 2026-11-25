@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -91,6 +92,365 @@ def test_evidence_kinds_and_provenance(setup, value, expected):
     path = evidence_file(setup, p, value)
     check = work.evidence(sid, p["id"], 1, "T1", path)
     assert check["status"] == expected
+
+
+def confirm_intake(state, sid, verification="journey", gate=True):
+    answers = [("mode", "long"), ("verification", verification)]
+    if gate:
+        answers.append(("codex_gate", "none"))
+    for kind, answer in answers:
+        question = state.request(sid, kind, [answer], "text")
+        assert state.submit(sid, question["id"], "accept", [answer], "text")["status"] == "CONFIRMED"
+
+
+def journey_package(work, sid, resources=None):
+    if resources is None:
+        resources = [{"resource": "device:board", "mode": "write"}]
+    return work.create(sid, "Observed journey", ["src"], ["observed"], [
+        {"id": "T1", "kind": "test", "execution_profile": "journey",
+         "allowed_files": ["src/a.py"], "acceptance": ["observed"], "resources": resources},
+        {"id": "T2", "kind": "test", "allowed_files": ["src/a.py"], "acceptance": ["tests"]},
+    ], "journey")
+
+
+@pytest.fixture
+def journey(setup):
+    store, state, _, work = setup
+    sid = state.open(str(store.root), "test", "journey")["id"]
+    confirm_intake(state, sid)
+    p = journey_package(work, sid)
+    return store, sid, work, p
+
+
+def write_journey(store, base, *, ok=True, exit_code=0, nested=False):
+    image = b"recorded screenshot"
+    (store.root / base).mkdir(parents=True, exist_ok=True)
+    (store.root / base / "screen.png").write_bytes(image)
+    manifest = {"kind": "journey", "channel": "adb", "exit_code": exit_code,
+                "command": "adb shell input tap 1 2",
+                "assertions": [{"name": "device visible", "ok": ok}],
+                "artifacts": [{"path": "screen.png", "sha256": hashlib.sha256(image).hexdigest()}]}
+    directory = base + "/reports" if nested else base
+    (store.root / directory).mkdir(exist_ok=True)
+    path = f"{directory}/result.json"
+    content = json.dumps(manifest).encode()
+    (store.root / path).write_bytes(content)
+    return {"path": path, "sha256": hashlib.sha256(content).hexdigest()}
+
+
+def test_journey_cannot_be_registered_or_prepared_as_standard(journey):
+    store, sid, work, p = journey
+    pid, version = p["id"], p["version"]
+    assert p["subtasks"][0]["execution_profile"] == "journey"
+    assert journey_package(work, sid)["id"] == pid
+    for subtask, profile in (("T1", "standard"), ("T2", "journey")):
+        with pytest.raises(ScsError) as exc:
+            work.prepare_attempt(sid, pid, version, subtask, execution_profile=profile)
+        assert exc.value.code == "INPUT_INVALID"
+    for selected in (["T1"], ["T2", "T1"]):
+        with pytest.raises(ScsError) as exc:
+            work.prepare_attempts(sid, pid, version, selected)
+        assert exc.value.code == "JOURNEY_SINGLE_REQUIRED"
+    assert work.list_attempts(sid, pid)["attempts"] == []
+
+    build = b'{"kind":"build","command":"build","exit_code":0}'
+    build_path = f"{p['docs_root']}/agent/evidence/{pid}/R1/T1/build.json"
+    (store.root / build_path).write_bytes(build)
+    evidence = {"path": build_path, "sha256": hashlib.sha256(build).hexdigest()}
+    for status in ("PASS", "FAIL", "BLOCKED", "NOT_RUN", "SUBSTITUTED"):
+        with pytest.raises(ScsError) as exc:
+            work.update(sid, pid, version, results=[{"id": "T1", "status": status, "evidence": [evidence]}])
+        assert exc.value.code == "JOURNEY_ATTEMPT_REQUIRED"
+
+    prepared = work.prepare_attempt(sid, pid, version, "T1")
+    assert prepared["input_snapshot"]["execution_profile"] == "journey"
+    evidence["path"] = prepared["evidence_dir"] + "/build.json"
+    (store.root / evidence["path"]).write_bytes(build)
+    with pytest.raises(ScsError) as exc:
+        work.update_attempt(sid, prepared["attempt"]["id"], version, "ENDED", {"status": "PASS", "evidence": [evidence]})
+    assert exc.value.code == "JOURNEY_NOT_PASSED"
+
+
+@pytest.mark.parametrize("resources", [
+    [],
+    [{"resource": "serial:board", "mode": "write"}],
+    [{"resource": "device:board", "mode": "read"}],
+    [{"resource": "device:board"}, {"resource": "device:phone"}],
+    [{"resource": "device:board"}, {"resource": "serial:board", "mode": "read"}],
+    [{"resource": "device:board"}, {"resource": "programmer:phone"}],
+])
+def test_journey_requires_one_exclusive_physical_device(setup, resources):
+    store, state, _, work = setup
+    sid = state.open(str(store.root), "test", "journey")["id"]
+    confirm_intake(state, sid)
+    p = journey_package(work, sid, resources)
+    with pytest.raises(ScsError) as exc:
+        work.prepare_attempt(sid, p["id"], p["version"], "T1")
+    assert exc.value.code == "JOURNEY_RESOURCE_REQUIRED"
+    assert work.list_attempts(sid, p["id"])["attempts"] == []
+
+
+def test_only_test_subtasks_can_declare_journey(setup):
+    _, _, sid, work = setup
+    with pytest.raises(ScsError) as exc:
+        work.create(sid, "Wrong profile", ["src"], ["observed"], [
+            {"id": "T1", "kind": "implement", "execution_profile": "journey",
+             "allowed_files": ["src"], "acceptance": ["observed"]}], "wrong-profile")
+    assert exc.value.code == "SUBTASK_INVALID"
+
+
+def test_journey_handoff_requires_intake_and_verification_scope(journey):
+    store, sid, work, p = journey
+    pid = p["id"]
+    with pytest.raises(ScsError) as exc:
+        work.export(sid, pid, p["version"])
+    assert exc.value.code == "JOURNEY_NOT_PASSED"
+    suspended = work.update(sid, pid, p["version"], "SUSPENDED", suspension_reason="waiting for device")
+    handoff = work.export(sid, pid, suspended["version"])
+    version = suspended["version"]
+    other = work.state.open(str(store.root), "test", "resumed")["id"]
+    work.resume(other, handoff["handoff_id"], handoff["sha256"])
+    confirm_intake(work.state, other, gate=False)
+    version = work.update(sid, pid, version, "IN_PROGRESS")["version"]
+    with pytest.raises(ScsError) as exc:
+        work.prepare_attempt(other, pid, version, "T1")
+    assert exc.value.code == "INTAKE_REQUIRED"
+
+    third = work.state.open(str(store.root), "test", "targeted")["id"]
+    confirm_intake(work.state, third, verification="targeted")
+    p = journey_package(work, third)
+    with pytest.raises(ScsError) as exc:
+        work.prepare_attempt(third, p["id"], p["version"], "T1")
+    assert exc.value.code == "VALIDATION_NOT_AUTHORIZED"
+
+
+@pytest.mark.parametrize("ok,exit_code,batch", [(False, 0, False), (True, 1, True)])
+def test_journey_rejects_failed_pass_but_archives_fail(journey, ok, exit_code, batch):
+    store, sid, work, p = journey
+    prepared = work.prepare_attempt(sid, p["id"], p["version"], "T1")
+    evidence = write_journey(store, prepared["evidence_dir"], ok=ok, exit_code=exit_code)
+    check = work.evidence(sid, p["id"], 1, "T1", evidence["path"])
+    assert check["status"] == "VERIFIED" and check["journey_passed"] == ok
+    aid = prepared["attempt"]["id"]
+
+    def end(status, operation):
+        result = {"status": status, "evidence": [evidence]}
+        if batch:
+            return work.update_attempts(sid, [{"attempt_id": aid, "result": result}], operation)
+        return work.update_attempt(sid, aid, p["version"], "ENDED", result)
+
+    with pytest.raises(ScsError) as exc:
+        end("PASS", "bad-pass")
+    assert exc.value.code == "JOURNEY_NOT_PASSED"
+    version = end("FAIL", "failed-run")["version"]
+    failed = work.get(sid, p["id"])["subtasks"][0]
+    assert failed["status"] == "FAIL" and failed["result_attempt_id"] == aid
+    suspended = work.update(sid, p["id"], version, "SUSPENDED", suspension_reason="retry later")
+    assert work.export(sid, p["id"], suspended["version"])["snapshot"]["subtasks"][0]["status"] == "FAIL"
+
+
+def test_journey_requires_pass_for_acceptance_and_rechecks_attachment(journey):
+    store, sid, work, p = journey
+    pid = p["id"]
+    version = work.update(sid, pid, p["version"], "IN_PROGRESS")["version"]
+    with pytest.raises(ScsError) as exc:
+        work.force_close(pid, version, "COMPLETED", "missing result")
+    assert exc.value.code == "JOURNEY_NOT_PASSED"
+    with pytest.raises(ScsError) as exc:
+        work.update(sid, pid, version, "REVIEW_READY")
+    assert exc.value.code == "JOURNEY_NOT_PASSED"
+    blocked = work.prepare_attempt(sid, pid, version, "T1")
+    version = work.update_attempt(sid, blocked["attempt"]["id"], version, "ENDED",
+                                  {"status": "SUBSTITUTED"})["version"]
+    with pytest.raises(ScsError) as exc:
+        work.update(sid, pid, version, "REVIEW_READY")
+    assert exc.value.code == "JOURNEY_NOT_PASSED"
+    prepared = work.prepare_attempt(sid, pid, version, "T1")
+    evidence = write_journey(store, prepared["evidence_dir"], nested=True)
+    check = work.evidence(sid, pid, 1, "T1", evidence["path"])
+    assert check["status"] == "VERIFIED" and check["journey_passed"] is True
+    assert check["journey_attempt_id"] == prepared["attempt"]["id"]
+    result = work.update_attempt(sid, prepared["attempt"]["id"], version, "ENDED",
+                                 {"status": "PASS", "evidence": [evidence]})
+    ready = work.update(sid, pid, result["version"], "REVIEW_READY")
+    handoff = work.export(sid, pid, ready["version"])
+    other = work.state.open(str(store.root), "test", "handoff")["id"]
+    assert work.resume(other, handoff["handoff_id"], handoff["sha256"])["status"] == "RESUMED"
+    attachment = store.root / prepared["evidence_dir"] / "screen.png"
+    original = attachment.read_bytes()
+    attachment.write_bytes(b"replaced")
+    check = work.evidence(sid, pid, 1, "T1", evidence["path"])
+    assert check["error_code"] == "JOURNEY_ARTIFACT_INVALID"
+    for verify in (lambda: work.export(sid, pid, ready["version"]),
+                   lambda: work.resume(other, handoff["handoff_id"], handoff["sha256"]),
+                   lambda: work.update(sid, pid, ready["version"], "COMPLETED", close_reason="accepted")):
+        with pytest.raises(ScsError) as exc:
+            verify()
+        assert exc.value.code == "EVIDENCE_CHANGED"
+    attachment.write_bytes(original)
+    assert work.update(sid, pid, ready["version"], "COMPLETED", close_reason="accepted")["state"] == "COMPLETED"
+
+
+def test_journey_evidence_requires_a_real_attempt_for_its_subtask(journey):
+    store, sid, work, p = journey
+    pid, version = p["id"], p["version"]
+    root = f"{p['docs_root']}/agent/evidence/{pid}/R1"
+    real = work.prepare_attempt(sid, pid, version, "T1")
+    normal = work.prepare_attempt(sid, pid, version, "T2")
+    candidates = [("T1", root + "/T1"), ("T1", root + "/T1/fake"),
+                  ("T2", root + "/T2/" + real["attempt"]["id"]), ("T2", normal["evidence_dir"])]
+    for subtask, base in candidates:
+        proof = write_journey(store, base)
+        assert work.evidence(sid, pid, 1, subtask, proof["path"])["error_code"] == "JOURNEY_ATTEMPT_REQUIRED"
+    with pytest.raises(ScsError) as exc:
+        work.update_attempt(sid, normal["attempt"]["id"], version, "ENDED",
+                            {"status": "PASS", "evidence": [proof]})
+    assert exc.value.code == "JOURNEY_ATTEMPT_REQUIRED"
+
+
+@pytest.mark.parametrize("status", ["PASS", "FAIL"])
+def test_unbound_journey_direct_and_stored_results_are_rejected(setup, status):
+    store, _, sid, work = setup
+    p = package(work, sid)
+    pid = p["id"]
+    proof = write_journey(store, f"{p['docs_root']}/agent/evidence/{pid}/R1/T1")
+    report = {"id": "T1", "status": status, "evidence": [proof]}
+    with pytest.raises(ScsError) as exc:
+        work.update(sid, pid, p["version"], results=[report])
+    assert exc.value.code == "JOURNEY_ATTEMPT_REQUIRED"
+    # Simulate a manifest accepted by the older direct-reporting path.
+    with store.transaction(True) as con:
+        data = json.loads(work._get(con, pid)["data"])
+        data["subtasks"][0].update(status=status, evidence=[proof])
+        con.execute("UPDATE work_packages SET data=? WHERE id=?", (json.dumps(data), pid))
+    with pytest.raises(ScsError) as exc:
+        work.export(sid, pid, p["version"])
+    assert exc.value.code == "JOURNEY_ATTEMPT_REQUIRED"
+
+
+def test_legacy_journey_attempt_history_prevents_standard_results(journey):
+    store, sid, work, p = journey
+    pid = p["id"]
+    run = work.prepare_attempt(sid, pid, p["version"], "T1")
+    version = work.update_attempt(sid, run["attempt"]["id"], p["version"], "ENDED",
+                                  {"status": "FAIL"})["version"]
+    with store.transaction(True) as con:
+        data = json.loads(work._get(con, pid)["data"])
+        task = data["subtasks"][0]
+        # Simulate a legacy failure without evidence or task-level provenance.
+        task.pop("execution_profile")
+        task.pop("result_attempt_id")
+        con.execute("UPDATE work_packages SET data=? WHERE id=?", (json.dumps(data), pid))
+
+    content = b'{"kind":"build","command":"build","exit_code":0}'
+    path = f"{p['docs_root']}/agent/evidence/{pid}/R1/T1/build.json"
+    (store.root / path).write_bytes(content)
+    build = {"path": path, "sha256": hashlib.sha256(content).hexdigest()}
+    with pytest.raises(ScsError) as exc:
+        work.update(sid, pid, version, results=[{"id": "T1", "status": "PASS", "evidence": [build]}])
+    assert exc.value.code == "JOURNEY_ATTEMPT_REQUIRED"
+    with pytest.raises(ScsError) as exc:
+        work.prepare_attempts(sid, pid, version, ["T1"])
+    assert exc.value.code == "JOURNEY_SINGLE_REQUIRED"
+    with pytest.raises(ScsError) as exc:
+        work.prepare_attempt(sid, pid, version, "T1", execution_profile="standard")
+    assert exc.value.code == "INPUT_INVALID"
+
+    retry = work.prepare_attempt(sid, pid, version, "T1")
+    assert retry["input_snapshot"]["execution_profile"] == "journey"
+    build["path"] = retry["evidence_dir"] + "/build.json"
+    (store.root / build["path"]).write_bytes(content)
+    with pytest.raises(ScsError) as exc:
+        work.update_attempt(sid, retry["attempt"]["id"], version, "ENDED",
+                            {"status": "PASS", "evidence": [build]})
+    assert exc.value.code == "JOURNEY_NOT_PASSED"
+    proof = write_journey(store, retry["evidence_dir"])
+    ended = work.update_attempt(sid, retry["attempt"]["id"], version, "ENDED",
+                                {"status": "PASS", "evidence": [proof]})
+    assert work.export(sid, pid, ended["version"])["status"] == "EXPORTED"
+    revised = work.update(sid, pid, ended["version"], new_revision=True)
+    assert revised["subtasks"][0]["execution_profile"] == "journey"
+    assert revised["subtasks"][0]["status"] == "NOT_RUN"
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_damaged_history_does_not_trap_another_attempts_lease(setup, batch):
+    store, state, _, work = setup
+    sid = state.open(str(store.root), "test", "two-device-runs")["id"]
+    confirm_intake(state, sid)
+    p = work.create(sid, "Two journeys", ["src"], ["observed"], [
+        {"id": key, "kind": "test", "execution_profile": "journey", "allowed_files": ["src"],
+         "acceptance": ["observed"], "resources": [{"resource": "device:board", "mode": "write"}]}
+        for key in ("T1", "T2")
+    ], "two-journeys")
+    pid = p["id"]
+    version = work.update(sid, pid, p["version"], "IN_PROGRESS")["version"]
+    first = work.prepare_attempt(sid, pid, version, "T1")
+    proof = write_journey(store, first["evidence_dir"], ok=False)
+    version = work.update_attempt(sid, first["attempt"]["id"], version, "ENDED",
+                                  {"status": "FAIL", "evidence": [proof]})["version"]
+    second = work.prepare_attempt(sid, pid, version, "T2")
+    (store.root / first["evidence_dir"] / "screen.png").unlink()
+    aid = second["attempt"]["id"]
+    if batch:
+        ended = work.update_attempts(sid, [{"attempt_id": aid, "result": {"status": "BLOCKED"}}],
+                                     "stop-after-attachment-loss")
+    else:
+        ended = work.update_attempt(sid, aid, version, "ENDED", {"status": "BLOCKED"})
+    with pytest.raises(ScsError) as exc:
+        work.export(sid, pid, ended["version"])
+    assert exc.value.code == "EVIDENCE_CHANGED"
+    retry = work.prepare_attempt(sid, pid, ended["version"], "T1")
+    assert retry["leases"][0]["resource"] == "device:board"
+
+
+def test_stored_journey_uses_the_evidence_recorded_on_the_attempt(journey):
+    store, sid, work, p = journey
+    pid = p["id"]
+    run = work.prepare_attempt(sid, pid, p["version"], "T1")
+    proof = write_journey(store, run["evidence_dir"])
+    result = work.update_attempt(sid, run["attempt"]["id"], p["version"], "ENDED",
+                                 {"status": "PASS", "evidence": [proof]})
+    duplicate = {**proof, "path": run["evidence_dir"] + "/copy.json"}
+    (store.root / duplicate["path"]).write_bytes((store.root / proof["path"]).read_bytes())
+    assert work.evidence(sid, pid, 1, "T1", duplicate["path"])["status"] == "VERIFIED"
+    with store.transaction(True) as con:
+        data = json.loads(work._get(con, pid)["data"])
+        data["subtasks"][0]["evidence"] = [duplicate]
+        con.execute("UPDATE work_packages SET data=? WHERE id=?", (json.dumps(data), pid))
+    with pytest.raises(ScsError) as exc:
+        work.export(sid, pid, result["version"])
+    assert exc.value.code == "JOURNEY_ATTEMPT_REQUIRED"
+
+
+@pytest.mark.parametrize("case,code", [
+    ("no_assertions", "JOURNEY_OBSERVATION_MISSING"),
+    ("no_artifacts", "JOURNEY_ARTIFACT_REQUIRED"),
+    ("missing", "JOURNEY_ARTIFACT_INVALID"),
+    ("symlink", "JOURNEY_ARTIFACT_INVALID"),
+    ("escape", "EVIDENCE_KIND_INVALID"),
+])
+def test_journey_rejects_invalid_artifacts_and_assertions(journey, case, code):
+    store, sid, work, p = journey
+    run = work.prepare_attempt(sid, p["id"], p["version"], "T1")
+    proof = write_journey(store, run["evidence_dir"])
+    manifest_path = store.root / proof["path"]
+    manifest = json.loads(manifest_path.read_text())
+    if case == "no_assertions":
+        manifest["assertions"] = []
+    elif case == "no_artifacts":
+        manifest["artifacts"] = []
+    elif case == "missing":
+        manifest["artifacts"][0]["path"] = "missing.png"
+    elif case == "escape":
+        manifest["artifacts"][0]["path"] = "../screen.png"
+    else:
+        image = manifest_path.with_name("screen.png")
+        target = manifest_path.with_name("actual.png")
+        image.rename(target)
+        image.symlink_to(target.name)
+    manifest_path.write_text(json.dumps(manifest))
+    assert work.evidence(sid, p["id"], 1, "T1", proof["path"])["error_code"] == code
 
 
 def test_suspend_resume_and_block_new_attempts(setup):
@@ -202,6 +562,67 @@ def test_leases_contention_expiry_and_stale_tokens(setup):
     assert leases.release(other, "serial:board-A", b["lease_token"])["status"] == "RELEASED"
     assert leases.release(other, "serial:board-A", b["lease_token"])["status"] == "ALREADY_RELEASED"
     assert not a["external_processes_excluded"]
+
+
+@pytest.mark.parametrize("first_mode,second_mode", [
+    ("read", "read"), ("read", "write"), ("write", "read"), ("write", "write"),
+])
+def test_device_aliases_conflict_in_every_mode(setup, first_mode, second_mode):
+    store, _, sid, work = setup
+
+    def create(resource, mode, key):
+        return work.create(sid, "Device operation", ["src"], ["observed"], [
+            {"id": "T1", "kind": "test", "allowed_files": ["src"], "acceptance": ["observed"],
+             "resources": [{"resource": resource, "mode": mode}]},
+        ], key)
+
+    first = create("serial:board", first_mode, "serial")
+    second = create("programmer:board", second_mode, "programmer")
+    run = work.prepare_attempt(sid, first["id"], first["version"], "T1")
+    work.leases.acquire(sid, "serial:board", lease_token=run["leases"][0]["lease_token"])
+    with store.transaction() as con:
+        assert con.execute("SELECT mode FROM leases WHERE resource='serial:board'").fetchone()["mode"] == first_mode
+    with pytest.raises(ScsError) as exc:
+        work.prepare_attempt(sid, second["id"], second["version"], "T1")
+    assert exc.value.code == "RESOURCE_BUSY"
+    assert work.list_attempts(sid, second["id"])["attempts"] == []
+    work.prepare_attempt(sid, create("device:other", second_mode, "other")["id"], 1, "T1")
+
+
+def test_renewing_attempt_lease_keeps_exclusivity_after_ttl(setup):
+    store, state, _, work = setup
+    sid = state.open(str(store.root), "test", "journey")["id"]
+    confirm_intake(state, sid)
+    resources = [{"resource": f"{prefix}:board", "mode": "write"}
+                 for prefix in ("device", "serial", "programmer")]
+    p = journey_package(work, sid, resources)
+    clock = [10]
+    work.leases.clock = lambda: clock[0]
+    run = work.prepare_attempt(sid, p["id"], p["version"], "T1", ttl_seconds=1)
+    token = next(lease["lease_token"] for lease in run["leases"] if lease["resource"] == "device:board")
+    aid = run["attempt"]["id"]
+    clock[0] = 12
+    renewed = work.leases.acquire(sid, "device:board", 1, token)
+    assert renewed["lease_token"] == token and renewed["expires_at"] == 13
+    with store.transaction() as con:
+        row = con.execute("SELECT * FROM leases WHERE resource='device:board'").fetchone()
+        assert (row["attempt_id"], row["package_id"], row["mode"]) == (aid, p["id"], "write")
+    with pytest.raises(ScsError) as exc:
+        work.leases.release(sid, "device:board", token)
+    assert exc.value.code == "LEASE_ACTIVE_ATTEMPT"
+    clock[0] = 14
+    other = state.open(str(store.root), "test", "other-device-user", explicit_skip=True)["id"]
+    assert work.leases.acquire(other, "device:board")["status"] == "CONFLICT"
+    assert work.leases.acquire(other, "serial:board")["status"] == "CONFLICT"
+    work.update_attempt(sid, aid, p["version"], "ENDED", {"status": "BLOCKED"})
+    assert work.leases.release(sid, "device:board", token)["status"] == "ALREADY_RELEASED"
+    assert work.leases.acquire(other, "device:board")["status"] == "ACQUIRED"
+    with store.transaction() as con:
+        row = con.execute("SELECT * FROM leases WHERE resource='device:board'").fetchone()
+        assert (row["attempt_id"], row["package_id"], row["mode"]) == (None, None, "write")
+    with pytest.raises(ScsError) as exc:
+        work.leases.acquire(sid, "serial:board")
+    assert exc.value.code == "RESOURCE_BUSY"
 
 
 def test_concurrent_creation_and_same_resource_competition(setup):

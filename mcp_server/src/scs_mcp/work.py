@@ -20,11 +20,23 @@ STATES = {"PENDING": {"IN_PROGRESS", "BLOCKED", "SUSPENDED", "ABANDONED"},
           "COMPLETED": set(), "ABANDONED": set()}
 RESULTS = {"PASS", "FAIL", "BLOCKED", "NOT_RUN", "SUBSTITUTED"}
 CLOSED_STATES = {"COMPLETED", "ABANDONED"}
+
+
+def _journey_pass_invalid(check: dict, status: str, profile: str | None = None) -> bool:
+    """A PASS for a journey/device attempt must carry satisfied assertions."""
+    if status != "PASS":
+        return False
+    is_journey = check.get("kind") == "journey"
+    if profile == "journey" and not is_journey:
+        return True
+    if is_journey and (check.get("journey_passed") is not True or check.get("journey_exit_code") != 0):
+        return True
+    return False
 REVIEW_EXCLUDED = {".git", ".venv", ".venv-mcp", ".scs", ".archify"}
 REVIEW_MAX_FILES = 500
 REVIEW_MAX_BYTES = 100 * 1024 * 1024
 ZCODE_AGENTS = {"analyze": "查询侦察员", "implement": "实施工程师", "test": "测试验证员",
-                "review": FIXED_REVIEWER}
+                "journey": "设备与端到端验证员", "review": FIXED_REVIEWER}
 # Bumped whenever the subject payload shape or canonical encoding changes.
 # The field is part of the digested payload, so ACCEPTs recorded by an older
 # version fail freshness checks (REVIEW_STALE) instead of being reused under a
@@ -34,7 +46,7 @@ REVIEW_SUBJECT_VERSION = 2
 # Immutable parts of a subtask definition. Runtime fields (status, evidence,
 # review) must not participate in create idempotency comparisons.
 TASK_DEFINITION_FIELDS = ("id", "kind", "allowed_files", "acceptance",
-                          "depends_on", "resources", "required")
+                          "depends_on", "resources", "required", "execution_profile")
 ATTEMPT_STATES = {"PREPARED", "LAUNCHING", "RUNNING", "DRAINING", "ENDED", "UNKNOWN"}
 ATTEMPT_TRANSITIONS = {
     "PREPARED": {"LAUNCHING", "UNKNOWN", "ENDED"},
@@ -146,6 +158,7 @@ class Work:
         task = dict(task)
         task.setdefault("depends_on", [])
         task.setdefault("required", True)
+        task.setdefault("execution_profile", None)
         if "resources" in task:
             # Idempotent create retries compare against the immutable original
             # definition. Legacy file read leases no longer exist, so ignore
@@ -180,12 +193,17 @@ class Work:
             raise ScsError("SUBTASK_INVALID", "Declare between one and 100 bounded subtasks.")
         out = []
         for task in subtasks:
-            if set(task) - {"id", "kind", "allowed_files", "acceptance", "depends_on", "resources", "required"} or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(task.get("id", ""))):
+            if set(task) - set(TASK_DEFINITION_FIELDS) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(task.get("id", ""))):
                 raise ScsError("SUBTASK_INVALID", "Use unique simple subtask identifiers and known fields.")
             criteria = task.get("acceptance")
             if (task.get("kind") not in {"analyze", "implement", "test", "review"} or not isinstance(criteria, list)
                     or not criteria or not all(isinstance(x, str) and x.strip() for x in criteria)):
                 raise ScsError("SUBTASK_INVALID", "Every subtask needs a kind and acceptance criteria.")
+            profile = task.get("execution_profile")
+            if profile not in (None, "standard", "journey"):
+                raise ScsError("SUBTASK_INVALID", "execution_profile must be standard or journey.")
+            if profile == "journey" and task["kind"] != "test":
+                raise ScsError("SUBTASK_INVALID", "execution_profile=journey is only valid for test subtasks.")
             deps = task.get("depends_on", [])
             if (not isinstance(deps, list) or len(deps) > 100
                     or not all(isinstance(dep, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", dep) for dep in deps)
@@ -200,6 +218,7 @@ class Work:
             out.append({"id": task["id"], "kind": task["kind"], "allowed_files": scopes,
                         "acceptance": criteria, "depends_on": deps,
                         "resources": self._resources(task, scopes), "required": required,
+                        "execution_profile": profile,
                         "status": "NOT_RUN", "evidence": []})
         ids = {t["id"] for t in out}
         if len(ids) != len(out):
@@ -394,16 +413,55 @@ class Work:
                 raise ScsError("HOST_AGENT_ACTIVE", "This ZCode Agent already has an active attempt.")
 
     def _prepare_in_tx(self, con, session_id: str, row, data: dict, task: dict,
-                       host_agent_id: str | None, ttl_seconds: float, user_requested: bool = False) -> dict:
+                       host_agent_id: str | None, ttl_seconds: float, user_requested: bool = False,
+                       execution_profile: str | None = None) -> dict:
         """Create one attempt inside the caller's write transaction."""
         package_id, revision = row["id"], row["revision"]
         if row["state"] == "SUSPENDED":
             raise ScsError("PACKAGE_SUSPENDED", "Resume the work package before preparing another attempt.")
+        if execution_profile not in (None, "standard", "journey"):
+            raise ScsError("INPUT_INVALID", "execution_profile must be standard or journey.")
+        effective_profile = self._execution_profile(con, row, revision, task)
+        if effective_profile == "journey" and not (
+                task.get("execution_profile") == "journey" or task.get("result_attempt_id")
+                or self._has_journey_attempt(con, row, revision, task)):
+            raise ScsError("JOURNEY_ATTEMPT_REQUIRED",
+                           "Start a new revision to retry a legacy journey without an attempt.")
+        if execution_profile is not None and execution_profile != effective_profile:
+            raise ScsError("INPUT_INVALID", "execution_profile must match the subtask's recorded profile. "
+                           "Declare execution_profile=journey in the subtask definition first.")
+        resources, warnings = self._stored_resources(task)
+        if effective_profile == "journey":
+            intake = self.state.intake_status(con, session_id)
+            if not intake["ready"]:
+                raise ScsError("INTAKE_REQUIRED", "Confirm this conversation's intake before preparing a journey.",
+                               {"reason": intake["reason"], "source": intake["source"], "policy": intake["policy"]})
+            session = self.state._session(con, session_id)
+            validation = json.loads(session["verification"]) if session["verification"] else []
+            if "journey" not in validation:
+                raise ScsError("VALIDATION_NOT_AUTHORIZED",
+                               "Choose the journey verification scope before preparing a device attempt.")
+            resources = self.leases._normalize_set(resources)
+            devices = [item["resource"].split(":", 1)[1] for item in resources
+                       if item["resource"].startswith("device:")]
+            if len(devices) != 1:
+                raise ScsError("JOURNEY_RESOURCE_REQUIRED",
+                               "A journey attempt needs exactly one device:<id> write lease.")
+            for item in resources:
+                kind, resource_id = item["resource"].split(":", 1)
+                if kind == "file":
+                    continue
+                if item["mode"] != "write":
+                    raise ScsError("JOURNEY_RESOURCE_REQUIRED",
+                                   "Journey device/serial/programmer resources need exclusive write leases.")
+                if resource_id != devices[0]:
+                    raise ScsError("JOURNEY_RESOURCE_REQUIRED",
+                                   "Serial/programmer leases must use the same physical device id.")
         self._assert_review_window(con, row, data, task)
         if task["kind"] == "review" and self.store.native_review:
             if not user_requested:
                 raise ScsError("REVIEW_MANUAL_REQUIRED", "Only an explicit user request for this package can start review.")
-        if task["kind"] == "review" and not self.store.native_review and not user_requested:
+        if task["kind"] == "review" and self._requires_review(data) and not user_requested:
             used = con.execute(
                 "SELECT COUNT(*) FROM work_attempts WHERE package_id=? AND revision=? AND subtask_id=?",
                 (package_id, revision, task["id"])).fetchone()[0]
@@ -445,14 +503,16 @@ class Work:
         attempt_no = con.execute("SELECT COALESCE(MAX(attempt_no),0)+1 FROM work_attempts WHERE package_id=? AND revision=? AND subtask_id=?",
                                  (package_id, revision, task["id"])).fetchone()[0]
         attempt_id = identifier("A-")
-        resources, warnings = self._stored_resources(task)
         leases = self.leases.acquire_many(con, session_id, attempt_id, package_id, resources, ttl_seconds) if resources else []
         state = "LAUNCHING" if host_agent_id else "PREPARED"
         stamp = now()
         evidence_dir = f"{row['docs_root']}/agent/evidence/{package_id}/R{revision}/{task['id']}/{attempt_id}"
         input_snapshot = {"revision": revision, "subtask_id": task["id"], "dependencies": dependencies}
+        if effective_profile != "standard":
+            input_snapshot["execution_profile"] = effective_profile
         if self.store.native_review:
-            input_snapshot["agent_type"] = ZCODE_AGENTS[task["kind"]]
+            effective = "journey" if effective_profile == "journey" else task["kind"]
+            input_snapshot["agent_type"] = ZCODE_AGENTS[effective]
         review_subject = None
         if task["kind"] == "review":
             # Freeze the prepare-time subject inside the attempt: an ACCEPT
@@ -479,7 +539,8 @@ class Work:
 
     def prepare_attempt(self, session_id: str, package_id: str, expected_version: int,
                         subtask_id: str, host_agent_id: str | None = None,
-                        ttl_seconds: float = 120, *, user_requested: bool = False) -> dict:
+                        ttl_seconds: float = 120, *, user_requested: bool = False,
+                        execution_profile: str | None = None) -> dict:
         self._validate_host(host_agent_id)
         with self.store.transaction(True) as con:
             row = self._get(con, package_id)
@@ -508,7 +569,7 @@ class Work:
             if task is None:
                 raise ScsError("SUBTASK_INVALID", "Subtask does not exist in this revision.")
             prepared = self._prepare_in_tx(con, session_id, row, data, task, host_agent_id, ttl_seconds,
-                                           user_requested=user_requested)
+                                           user_requested=user_requested, execution_profile=execution_profile)
             if added:
                 con.execute("UPDATE work_packages SET data=?, version=version+1 WHERE id=?",
                             (encode(data), package_id))
@@ -547,6 +608,8 @@ class Work:
                     raise ScsError("SUBTASK_INVALID", "Subtask does not exist in this revision.",
                                    {"subtask_id": subtask_id})
                 selected.append(task)
+            if any(self._execution_profile(con, row, row["revision"], task) == "journey" for task in selected):
+                raise ScsError("JOURNEY_SINGLE_REQUIRED", "Prepare journey subtasks individually with work_attempt_prepare.")
             if len(selected) > 1 and any(task["kind"] == "review" for task in selected):
                 raise ScsError("REVIEW_WINDOW_ACTIVE",
                                "Prepare a review attempt alone; it requires the package to be quiescent.")
@@ -642,12 +705,27 @@ class Work:
             if native and manifests:
                 task["review"].update(agent_type=FIXED_REVIEWER, agent_id=host)
         else:
+            profile = json.loads(attempt["input_snapshot"]).get("execution_profile")
+            if profile != "journey" and self._execution_profile(con, row, row["revision"], task) == "journey":
+                # A standard attempt prepared before the upgrade may need to
+                # release its leases without replacing the stored journey result.
+                if status in {"BLOCKED", "NOT_RUN"} and not evidence:
+                    return {"status": status, "evidence": [], "note": result.get("note")}
+                raise ScsError("JOURNEY_ATTEMPT_REQUIRED", "End a prepared journey attempt for this subtask.")
             for entry in evidence:
                 if not isinstance(entry, dict) or set(entry) - {"path", "sha256", "required_content"} or not isinstance(entry.get("path"), str):
                     raise ScsError("EVIDENCE_INVALID", "Supply evidence path, sha256 and optional required_content.")
-                check = verify_file(self.store, entry["path"], prefix, task["kind"], entry.get("required_content"))
+                check = self._verify_task_evidence(con, row, row["revision"], task, entry["path"],
+                                                   entry.get("required_content"), attempt["id"])
+                if check.get("error_code") == "JOURNEY_ATTEMPT_REQUIRED":
+                    raise ScsError("JOURNEY_ATTEMPT_REQUIRED", "Journey evidence must belong to this journey attempt.")
                 if check["status"] != "VERIFIED" or entry.get("sha256") != check["sha256"]:
                     raise ScsError("EVIDENCE_INVALID", "Attempt evidence is invalid, insufficient or changed.")
+                if _journey_pass_invalid(check, status, profile):
+                    raise ScsError("JOURNEY_NOT_PASSED",
+                                   "A journey PASS needs journey evidence with satisfied assertions and exit_code 0.")
+            if profile == "journey":
+                task["result_attempt_id"] = attempt["id"]
         task.update(status=status, evidence=evidence)
         data["updated_at"] = now()
         return {"status": status, "evidence": evidence, "note": result.get("note")}
@@ -697,17 +775,19 @@ class Work:
                 if attempt["revision"] != row["revision"]:
                     raise ScsError("REVISION_CONFLICT", "This attempt belongs to another revision.")
                 result_data = self._apply_result(con, row, data, attempt, result, host)
-                self._verify_reports(data, row, row["revision"])
-                con.execute("UPDATE work_packages SET version=version+1,data=? WHERE id=? AND version=?",
-                            (encode(data), row["id"], expected_version))
-                self.store.revision_snapshot(con, self._get(con, row["id"]))
-                self.leases.release_attempt(con, attempt_id, session_id)
             stamp = now()
             con.execute("UPDATE work_attempts SET state=?,host_agent_id=?,result_state=?,result_data=?,updated_at=?,last_observed_at=? WHERE id=?",
                         (target, host,
                          result_data["status"] if result_data else attempt["result_state"],
                          encode(result_data) if result_data else attempt["result_data"],
                          stamp, stamp, attempt_id))
+            if target == "ENDED":
+                # _apply_result verifies this attempt's evidence. Historical
+                # reports are rechecked at acceptance and handoff, not release.
+                con.execute("UPDATE work_packages SET version=version+1,data=? WHERE id=? AND version=?",
+                            (encode(data), row["id"], expected_version))
+                self.store.revision_snapshot(con, self._get(con, row["id"]))
+                self.leases.release_attempt(con, attempt_id, session_id)
             self.store.event(con, session_id, None, "work_attempt_update",
                              "ATTEMPT_ENDED" if target == "ENDED" else "ATTEMPT_" + target)
             updated = self._get_attempt(con, attempt_id)
@@ -767,20 +847,14 @@ class Work:
             if sum(kind == "review" for kind in kinds) > 1 or (any(kind == "review" for kind in kinds) and len(attempts) > 1):
                 raise ScsError("REVIEW_WINDOW_ACTIVE", "End a review attempt alone; do not mix it with other results.")
             expected_version = row["version"]
-            for attempt in attempts:
-                self._apply_result(con, row, data, attempt, next(
-                    item["result"] for item in updates if item["attempt_id"] == attempt["id"]))
-            self._verify_reports(data, row, row["revision"])
-            con.execute("UPDATE work_packages SET version=version+1,data=? WHERE id=? AND version=?",
-                        (encode(data), row["id"], expected_version))
             stamp = now()
-            for attempt in attempts:
-                result = next(item["result"] for item in updates if item["attempt_id"] == attempt["id"])
-                result_data = {"status": result["status"], "evidence": result.get("evidence", []),
-                               "note": result.get("note")}
+            for attempt, item in zip(attempts, updates):
+                result_data = self._apply_result(con, row, data, attempt, item["result"])
                 con.execute("UPDATE work_attempts SET state='ENDED',result_state=?,result_data=?,updated_at=?,last_observed_at=? WHERE id=?",
                             (result_data["status"], encode(result_data), stamp, stamp, attempt["id"]))
                 self.leases.release_attempt(con, attempt["id"], session_id)
+            con.execute("UPDATE work_packages SET version=version+1,data=? WHERE id=? AND version=?",
+                        (encode(data), row["id"], expected_version))
             package = self._get(con, row["id"])
             self.store.revision_snapshot(con, package)
             self.store.event(con, session_id, None, "work_attempt_update_many", "ATTEMPTS_ENDED")
@@ -997,6 +1071,58 @@ class Work:
                 "limits": {"packages": package_cap, "attempts": attempt_cap,
                            "notes_per_attempt": 3}}
 
+    @staticmethod
+    def _has_journey_attempt(con, row, revision: int, task: dict) -> bool:
+        # Older revisions recorded the profile only on the attempt. Check the
+        # entire revision history, not just the latest attempt or task result.
+        return con.execute(
+            "SELECT 1 FROM work_attempts WHERE package_id=? AND revision=? AND subtask_id=? "
+            "AND json_extract(input_snapshot, '$.execution_profile')='journey' LIMIT 1",
+            (row["id"], revision, task["id"])).fetchone() is not None
+
+    def _execution_profile(self, con, row, revision: int, task: dict) -> str:
+        if task["kind"] != "test":
+            return task.get("execution_profile") or "standard"
+        if (task.get("execution_profile") == "journey" or task.get("result_attempt_id")
+                or self._has_journey_attempt(con, row, revision, task)):
+            return "journey"
+        # A pre-attempt journey could also be registered directly. Do not let
+        # a replacement report erase that identity; require a new revision.
+        for entry in task.get("evidence", []):
+            check = self._verify_task_evidence(con, row, revision, task, entry["path"])
+            if check.get("kind") == "journey":
+                return "journey"
+        return task.get("execution_profile") or "standard"
+
+    @staticmethod
+    def _journey_attempt(con, package_id: str, revision: int, subtask_id: str, attempt_id: str | None):
+        if attempt_id is None:
+            return None
+        attempt = con.execute(
+            "SELECT * FROM work_attempts WHERE id=? AND package_id=? AND revision=? AND subtask_id=?",
+            (attempt_id, package_id, revision, subtask_id)).fetchone()
+        if attempt and json.loads(attempt["input_snapshot"]).get("execution_profile") == "journey":
+            return attempt
+        return None
+
+    def _verify_task_evidence(self, con, row, revision: int, task: dict, path: str,
+                              required_content: list[str] | None = None, attempt_id: str | None = None) -> dict:
+        prefix = f"{row['docs_root']}/agent/evidence/{row['id']}/R{revision}/{task['id']}"
+
+        def journey_scope(clean: str) -> str | None:
+            parsed_id, slash, _ = clean[len(prefix) + 1:].partition("/")
+            if slash and self._journey_attempt(con, row["id"], revision, task["id"], parsed_id):
+                return f"{prefix}/{parsed_id}"
+            return None
+
+        scope = f"{prefix}/{attempt_id}" if attempt_id else prefix
+        check = verify_file(self.store, path, scope, task["kind"], required_content, journey_scope=journey_scope)
+        if (check.get("error_code") == "EVIDENCE_SCOPE"
+                and (task.get("execution_profile") == "journey" or task.get("result_attempt_id"))):
+            return {"status": "INVALID", "error_code": "JOURNEY_ATTEMPT_REQUIRED",
+                    "message": "Journey evidence must stay inside the matching attempt."}
+        return check
+
     def evidence(self, session_id: str, package_id: str, revision: int, subtask_id: str,
                  path: str, required_content: list[str] | None = None) -> dict:
         with self.store.transaction() as con:
@@ -1029,7 +1155,8 @@ class Work:
                                        host_agent_id=attempt["host_agent_id"])
                 if self.store.native_review or data.get("native_review_required") or snapshot.get("agent_type"):
                     return {"status": "INVALID", "error_code": "REVIEW_ATTEMPT_REQUIRED"}
-            return verify_file(self.store, path, prefix, task["kind"], required_content)
+                return verify_file(self.store, path, prefix, "review", required_content)
+            return self._verify_task_evidence(con, row, revision, task, path, required_content)
 
     def _review_subject(self, row, data: dict) -> str:
         """Digest of the reviewed definition, non-review reports and file snapshot.
@@ -1227,7 +1354,8 @@ class Work:
             "allowed_files": data["allowed_files"],
             "acceptance": data["acceptance"],
             "subtasks": [
-                {key: task.get(key) for key in TASK_DEFINITION_FIELDS}
+                {key: task.get(key) for key in TASK_DEFINITION_FIELDS
+                 if key != "execution_profile" or task.get(key) is not None}
                 for task in sorted(data["subtasks"], key=lambda item: item["id"])
                 if task["kind"] != "review"],
         }
@@ -1296,36 +1424,81 @@ class Work:
                                "Files, definition or non-review results changed after the review; "
                                "run a new review attempt.")
 
-    def _verify_reports(self, data: dict, row, revision: int):
+    def _verify_task_report(self, con, row, revision: int, task: dict, *,
+                            require_journey_pass: bool, journey_only: bool) -> None:
+        status, evidence = task["status"], task["evidence"]
+        attempt_id = task.get("result_attempt_id")
+        journey = self._execution_profile(con, row, revision, task) == "journey"
+        verify_pass = status == "PASS" and not journey_only
+        if not journey and not verify_pass and task["kind"] != "test":
+            return
+        if status == "PASS" and not evidence and (journey or verify_pass):
+            raise ScsError("EVIDENCE_REQUIRED", "A stored report has no evidence.")
+
+        for entry in evidence:
+            result = self._verify_task_evidence(con, row, revision, task, entry["path"],
+                                                entry.get("required_content"), attempt_id)
+            if result.get("error_code") == "JOURNEY_ATTEMPT_REQUIRED":
+                raise ScsError("JOURNEY_ATTEMPT_REQUIRED", "Stored journey evidence needs a matching journey attempt.")
+            if result.get("kind") == "journey":
+                attempt_id = attempt_id or result.get("journey_attempt_id")
+                journey = True
+            if not journey and not verify_pass:
+                continue
+            if result["status"] != "VERIFIED" or result["sha256"] != entry["sha256"]:
+                raise ScsError("EVIDENCE_CHANGED", "Stored evidence changed; revise its report before continuing.")
+            if _journey_pass_invalid(result, status, "journey" if journey else None):
+                raise ScsError("JOURNEY_NOT_PASSED", "A journey PASS needs satisfied assertions and exit_code 0.")
+
+        if journey and (status != "NOT_RUN" or evidence or attempt_id):
+            attempt = self._journey_attempt(con, row["id"], revision, task["id"], attempt_id)
+            recorded = json.loads(attempt["result_data"]) if attempt and attempt["result_data"] else {}
+            if (not attempt or attempt["state"] != "ENDED" or attempt["result_state"] != status
+                    or recorded.get("status") != status or recorded.get("evidence") != evidence):
+                raise ScsError("JOURNEY_ATTEMPT_REQUIRED", "Stored journey results need the evidence from their ended attempt.")
+        if journey and require_journey_pass and task.get("required", True) and status != "PASS":
+            raise ScsError("JOURNEY_NOT_PASSED", "A required journey needs a PASS from an ended journey attempt.",
+                           {"subtask_id": task["id"]})
+
+    def _verify_reports(self, data: dict, row, revision: int, *, con=None,
+                        require_journey_pass: bool = False, journey_only: bool = False) -> None:
+        if con is None:
+            # Read-only projections do not own the transaction that records attempts.
+            with self.store.transaction() as read_con:
+                return self._verify_reports(data, row, revision, con=read_con,
+                                            require_journey_pass=require_journey_pass, journey_only=journey_only)
         for task in data["subtasks"]:
-            if self.store.native_review and task["kind"] == "review":
-                continue  # The receipt is verified at recording, not as an acceptance prerequisite.
-            review = (task.get("review") or {}) if task["kind"] == "review" else {}
+            if task["kind"] != "review":
+                self._verify_task_report(con, row, revision, task, require_journey_pass=require_journey_pass,
+                                         journey_only=journey_only)
+                continue
+            if journey_only or self.store.native_review:
+                continue  # Native package receipts are verified when recorded.
+            review = task.get("review") or {}
             native = review.get("agent_type") is not None
             if task["status"] != "PASS" and not (native and task["status"] == "FAIL"):
                 continue
             if not task["evidence"]:
                 raise ScsError("EVIDENCE_REQUIRED", "A stored report has no evidence.")
             verdict = "ACCEPT" if task["status"] == "PASS" else "REJECT"
-            if task["kind"] == "review" and (len(task["evidence"]) != 1 or review.get("verdict") != verdict):
+            if len(task["evidence"]) != 1 or review.get("verdict") != verdict:
                 raise ScsError("REVIEW_INVALID", "A stored review needs exactly one matching manifest.")
             prefix = f"{row['docs_root']}/agent/evidence/{row['id']}/R{revision}/{task['id']}"
             if native:
                 if not review.get("attempt_id") or not review.get("agent_id") or not review.get("subject_sha256"):
                     raise ScsError("REVIEW_INVALID", "A native verdict must reference its attempt, subject and host agent.")
                 prefix += "/" + review["attempt_id"]
-            for entry in task["evidence"]:
-                result = verify_file(self.store, entry["path"], prefix, task["kind"], entry.get("required_content"),
-                                     native_review=native, host_agent_id=review.get("agent_id"))
-                if result["status"] != "VERIFIED" or result["sha256"] != entry["sha256"]:
-                    raise ScsError("EVIDENCE_CHANGED", "Stored evidence changed; revise its report before continuing.")
-                if task["kind"] == "review":
-                    manifest = result["review"]
-                    if manifest["verdict"] != verdict:
-                        raise ScsError("REVIEW_INVALID", "The stored verdict does not match its manifest.")
-                    key = "review_subject" if native else "subject_sha256"
-                    if manifest[key] != review.get("subject_sha256"):
-                        raise ScsError("REVIEW_STALE", "The stored review manifest no longer matches its subject.")
+            entry = task["evidence"][0]
+            check = verify_file(self.store, entry["path"], prefix, "review", entry.get("required_content"),
+                                native_review=native, host_agent_id=review.get("agent_id"))
+            if check["status"] != "VERIFIED" or check["sha256"] != entry["sha256"]:
+                raise ScsError("EVIDENCE_CHANGED", "Stored evidence changed; revise its report before continuing.")
+            manifest = check["review"]
+            if manifest["verdict"] != verdict:
+                raise ScsError("REVIEW_INVALID", "The stored verdict does not match its manifest.")
+            key = "review_subject" if native else "subject_sha256"
+            if manifest[key] != review.get("subject_sha256"):
+                raise ScsError("REVIEW_STALE", "The stored review manifest no longer matches its subject.")
 
     def update(self, session_id: str, package_id: str, expected_version: int,
                state: str | None = None, results: list[dict] | None = None,
@@ -1416,9 +1589,12 @@ class Work:
                     if self.store.native_review:
                         data["subtasks"] = [task for task in data["subtasks"] if not task.get("manual_review_slot")]
                     for task in data["subtasks"]:
+                        if self._execution_profile(con, row, revision, task) == "journey":
+                            task["execution_profile"] = "journey"
                         # A new revision must not inherit the previous review
                         # verdict/subject: exports and run_map see one revision.
                         task.pop("review", None)
+                        task.pop("result_attempt_id", None)
                         task.update(status="NOT_RUN", evidence=[])
                 # The package-level review policy freezes with the package; old
                 # packages without the field are treated as false.
@@ -1430,11 +1606,17 @@ class Work:
             elif target != row["state"] and target not in STATES.get(row["state"], set()):
                 raise ScsError("STATE_INVALID", "Invalid work package transition; final acceptance belongs to the main conversation.")
             if not new_revision:
-                if target in {"REVIEW_READY", "COMPLETED", "ABANDONED", "BLOCKED", "SUSPENDED"}:
-                    self._assert_quiescent(con, package_id, revision, "moving to " + target)
                 if results:
+                    reported_ids = {result.get("id") for result in results}
+                    journey_ids = {task["id"] for task in data["subtasks"]
+                                   if task["id"] in reported_ids
+                                   and self._execution_profile(con, row, revision, task) == "journey"}
+                    if any(result.get("id") in journey_ids for result in results):
+                        raise ScsError("JOURNEY_ATTEMPT_REQUIRED", "End a prepared journey attempt to record this result.")
                     self._assert_quiescent(con, package_id, revision,
                                            "reporting results directly; end the active attempt instead")
+                elif target in {"REVIEW_READY", "COMPLETED", "ABANDONED", "BLOCKED", "SUSPENDED"}:
+                    self._assert_quiescent(con, package_id, revision, "moving to " + target)
             seen = set()
             for result in results or []:
                 if set(result) - {"id", "status", "evidence"} or result.get("id") in seen:
@@ -1456,8 +1638,10 @@ class Work:
                 for entry in evidence:
                     if not isinstance(entry, dict) or set(entry) - {"path", "sha256", "required_content"} or not isinstance(entry.get("path"), str):
                         raise ScsError("EVIDENCE_INVALID", "Supply evidence path, sha256 and optional required_content.")
-                    check = verify_file(self.store, entry["path"],
-                        f"{row['docs_root']}/agent/evidence/{package_id}/R{revision}/{task['id']}", task["kind"], entry.get("required_content"))
+                    check = self._verify_task_evidence(con, row, revision, task, entry["path"],
+                                                       entry.get("required_content"))
+                    if check.get("kind") == "journey":
+                        raise ScsError("JOURNEY_ATTEMPT_REQUIRED", "End a prepared journey attempt to record journey evidence.")
                     if check["status"] != "VERIFIED" or entry.get("sha256") != check["sha256"]:
                         raise ScsError("EVIDENCE_INVALID", "Evidence is invalid, insufficient or changed since verification.")
                 task.update(status=result["status"], evidence=evidence)
@@ -1465,7 +1649,8 @@ class Work:
                     t["status"] in {"FAIL", "BLOCKED"}
                     for t in data["subtasks"] if not (self.store.native_review and t["kind"] == "review")):
                 raise ScsError("RESULT_BLOCKED", "Resolve failed/blocked subtasks before reporting review readiness or completion.")
-            self._verify_reports(data, row, revision)
+            self._verify_reports(data, row, revision, con=con,
+                                 require_journey_pass=target in {"REVIEW_READY", "COMPLETED"})
             if target in {"REVIEW_READY", "COMPLETED"} and self._requires_review(data):
                 self._review_gate(data, row, revision)
             if target in {"REVIEW_READY", "COMPLETED"}:
@@ -1509,8 +1694,8 @@ class Work:
 
         Normal ``update`` keeps the state machine, evidence and active-attempt
         checks. This path is only for the local manager when a package has no
-        owning conversation left; it records the operator reason, ends active
-        attempts and writes an audit event.
+        owning conversation left. COMPLETED still verifies journeys. Force
+        close records the operator reason, ends active attempts and audits it.
         """
         if state not in CLOSED_STATES:
             raise ScsError("INPUT_INVALID", "Force close state must be COMPLETED or ABANDONED.")
@@ -1525,6 +1710,8 @@ class Work:
                 raise ScsError("VERSION_CONFLICT", "Refresh before force closing.")
             at = now()
             data = json.loads(row["data"])
+            if state == "COMPLETED":
+                self._verify_reports(data, row, row["revision"], con=con, require_journey_pass=True, journey_only=True)
             data["updated_at"] = at
             data["closed_at"] = at
             data["close_reason"] = reason
@@ -1550,7 +1737,7 @@ class Work:
                 raise ScsError("VERSION_CONFLICT", "Refresh before exporting the handoff.")
             self._assert_quiescent(con, package_id, row["revision"], "exporting a handoff")
             data = json.loads(row["data"])
-            self._verify_reports(data, row, row["revision"])
+            self._verify_reports(data, row, row["revision"], con=con, require_journey_pass=row["state"] != "SUSPENDED")
             self._assert_review_current(data, row, row["revision"])
             snapshot = self._snapshot(row)
             snapshot["suspended"] = row["state"] == "SUSPENDED"
@@ -1573,7 +1760,9 @@ class Work:
             snapshot = json.loads(handoff["snapshot"])
             if row["version"] != snapshot["version"]:
                 raise ScsError("HANDOFF_STALE", "Package changed after export; review and export a fresh handoff.")
-            self._verify_reports(json.loads(row["data"]), row, row["revision"])
+            self._assert_quiescent(con, row["id"], row["revision"], "resuming a handoff")
+            self._verify_reports(json.loads(row["data"]), row, row["revision"], con=con,
+                                 require_journey_pass=row["state"] != "SUSPENDED")
             con.execute("INSERT OR IGNORE INTO resumes VALUES(?,?)", (handoff_id, session_id))
             self.store.event(con, session_id, None, "handoff_resume", "HANDOFF_RESUMED")
             return {"status": "RESUMED", "package_id": row["id"], "version": row["version"],

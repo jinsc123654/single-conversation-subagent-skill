@@ -9,7 +9,7 @@ from .errors import ScsError
 from .storage import Store, encode, now
 
 MODES = ("quick", "standard", "long", "investigate")
-VERIFICATION = ("smoke", "targeted", "full", "stability", "none", "method-only")
+VERIFICATION = ("smoke", "targeted", "full", "stability", "journey", "none", "method-only")
 KINDS = ("mode", "verification", "codex_gate", "codex_review")
 PENDING = ("REQUESTED", "WAITING_USER", "UNSUPPORTED", "FAILED")
 TERMINAL = ("CONFIRMED", "DECLINED", "CANCELLED", "TIMED_OUT")
@@ -25,6 +25,7 @@ DESCRIPTIONS = {
         "targeted": "收尾定向回归",
         "full": "收尾全量回归",
         "stability": "收尾稳定性（长时）",
+        "journey": "设备/端到端旅程（ADB、串口、烧录或浏览器）",
         "none": "不做测试，结果标 NOT_RUN",
         "method-only": "不执行测试，只记录命令/环境/预期，标 NOT_RUN",
     },
@@ -43,7 +44,7 @@ OPTIONS = {
              for v, label in zip(MODES, ("快速处理", "标准执行", "长任务", "只调查"))],
     "verification": [{"value": v, "label": label, "desc": DESCRIPTIONS["verification"][v]}
                      for v, label in zip(VERIFICATION,
-        ("本轮冒烟", "收尾定向回归", "收尾全量回归", "收尾稳定性", "不做测试", "不做测试，记录方法"))],
+        ("本轮冒烟", "收尾定向回归", "收尾全量回归", "收尾稳定性", "设备/端到端旅程", "不做测试", "不做测试，记录方法"))],
     "codex_gate": [{"value": v, "label": label, "desc": DESCRIPTIONS["codex_gate"][v]}
                    for v, label in (("none", "不做 Codex 复核"), ("closure", "仅收尾审查"),
                                     ("packages", "包级复核 + 收尾审查"))],

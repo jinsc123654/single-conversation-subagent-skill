@@ -27,6 +27,27 @@ def receipt(key, digest, final, *, agent_type="固定审阅员", agent_id="revie
             "model": "unobserved", "status": "completed", "verdict": verdict, "final_message": final}
 
 
+def test_journey_execution_profile_routes_to_device_agent(zcode, tmp_path):
+    state = zcode.state
+    _, _, session = zcode.roots.open(str(tmp_path), "zcode", "journey", "registered", False)
+    sid = session["id"]
+    for kind, answer in (("mode", "long"), ("verification", "journey"), ("codex_gate", "closure")):
+        question = state.request(sid, kind, [answer], "native")
+        assert state.submit(sid, question["id"], "accept", [answer], "native")["status"] == "CONFIRMED"
+    (tmp_path / "device.py").write_text("VALUE = 1\n")
+    work = zcode.roots.work(sid)
+    package = work.create(
+        sid, "Device journey", ["device.py"], ["Observed"],
+        [{"id": "J1", "kind": "test", "execution_profile": "journey", "allowed_files": ["device.py"], "acceptance": ["Observed"],
+          "resources": [{"resource": "device:test-phone", "mode": "write"}]}],
+        "journey")
+    version = work.update(sid, package["id"], package["version"], "IN_PROGRESS")["version"]
+    attempt = work.prepare_attempt(sid, package["id"], version, "J1", execution_profile="journey")
+    assert attempt["agent_type"] == "设备与端到端验证员"
+    assert attempt["input_snapshot"]["execution_profile"] == "journey"
+    assert any(lease["resource"] == "device:test-phone" for lease in attempt["leases"])
+
+
 def test_parallel_attempts_and_fixed_reviewer_proof(zcode, tmp_path):
     state = zcode.state
     _, _, session = zcode.roots.open(str(tmp_path), "zcode", "parallel", "registered", False)

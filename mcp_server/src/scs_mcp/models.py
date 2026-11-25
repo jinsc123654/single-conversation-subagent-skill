@@ -22,6 +22,7 @@ class SubtaskDefinition(BaseModel):
     depends_on: list[Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")]] = Field(default_factory=list, max_length=100)
     resources: list[ResourceSpec] = Field(default_factory=list, max_length=100)
     required: bool = True
+    execution_profile: Literal["standard", "journey"] | None = None
 
 
 class WorkPackageDefinition(BaseModel):

@@ -4,6 +4,7 @@ import hashlib
 import json
 import posixpath
 import re
+from collections.abc import Callable
 from pathlib import PurePosixPath
 
 from .errors import ScsError
@@ -194,10 +195,39 @@ def _valid_artifacts(value) -> bool:
                and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) for item in value)
 
 
+def _journey_assertions(manifest: dict):
+    raw = manifest.get("assertions")
+    if raw is None and isinstance(manifest.get("journey"), dict):
+        raw = manifest["journey"].get("assertions")
+    if not isinstance(raw, list) or not raw:
+        return None
+    for item in raw:
+        if (not isinstance(item, dict) or not set(item).issubset({"name", "ok", "observed"})
+                or not isinstance(item.get("name"), str) or not item["name"].strip()
+                or type(item.get("ok")) is not bool):
+            return None
+    return raw
+
+
+def _verify_artifacts(store: Store, prefix: str, artifacts: list) -> bool:
+    for item in artifacts:
+        relative = posixpath.normpath(posixpath.join(prefix, item["path"]))
+        if not relative.startswith(prefix + "/"):
+            return False
+        try:
+            data = store.paths.read(relative)
+        except ScsError:
+            return False
+        if hashlib.sha256(data).hexdigest() != item["sha256"]:
+            return False
+    return True
+
+
 def verify_file(store: Store, path: str, prefix: str, kind: str,
                 required_content: list[str] | None = None,
                 subject_sha256: str | None = None, *, native_review: bool = False,
-                host_agent_id: str | None = None) -> dict:
+                host_agent_id: str | None = None,
+                journey_scope: Callable[[str], str | None] | None = None) -> dict:
     try:
         clean = store.paths.validate(path)
         if not clean.startswith(prefix + "/"):
@@ -226,37 +256,69 @@ def verify_file(store: Store, path: str, prefix: str, kind: str,
         if checked["status"] != "VERIFIED":
             return checked
         return {"status": "VERIFIED", **base, "review": checked["review"]}
-    if required_content and any(fragment not in text for fragment in required_content):
-        return {"status": "INSUFFICIENT", "error_code": "REQUIRED_CONTENT_MISSING"}
-    if kind == "test":
+    missing_content = required_content and any(fragment not in text for fragment in required_content)
+    manifest = None
+    if kind == "test" or text.lstrip().startswith("{"):
         try:
             manifest = json.loads(text)
-        except (ValueError, TypeError):
-            return {"status": "INSUFFICIENT", "error_code": "TEST_MANIFEST_REQUIRED"}
+        except (ValueError, RecursionError):
+            if kind == "test" and not missing_content:
+                return {"status": "INSUFFICIENT", "error_code": "TEST_MANIFEST_REQUIRED"}
+    journey = isinstance(manifest, dict) and manifest.get("kind") == "journey"
+
+    def invalid(code: str, status: str = "INVALID") -> dict:
+        result = {"status": status, "error_code": code}
+        if journey:
+            result["kind"] = "journey"
+        return result
+
+    if journey:
+        prefix = journey_scope(clean) if kind == "test" and journey_scope else None
+        if prefix is None:
+            return invalid("JOURNEY_ATTEMPT_REQUIRED")
+        base["journey_attempt_id"] = prefix.rsplit("/", 1)[1]
+    if missing_content:
+        return invalid("REQUIRED_CONTENT_MISSING", "INSUFFICIENT")
+    if kind == "test":
         if not isinstance(manifest, dict):
             return {"status": "INVALID", "error_code": "TEST_MANIFEST_INVALID"}
         declared = manifest.get("kind", "test")
-        if declared not in ("test", "build", "lint", "smoke"):
+        if declared not in ("test", "build", "lint", "smoke", "journey"):
             return {"status": "INVALID", "error_code": "EVIDENCE_KIND_INVALID"}
-        if type(manifest.get("exit_code")) is not int or manifest["exit_code"] != 0:
+        if type(manifest.get("exit_code")) is not int:
+            return invalid("TEST_EXIT_NONZERO_OR_UNKNOWN")
+        if declared != "journey" and manifest["exit_code"] != 0:
             return {"status": "INVALID", "error_code": "TEST_EXIT_NONZERO_OR_UNKNOWN"}
         if not isinstance(manifest.get("command"), str) or not manifest["command"].strip():
-            return {"status": "INSUFFICIENT", "error_code": "TEST_RESULT_MISSING"}
+            return invalid("TEST_RESULT_MISSING", "INSUFFICIENT")
         if declared == "test" and (type(manifest.get("passed")) is not int or manifest["passed"] <= 0):
             return {"status": "INSUFFICIENT", "error_code": "TEST_RESULT_MISSING"}
         if declared == "smoke":
             observation = manifest.get("observations") or manifest.get("journey")
             if not observation:
                 return {"status": "INSUFFICIENT", "error_code": "SMOKE_OBSERVATION_MISSING"}
-        source = manifest.get("source_sha256")
-        if source is not None and not _valid_source(source):
-            return {"status": "INVALID", "error_code": "EVIDENCE_KIND_INVALID"}
-        log_path = manifest.get("log_path")
-        if log_path is not None and not _safe_relative(log_path):
-            return {"status": "INVALID", "error_code": "EVIDENCE_KIND_INVALID"}
         artifacts = manifest.get("artifacts")
         if artifacts is not None and not _valid_artifacts(artifacts):
-            return {"status": "INVALID", "error_code": "EVIDENCE_KIND_INVALID"}
+            return invalid("EVIDENCE_KIND_INVALID")
+        if declared == "journey":
+            if manifest.get("channel") not in ("adb", "serial", "browser"):
+                return invalid("EVIDENCE_KIND_INVALID")
+            assertions = _journey_assertions(manifest)
+            if assertions is None:
+                return invalid("JOURNEY_OBSERVATION_MISSING", "INSUFFICIENT")
+            if not artifacts:
+                return invalid("JOURNEY_ARTIFACT_REQUIRED", "INSUFFICIENT")
+            if not _verify_artifacts(store, prefix, artifacts):
+                return invalid("JOURNEY_ARTIFACT_INVALID")
+            base["journey_passed"] = all(item.get("ok") is True for item in assertions)
+            base["journey_exit_code"] = manifest["exit_code"]
+            base["journey_assertions"] = assertions
+        source = manifest.get("source_sha256")
+        if source is not None and not _valid_source(source):
+            return invalid("EVIDENCE_KIND_INVALID")
+        log_path = manifest.get("log_path")
+        if log_path is not None and not _safe_relative(log_path):
+            return invalid("EVIDENCE_KIND_INVALID")
         base["kind"] = declared
         base["provenance"] = {
             "source_sha256": source, "log_path": log_path, "artifacts": artifacts}
