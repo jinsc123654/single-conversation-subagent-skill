@@ -69,7 +69,7 @@ export function probe(db, parent, agent, catalogSession, reserve) {
 
   const projected = used + reserve;
   const percent = (tokens) => Number((100 * tokens / window).toFixed(2));
-  return { decision: 10 * projected > 7 * window ? 'ROTATE' : 'REUSE', ...details,
+  return { decision: 10 * projected >= 7 * window ? 'ROTATE' : 'REUSE', ...details,
     context_window: window, used_percent: percent(used), reserve_tokens: reserve,
     projected_percent: percent(projected) };
 }
