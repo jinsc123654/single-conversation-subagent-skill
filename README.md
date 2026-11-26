@@ -11,7 +11,11 @@ AGENT_HOME="$HOME/.zcode" bash install.sh --host zcode --mode hybrid \
   --with-default-rule --project-root "$HOME"
 ```
 
-ZCode 示例在 `~/.zcode/mcp/single-conversation-subagent/zcode-example.json`；合并单个 MCP 条目。要补装缺少的角色，加 `--with-zcode-agents`，并用 `--zcode-gpt-model`、`--zcode-deepseek-model` 指定自己已配置的 `provider/model`。现有角色配置优先。安装器有 `--zcode-agents-dir` 和可选 `--zcode-gpt-thought-level`、`--zcode-deepseek-thought-level`。七个角色模板保存在 `zcode-agents/`。角色协议、固定审阅员回执和旧证据兼容方式见 [MCP 用法](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
+ZCode 示例在 `~/.zcode/mcp/single-conversation-subagent/zcode-example.json`；合并单个 MCP 条目。要补装缺少的角色，加 `--with-zcode-agents`，并用 `--zcode-gpt-model`、`--zcode-deepseek-model` 指定自己已配置的 `provider/model`。查询侦察员、测试验证员和设备与端到端验证员共用 `--zcode-deepseek-model` 和可选的 `--zcode-deepseek-thought-level`；未指定 DeepSeek 模型时不补装这三个角色。现有角色配置不会被覆盖。安装器也支持 `--zcode-agents-dir` 和可选的 `--zcode-gpt-thought-level`。七个角色模板保存在 `zcode-agents/`。角色协议、固定审阅员回执和旧证据兼容方式见 [MCP 用法](single-conversation-subagent/references/mcp.md#zcode-固定审阅员回执)。
+
+在 **设置 → 子智能体 → 已安装** 编辑本机档案。设置表单只接受英文、数字和连字符，因此 SCS 使用 [固定英文 ID](single-conversation-subagent/references/roles.md#zcode-注册身份)，界面描述仍用中文。可调整模型、推理档位和提示词；保留角色 ID，工具集仍须满足权限矩阵。
+
+从旧版升级时，先备份旧档案，按角色映射同时改文件名和 frontmatter 的 `name:`，保留模型、工具和提示词；不要并存两套档案。安装器发现中文旧档案会提示迁移，不自动覆盖或复制。如用过 `--zcode-agents-dir`，请在对应目录迁移。同步 Skill 和 MCP 代码后重开 ZCode 并开新对话核对角色注册；已运行的 Agent 不会改名。
 
 ## ZCode 工作流程
 
@@ -59,9 +63,10 @@ flowchart TD
 
 | 子任务 | 注册 Agent | 并行条件 |
 | --- | --- | --- |
-| `analyze` | `查询侦察员` | 各自调查独立问题，保持只读 |
-| `implement` | `实施工程师` | `allowed_files` 互不重叠，独占资源彼此独立 |
-| `test` | `测试验证员` | 测试资源彼此独立，共用板卡、烧录器或串口时串行 |
+| `analyze` | `scs-scout` | 各自调查独立问题，保持只读 |
+| `implement` | `scs-implementer` | `allowed_files` 互不重叠，独占资源彼此独立 |
+| `test` | `scs-test-verifier` | 测试资源彼此独立，共用板卡、烧录器或串口时串行 |
+| `test` + `journey` | `scs-device-verifier` | 授权设备或浏览器现场旅程 |
 
 同包的一批子任务可用 `work_attempt_prepare_many` 原子准备。默认并发上限为 4，宿主无法并行时串行。主对话核对真实 Agent ID、实际结束状态与证据，再调用 `work_attempt_update` 或 `work_attempt_update_many`。未执行的验证记为 `NOT_RUN`。每个长任务都要先取得方案顾问的回执，包括选择「不做独立复核」的任务。续接同一任务时沿用已记录的回执。
 
@@ -157,7 +162,7 @@ bash install.sh --skill codex-review --uninstall
 
 默认装到 `$AGENT_HOME/skills/codex-review/`。它是纯 Skill：没有 AGENTS 规则块，也没有 MCP runtime；`--mode hybrid` 与 `--with-default-rule` 会被忽略并降为纯 Skill 安装。手动安装时复制 `codex-review/` 到宿主 skills 目录即可。
 
-两个技能相互独立。其他宿主可以在收尾时按用户选择调用 `codex-review`；ZCode 的正式审查由注册的 `固定审阅员` 完成。
+两个技能相互独立。其他宿主可以在收尾时按用户选择调用 `codex-review`；ZCode 的正式审查由注册的 `scs-fixed-reviewer` 完成。
 
 ## 客户端配置
 
@@ -298,7 +303,7 @@ bash install.sh --mode hybrid --host claude --question-channel auto --project-ro
 - **方案顾问** 在长任务开工前做一次只读方案指导。
 - **固定审阅员** 独立检查当前工作包、交付证据或预审操作，由主对话单独派发；默认只读。通用宿主使用外部 `codex-review`。
 
-ZCode 实际工具集以 `zcode-agents/permissions.json` 为准：方案顾问/固定审阅员/继承审阅员 `[Read, Grep, Glob]`，查询侦察员 `[Read, Grep, Glob, WebFetch, WebSearch]`（仅公开资料），实施工程师 `[Read, Grep, Glob, Edit, Write, Bash]`（Bash 仅自检），测试验证员/设备与端到端验证员 `[Read, Grep, Glob, Bash]`（仅受控验证/设备命令）。运行 `python scripts/check_agent_permissions.py` 校验已注册身份；超出矩阵时停止派发。Bash 是完整 shell，只读/范围边界靠正文与事后审计。
+ZCode 实际工具集以 `zcode-agents/permissions.json` 为准：方案顾问/固定审阅员/继承审阅员 `[Read, Grep, Glob]`，查询侦察员 `[Read, Grep, Glob, WebFetch, WebSearch]`（仅公开资料），实施工程师 `[Read, Grep, Glob, Edit, Write, Bash, WebFetch, WebSearch, TodoWrite]`（内部清单、自检与公开规格核对），测试验证员/设备与端到端验证员 `[Read, Grep, Glob, Bash]`（仅受控验证/设备命令）。运行 `python scripts/check_agent_permissions.py` 校验已注册身份；超出矩阵时停止派发。Bash 是完整 shell，只读/范围边界靠正文与事后审计。
 
 UI、App 和设备交付收尾前须验证现场旅程。确认验证范围时选择 `journey`，在 `test` 子任务定义中声明 `execution_profile=journey` 与目标设备写租约，单项 prepare 成功后派设备与端到端验证员。该角色在实际 URL、实例或设备上完成入口→主操作→可见结果，提交与 attempt 绑定的证据。主对话抽核并验收。长驻 dev server 先观察原实例，再刷新对照。
 

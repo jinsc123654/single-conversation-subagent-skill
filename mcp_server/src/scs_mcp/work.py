@@ -7,7 +7,7 @@ import re
 import stat
 
 from .errors import ScsError
-from .evidence import FIXED_REVIEWER, verify_file
+from .evidence import FIXED_REVIEWER, FIXED_REVIEWER_IDENTITIES, verify_file
 from .locks import Leases
 from .state import State, identifier
 from .storage import Store, encode, now
@@ -35,8 +35,8 @@ def _journey_pass_invalid(check: dict, status: str, profile: str | None = None) 
 REVIEW_EXCLUDED = {".git", ".venv", ".venv-mcp", ".scs", ".archify"}
 REVIEW_MAX_FILES = 500
 REVIEW_MAX_BYTES = 100 * 1024 * 1024
-ZCODE_AGENTS = {"analyze": "查询侦察员", "implement": "实施工程师", "test": "测试验证员",
-                "journey": "设备与端到端验证员", "review": FIXED_REVIEWER}
+ZCODE_AGENTS = {"analyze": "scs-scout", "implement": "scs-implementer", "test": "scs-test-verifier",
+                "journey": "scs-device-verifier", "review": FIXED_REVIEWER}
 # Bumped whenever the subject payload shape or canonical encoding changes.
 # The field is part of the digested payload, so ACCEPTs recorded by an older
 # version fail freshness checks (REVIEW_STALE) instead of being reused under a
@@ -653,7 +653,7 @@ class Work:
             if evidence and (self.store.native_review or data.get("native_review_required")) and not native:
                 raise ScsError("REVIEW_ATTEMPT_REQUIRED", "Prepare a new attempt for the fixed ZCode reviewer.")
             if native and evidence:
-                if agent_type != FIXED_REVIEWER:
+                if agent_type not in FIXED_REVIEWER_IDENTITIES:
                     raise ScsError("REVIEW_AGENT_MISMATCH", "The prepared role must be the fixed ZCode reviewer.")
                 if not frozen or not host:
                     raise ScsError("REVIEW_AGENT_REQUIRED", "Record the actual ZCode agent ID and prepared subject.")
@@ -684,7 +684,8 @@ class Work:
                     raise ScsError("EVIDENCE_INVALID", "Supply evidence path, sha256 and optional required_content.")
                 check = verify_file(self.store, entry["path"], prefix, "review",
                                     entry.get("required_content"), subject_sha256=expected,
-                                    native_review=native, host_agent_id=host)
+                                    native_review=native, host_agent_id=host,
+                                    expected_agent_type=agent_type if native else FIXED_REVIEWER)
                 if check["status"] != "VERIFIED" or entry.get("sha256") != check["sha256"]:
                     code = check.get("error_code") or "EVIDENCE_INVALID"
                     if code in {"REVIEW_STALE", "REVIEW_SUBJECT_TOO_LARGE", "REVIEW_SUBJECT_INCOMPLETE",
@@ -703,7 +704,7 @@ class Work:
             else:
                 task.pop("review", None)
             if native and manifests:
-                task["review"].update(agent_type=FIXED_REVIEWER, agent_id=host)
+                task["review"].update(agent_type=agent_type, agent_id=host)
         else:
             profile = json.loads(attempt["input_snapshot"]).get("execution_profile")
             if profile != "journey" and self._execution_profile(con, row, row["revision"], task) == "journey":
@@ -1147,13 +1148,14 @@ class Work:
                     "SELECT input_snapshot,host_agent_id FROM work_attempts WHERE id=? AND package_id=? "
                     "AND revision=? AND subtask_id=?", (attempt_id, package_id, revision, subtask_id)).fetchone()
                 snapshot = json.loads(attempt["input_snapshot"]) if attempt else {}
-                if snapshot.get("agent_type") == FIXED_REVIEWER:
+                agent_type = snapshot.get("agent_type")
+                if agent_type in FIXED_REVIEWER_IDENTITIES:
                     if not attempt["host_agent_id"] or not snapshot.get("review_subject"):
                         return {"status": "INVALID", "error_code": "REVIEW_AGENT_REQUIRED"}
                     return verify_file(self.store, clean, f"{prefix}/{attempt_id}", "review",
                                        subject_sha256=snapshot["review_subject"], native_review=True,
-                                       host_agent_id=attempt["host_agent_id"])
-                if self.store.native_review or data.get("native_review_required") or snapshot.get("agent_type"):
+                                       host_agent_id=attempt["host_agent_id"], expected_agent_type=agent_type)
+                if self.store.native_review or data.get("native_review_required") or agent_type:
                     return {"status": "INVALID", "error_code": "REVIEW_ATTEMPT_REQUIRED"}
                 return verify_file(self.store, path, prefix, "review", required_content)
             return self._verify_task_evidence(con, row, revision, task, path, required_content)
@@ -1386,7 +1388,7 @@ class Work:
             if review.get("verdict") == "ACCEPT":
                 native = self.store.native_review or data.get("native_review_required")
                 if (review.get("subject_sha256") == current
-                        and (not native or review.get("agent_type") == FIXED_REVIEWER)):
+                        and (not native or review.get("agent_type") in FIXED_REVIEWER_IDENTITIES)):
                     return
                 stale = True
         if stale:
@@ -1475,7 +1477,8 @@ class Work:
             if journey_only or self.store.native_review:
                 continue  # Native package receipts are verified when recorded.
             review = task.get("review") or {}
-            native = review.get("agent_type") is not None
+            agent_type = review.get("agent_type")
+            native = agent_type is not None
             if task["status"] != "PASS" and not (native and task["status"] == "FAIL"):
                 continue
             if not task["evidence"]:
@@ -1490,7 +1493,8 @@ class Work:
                 prefix += "/" + review["attempt_id"]
             entry = task["evidence"][0]
             check = verify_file(self.store, entry["path"], prefix, "review", entry.get("required_content"),
-                                native_review=native, host_agent_id=review.get("agent_id"))
+                                native_review=native, host_agent_id=review.get("agent_id"),
+                                expected_agent_type=agent_type if native else FIXED_REVIEWER)
             if check["status"] != "VERIFIED" or check["sha256"] != entry["sha256"]:
                 raise ScsError("EVIDENCE_CHANGED", "Stored evidence changed; revise its report before continuing.")
             manifest = check["review"]

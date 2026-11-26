@@ -1,9 +1,9 @@
 {
-  "方案顾问": ["Read", "Grep", "Glob"],
-  "查询侦察员": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
-  "实施工程师": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
-  "测试验证员": ["Read", "Grep", "Glob", "Bash"],
-  "设备与端到端验证员": ["Read", "Grep", "Glob", "Bash"],
-  "固定审阅员": ["Read", "Grep", "Glob"],
-  "继承审阅员": ["Read", "Grep", "Glob"]
+  "scs-advisor": ["Read", "Grep", "Glob"],
+  "scs-scout": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
+  "scs-implementer": ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "WebSearch", "TodoWrite"],
+  "scs-test-verifier": ["Read", "Grep", "Glob", "Bash"],
+  "scs-device-verifier": ["Read", "Grep", "Glob", "Bash"],
+  "scs-fixed-reviewer": ["Read", "Grep", "Glob"],
+  "scs-inherited-reviewer": ["Read", "Grep", "Glob"]
 }

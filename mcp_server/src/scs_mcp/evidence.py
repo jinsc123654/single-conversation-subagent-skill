@@ -10,7 +10,9 @@ from pathlib import PurePosixPath
 from .errors import ScsError
 from .storage import Store
 
-FIXED_REVIEWER = "固定审阅员"
+FIXED_REVIEWER = "scs-fixed-reviewer"
+LEGACY_FIXED_REVIEWER = "固定审阅员"
+FIXED_REVIEWER_IDENTITIES = (FIXED_REVIEWER, LEGACY_FIXED_REVIEWER)
 
 REVIEW_FIELDS = {"verdict", "session_id", "model", "subject_sha256", "final_message_sha256",
                  "command", "exit_code", "raw_path"}
@@ -90,8 +92,12 @@ def _unique_object(pairs):
 
 
 def native_review_receipt(manifest, subject_key: str, subject: str | None,
-                          host_agent_id: str | None = None) -> dict:
-    """Validate the receipt structure and asserted provenance, not the host."""
+                          host_agent_id: str | None = None, *,
+                          expected_agent_type: str = FIXED_REVIEWER) -> dict:
+    """Validate the receipt structure and asserted provenance, not the host.
+
+    Only trusted persisted state may supply a legacy expected_agent_type.
+    """
     def invalid():
         return ScsError("REVIEW_MANIFEST_INVALID", "Expected a strict native review receipt (schema_version=2).")
 
@@ -106,8 +112,9 @@ def native_review_receipt(manifest, subject_key: str, subject: str | None,
         raise invalid()
     if subject is not None and submitted_subject != subject:
         raise ScsError("REVIEW_STALE", "The receipt covers a different subject.")
-    if manifest["agent_type"] != FIXED_REVIEWER:
-        raise ScsError("REVIEW_AGENT_MISMATCH", "Native review requires the configured fixed reviewer role.")
+    if (expected_agent_type not in FIXED_REVIEWER_IDENTITIES
+            or manifest["agent_type"] != expected_agent_type):
+        raise ScsError("REVIEW_AGENT_MISMATCH", "Native review requires the expected fixed reviewer role.")
     agent_id, model = manifest["agent_id"], manifest["model"]
     if (not isinstance(agent_id, str) or not agent_id.strip() or agent_id != agent_id.strip()
             or len(agent_id) > 256 or not agent_id.isprintable()):
@@ -154,13 +161,15 @@ def verify_native_final(store: Store, path: str, sha256: str, verdict: str) -> N
 
 
 def _native_review_check(store: Store, text: str, clean: str, prefix: str,
-                         subject: str | None, host_agent_id: str | None) -> dict:
+                         subject: str | None, host_agent_id: str | None, *,
+                         expected_agent_type: str = FIXED_REVIEWER) -> dict:
     try:
         manifest = json.loads(text, object_pairs_hook=_unique_object)
     except (ValueError, RecursionError):
         return {"status": "INVALID", "error_code": "REVIEW_MANIFEST_INVALID"}
     try:
-        receipt = native_review_receipt(manifest, "review_subject", subject, host_agent_id)
+        receipt = native_review_receipt(manifest, "review_subject", subject, host_agent_id,
+                                        expected_agent_type=expected_agent_type)
         final = receipt["final_message"]
         raw = posixpath.normpath(posixpath.join(posixpath.dirname(clean), final["path"]))
         if not raw.startswith(prefix + "/") or raw == clean:
@@ -227,6 +236,7 @@ def verify_file(store: Store, path: str, prefix: str, kind: str,
                 required_content: list[str] | None = None,
                 subject_sha256: str | None = None, *, native_review: bool = False,
                 host_agent_id: str | None = None,
+                expected_agent_type: str = FIXED_REVIEWER,
                 journey_scope: Callable[[str], str | None] | None = None) -> dict:
     try:
         clean = store.paths.validate(path)
@@ -251,7 +261,8 @@ def verify_file(store: Store, path: str, prefix: str, kind: str,
         if not native_review:
             checked = _review_check(store, text, clean, prefix, subject_sha256)
         else:
-            checked = _native_review_check(store, text, clean, prefix, subject_sha256, host_agent_id)
+            checked = _native_review_check(store, text, clean, prefix, subject_sha256, host_agent_id,
+                                           expected_agent_type=expected_agent_type)
             base["execution_provenance"] = "STRUCTURAL_RECEIPT_ONLY_HOST_NOT_AUTHENTICATED"
         if checked["status"] != "VERIFIED":
             return checked

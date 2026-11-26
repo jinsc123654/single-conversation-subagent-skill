@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 from .errors import ScsError
-from .evidence import native_review_receipt, verify_native_final
+from .evidence import FIXED_REVIEWER, LEGACY_FIXED_REVIEWER, native_review_receipt, verify_native_final
 from .storage import Store, encode, now
 
 GATE_TOOL = "operation_gate"
@@ -234,6 +234,13 @@ class Gate:
             found.append(entry)
         return found
 
+    @staticmethod
+    def _stored_reviewer(receipt) -> str:
+        # This is only for receipts selected from persisted gate events.
+        if isinstance(receipt, dict) and receipt.get("agent_type") == LEGACY_FIXED_REVIEWER:
+            return LEGACY_FIXED_REVIEWER
+        return FIXED_REVIEWER
+
     # ── public tools ────────────────────────────────────────────────
 
     def record(self, session_id: str, operation_id: str, command: str, cwd: str,
@@ -277,8 +284,16 @@ class Gate:
                         return self._record_response(terminal, idempotent=True)
                 if not native and needs_report and any("review_receipt" in record for record in records):
                     raise ScsError("NATIVE_REVIEW_DISABLED", "This operation already uses native review receipts.")
+            same = next((record for record in reversed(records) if record["verdict"] == verdict
+                         and (not native or not needs_report or "review_receipt" in record)), None)
             if native and needs_report:
-                review_receipt = native_review_receipt(review_receipt, "operation_digest", digest)
+                stored_receipt = same.get("review_receipt") if same is not None else None
+                # A legacy role is valid only for an exact receipt replay of
+                # the same session, operation digest and verdict.
+                expected_agent_type = (self._stored_reviewer(stored_receipt)
+                                       if review_receipt == stored_receipt else FIXED_REVIEWER)
+                review_receipt = native_review_receipt(review_receipt, "operation_digest", digest,
+                                                       expected_agent_type=expected_agent_type)
                 if verdict != review_receipt["verdict"]:
                     raise _invalid("The receipt verdict does not match the requested operation verdict.")
                 final = review_receipt["final_message"]
@@ -287,8 +302,6 @@ class Gate:
                     raise _invalid("report_path must match review_receipt.final_message.path when supplied.")
                 report_path = final_path
             if records:
-                same = next((record for record in reversed(records) if record["verdict"] == verdict
-                             and (not native or not needs_report or "review_receipt" in record)), None)
                 if same is not None:
                     if native and needs_report and same.get("review_receipt") != review_receipt:
                         raise ScsError("OPERATION_CONFLICT", "The recorded native receipt differs from this request.")
@@ -434,8 +447,9 @@ class Gate:
                 if not self.store.native_review:
                     return self._stale(operation_id, stored_digest, computed, ["NATIVE_REVIEW_DISABLED"], record=accept)
                 try:
-                    receipt = native_review_receipt(accept.get("review_receipt"), "operation_digest",
-                                                    stored_digest)
+                    stored_receipt = accept.get("review_receipt")
+                    receipt = native_review_receipt(stored_receipt, "operation_digest", stored_digest,
+                                                    expected_agent_type=self._stored_reviewer(stored_receipt))
                     final = receipt["final_message"]
                     if (receipt["verdict"] != "ACCEPT" or final["sha256"] != accept.get("report_sha256")
                             or self._report_path(final["path"], required=True) != accept.get("report_path")):

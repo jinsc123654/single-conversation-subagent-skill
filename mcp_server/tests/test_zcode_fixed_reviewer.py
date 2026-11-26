@@ -7,7 +7,12 @@ import pytest
 from mcp import Client
 
 from scs_mcp.errors import ScsError
+from scs_mcp.gate import GATE_TOOL, Gate
 from scs_mcp.server import create_server
+from scs_mcp.storage import Store, encode, now
+from scs_mcp.work import Work
+
+LEGACY_REVIEWER = "固定审阅员"
 
 
 @pytest.fixture
@@ -22,7 +27,7 @@ def write_evidence(root, relative, content):
     return {"path": relative, "sha256": hashlib.sha256(content.encode()).hexdigest()}
 
 
-def receipt(key, digest, final, *, agent_type="固定审阅员", agent_id="reviewer-1", verdict="ACCEPT"):
+def receipt(key, digest, final, *, agent_type="scs-fixed-reviewer", agent_id="reviewer-1", verdict="ACCEPT"):
     return {"schema_version": 2, key: digest, "agent_type": agent_type, "agent_id": agent_id,
             "model": "unobserved", "status": "completed", "verdict": verdict, "final_message": final}
 
@@ -43,9 +48,22 @@ def test_journey_execution_profile_routes_to_device_agent(zcode, tmp_path):
         "journey")
     version = work.update(sid, package["id"], package["version"], "IN_PROGRESS")["version"]
     attempt = work.prepare_attempt(sid, package["id"], version, "J1", execution_profile="journey")
-    assert attempt["agent_type"] == "设备与端到端验证员"
+    assert attempt["agent_type"] == attempt["attempt"]["input_snapshot"]["agent_type"] == "scs-device-verifier"
     assert attempt["input_snapshot"]["execution_profile"] == "journey"
     assert any(lease["resource"] == "device:test-phone" for lease in attempt["leases"])
+
+
+def test_analyze_and_test_attempts_freeze_ascii_routes(zcode, tmp_path):
+    _, _, session = zcode.roots.open(str(tmp_path), "zcode", "routing", "unregistered", True)
+    sid = session["id"]
+    work = zcode.roots.work(sid)
+    package = work.create(sid, "Inspect routing", ["sample.txt"], ["Checked"], [
+        {"id": kind, "kind": kind, "allowed_files": ["sample.txt"], "acceptance": ["Checked"]}
+        for kind in ("analyze", "test")
+    ], "routing")
+    batch = work.prepare_attempts(sid, package["id"], package["version"], ["analyze", "test"])
+    for item, route in zip(batch["attempts"], ("scs-scout", "scs-test-verifier"), strict=True):
+        assert item["agent_type"] == item["attempt"]["input_snapshot"]["agent_type"] == route
 
 
 def test_parallel_attempts_and_fixed_reviewer_proof(zcode, tmp_path):
@@ -67,7 +85,8 @@ def test_parallel_attempts_and_fixed_reviewer_proof(zcode, tmp_path):
     pid = package["id"]
     version = work.update(sid, pid, package["version"], "IN_PROGRESS")["version"]
     batch = work.prepare_attempts(sid, pid, version, ["left", "right"], ["left-1", "right-1"])
-    assert [item["agent_type"] for item in batch["attempts"]] == ["实施工程师", "实施工程师"]
+    assert [item["agent_type"] for item in batch["attempts"]] == ["scs-implementer", "scs-implementer"]
+    assert all(item["attempt"]["input_snapshot"]["agent_type"] == "scs-implementer" for item in batch["attempts"])
     with pytest.raises(ScsError, match="quiescent") as blocked:
         work.prepare_attempt(sid, pid, version, "review")
     assert blocked.value.code == "REVIEW_WINDOW_ACTIVE"
@@ -79,22 +98,22 @@ def test_parallel_attempts_and_fixed_reviewer_proof(zcode, tmp_path):
         work.prepare_attempt(sid, pid, version, "review")
     assert automatic.value.code == "REVIEW_MANUAL_REQUIRED"
     review = work.prepare_attempt(sid, pid, version, "review", user_requested=True)
-    assert review["agent_type"] == review["input_snapshot"]["agent_type"] == "固定审阅员"
+    assert review["agent_type"] == review["attempt"]["input_snapshot"]["agent_type"] == "scs-fixed-reviewer"
     aid = review["attempt"]["id"]
     final = write_evidence(tmp_path, review["evidence_dir"] + "/final-message.md", "Reviewed\n结论: ACCEPT\n")
     final["path"] = "final-message.md"
     manifest_path = review["evidence_dir"] + "/manifest.json"
-    manifest = receipt("review_subject", review["review_subject"], final, agent_type="继承审阅员")
+    manifest = receipt("review_subject", review["review_subject"], final)
 
     def end(manifest, agent_id):
         evidence = write_evidence(tmp_path, manifest_path, json.dumps(manifest, ensure_ascii=False))
         return work.update_attempt(sid, aid, version, "ENDED", {"status": "PASS", "evidence": [evidence]},
                                    host_agent_id=agent_id)
 
-    with pytest.raises(ScsError) as wrong_role:
-        end(manifest, "reviewer-1")
-    assert wrong_role.value.code == "REVIEW_AGENT_MISMATCH"
-    manifest["agent_type"] = "固定审阅员"
+    for role in ("scs-inherited-reviewer", LEGACY_REVIEWER):
+        with pytest.raises(ScsError) as wrong_role:
+            end({**manifest, "agent_type": role}, "reviewer-1")
+        assert wrong_role.value.code == "REVIEW_AGENT_MISMATCH"
     with pytest.raises(ScsError) as wrong_host:
         end(manifest, "wrong-id")
     assert wrong_host.value.code == "REVIEW_AGENT_MISMATCH"
@@ -105,6 +124,57 @@ def test_parallel_attempts_and_fixed_reviewer_proof(zcode, tmp_path):
     evidence = work.evidence(sid, pid, review["revision"], "review", manifest_path)
     assert evidence["status"] == "VERIFIED"
     assert work.update(sid, pid, finished["version"], "REVIEW_READY")["state"] == "REVIEW_READY"
+
+
+def test_persisted_legacy_review_attempt_requires_and_retains_its_original_role(zcode, tmp_path, monkeypatch):
+    _, state, session = zcode.roots.open(str(tmp_path), "zcode", "legacy-review", "unregistered", True)
+    sid = session["id"]
+    work = zcode.roots.work(sid)
+    package = work.create(sid, "Finish legacy review", ["sample.txt"], ["Reviewed"], [
+        {"id": "review", "kind": "review", "allowed_files": ["sample.txt"], "acceptance": ["Reviewed"]}
+    ], "legacy-review")
+    pid = package["id"]
+    version = work.update(sid, pid, package["version"], "IN_PROGRESS")["version"]
+    review = work.prepare_attempt(sid, pid, version, "review", host_agent_id="reviewer-1", user_requested=True)
+    aid = review["attempt"]["id"]
+    # Build a persisted active attempt as written by a pre-migration server.
+    with state.store.transaction(True) as con:
+        con.execute("UPDATE work_attempts SET input_snapshot=? WHERE id=?",
+                    (encode({**review["input_snapshot"], "agent_type": LEGACY_REVIEWER}), aid))
+        data = json.loads(con.execute("SELECT data FROM work_packages WHERE id=?", (pid,)).fetchone()[0])
+        data.update(review_required=True, native_review_required=True)
+        con.execute("UPDATE work_packages SET data=? WHERE id=?", (encode(data), pid))
+    work = Work(Store(tmp_path))
+    final = write_evidence(tmp_path, review["evidence_dir"] + "/final.md", "结论: ACCEPT\n")
+    final["path"] = "final.md"
+    path = review["evidence_dir"] + "/manifest.json"
+    manifest = receipt("review_subject", review["review_subject"], final)
+    evidence = write_evidence(tmp_path, path, encode(manifest))
+    assert work.evidence(sid, pid, 1, "review", path)["error_code"] == "REVIEW_AGENT_MISMATCH"
+    with pytest.raises(ScsError) as wrong_role:
+        work.update_attempt(sid, aid, version, "ENDED", {"status": "PASS", "evidence": [evidence]})
+    assert wrong_role.value.code == "REVIEW_AGENT_MISMATCH"
+
+    evidence = write_evidence(tmp_path, path, encode({**manifest, "agent_type": LEGACY_REVIEWER}))
+    verified = work.evidence(sid, pid, 1, "review", path)
+    assert verified["status"] == "VERIFIED" and verified["review"]["agent_type"] == LEGACY_REVIEWER
+    ended = work.update_attempt(sid, aid, version, "ENDED", {"status": "PASS", "evidence": [evidence]})
+    metadata = work.get(sid, pid)["subtasks"][0]["review"]
+    assert metadata["agent_type"] == LEGACY_REVIEWER and metadata["agent_id"] == "reviewer-1"
+    assert work.evidence(sid, pid, 1, "review", path)["status"] == "VERIFIED"
+
+    # The existing non-native acceptance path also revalidates stored native reports.
+    monkeypatch.delenv("SCS_NATIVE_REVIEW")
+    work = Work(Store(tmp_path))
+    ready = work.update(sid, pid, ended["version"], "REVIEW_READY")
+    assert ready["state"] == "REVIEW_READY"
+    with work.store.transaction(True) as con:
+        data = json.loads(con.execute("SELECT data FROM work_packages WHERE id=?", (pid,)).fetchone()[0])
+        data["subtasks"][0]["review"]["agent_type"] = "scs-fixed-reviewer"
+        con.execute("UPDATE work_packages SET data=? WHERE id=?", (encode(data), pid))
+    with pytest.raises(ScsError) as mismatch:
+        work.export(sid, pid, ready["version"])
+    assert mismatch.value.code == "EVIDENCE_CHANGED"
 
 
 async def test_zcode_long_review_text_fallback_uses_display_labels(zcode):
@@ -208,12 +278,58 @@ async def test_main_questions_and_operation_gate_use_fixed_reviewer(zcode, tmp_p
         report = write_evidence(tmp_path, "review.md", "Checked scope\n结论: ACCEPT\n")
         details = {**operation, "impact": "Generated outputs", "backup": "Source copy",
                    "rollback": "Rebuild generated files", "verdict": "ACCEPT", "user_confirmed": True}
-        foreign = receipt("operation_digest", missing["operation_digest"], report, agent_type="继承审阅员")
-        assert (await call("operation_gate_record", **details, review_receipt=foreign))["error_code"] == "REVIEW_AGENT_MISMATCH"
+        for role in ("scs-inherited-reviewer", LEGACY_REVIEWER):
+            foreign = receipt("operation_digest", missing["operation_digest"], report, agent_type=role)
+            assert (await call("operation_gate_record", **details, review_receipt=foreign))["error_code"] == "REVIEW_AGENT_MISMATCH"
         correct = receipt("operation_digest", missing["operation_digest"], report)
         assert (await call("operation_gate_record", **details, review_receipt=correct))["status"] == "OK"
         check = await call("operation_gate_check", **operation)
         assert check["status"] == "APPROVED" and check["user_confirmation_still_required"]
+
+
+def test_persisted_legacy_gate_accept_can_be_checked_but_only_exactly_replayed(zcode, tmp_path):
+    _, state, session = zcode.roots.open(str(tmp_path), "zcode", "legacy-gate", "unregistered", True)
+    sid = session["id"]
+    gate = Gate(state.store)
+    operation = {"operation_id": "old-op", "command": "remove outputs", "cwd": str(tmp_path),
+                 "targets": ["generated"], "baseline": {"head": "a123456"}}
+    details = {"impact": "Generated outputs", "backup": "Source copy", "rollback": "Rebuild outputs",
+               "verdict": "ACCEPT", "user_confirmed": True}
+    digest = gate.check(sid, **operation)["operation_digest"]
+    final = write_evidence(tmp_path, "old-review.md", "Checked scope\n结论: ACCEPT\n")
+    legacy = receipt("operation_digest", digest, final, agent_type=LEGACY_REVIEWER)
+    summary = {**operation, **details, "schema": 1, "operation_digest": digest, "digest": digest,
+               "at": now(), "report_path": final["path"], "report_sha256": final["sha256"],
+               "reason": None, "protocol_only": True, "review_receipt": legacy}
+    with state.store.transaction(True) as con:
+        state.store.event(con, sid, None, GATE_TOOL, encode(summary))
+        seq = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    gate = Gate(Store(tmp_path))
+    check = gate.check(sid, **operation)
+    assert check["status"] == "APPROVED" and check["event_seq"] == seq
+    assert gate.check(sid, **{**operation, "baseline": {"head": "b123456"}})["status"] == "STALE"
+    (tmp_path / final["path"]).unlink()  # An exact replay returns the original event.
+    replay = gate.record(sid, **operation, **details, review_receipt=legacy)
+    assert replay["idempotent"] and replay["event_seq"] == seq and replay["review_receipt"] == legacy
+    assert gate.check(sid, **operation)["status"] == "APPROVED"
+
+    def rejected(code, changes=None, **receipt_changes):
+        with pytest.raises(ScsError) as error:
+            gate.record(sid, **{**operation, **details, **(changes or {})},
+                        review_receipt={**legacy, **receipt_changes})
+        assert error.value.code == code
+
+    rejected("GATE_INVALID", {"user_confirmed": False})
+    rejected("OPERATION_CONFLICT", {"command": "remove other outputs"})
+    rejected("REVIEW_AGENT_MISMATCH", agent_id="reviewer-2")
+    rejected("REVIEW_AGENT_MISMATCH", final_message={**final, "sha256": "f" * 64})
+    rejected("REVIEW_AGENT_MISMATCH", {"verdict": "REJECT"}, verdict="REJECT")
+    rejected("REVIEW_AGENT_MISMATCH", {"operation_id": "new-op"})
+    assert gate.check(sid, **{**operation, "operation_id": "new-op"})["status"] == "MISSING"
+    with gate.store.transaction() as con:
+        assert con.execute("SELECT event FROM events WHERE tool=?", (GATE_TOOL,)).fetchone()[0] == encode(summary)
+        assert con.execute("SELECT count(*) FROM events WHERE tool=?", (GATE_TOOL,)).fetchone()[0] == 1
 
 
 def test_old_route_question_does_not_block_main_protocol(zcode, tmp_path):

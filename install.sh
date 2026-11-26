@@ -23,7 +23,16 @@ ZCODE_GPT_THOUGHT_LEVEL=""
 ZCODE_DEEPSEEK_MODEL=""
 ZCODE_DEEPSEEK_THOUGHT_LEVEL=""
 ZCODE_AGENT_OPTIONS=0
-ZCODE_PROFILE_NAMES=(实施工程师 继承审阅员 设备与端到端验证员)
+ZCODE_PROFILE_NAMES=(scs-implementer scs-inherited-reviewer)
+ZCODE_LEGACY_PROFILES=(
+  方案顾问:scs-advisor
+  固定审阅员:scs-fixed-reviewer
+  继承审阅员:scs-inherited-reviewer
+  查询侦察员:scs-scout
+  实施工程师:scs-implementer
+  测试验证员:scs-test-verifier
+  设备与端到端验证员:scs-device-verifier
+)
 BEGIN='<!-- single-conversation-subagent begin -->'
 END='<!-- single-conversation-subagent end -->'
 
@@ -41,11 +50,13 @@ Usage: bash install.sh [options]
   --host NAME               Host label for examples: codex|zcode|claude|generic.
   --question-channel MODE   auto|native|mcp|text; defaults per host.
   --with-zcode-agents       Opt in to adding missing ZCode agent profiles (ZCode host only).
+                            Stops before installation if legacy Chinese filenames remain.
   --zcode-agents-dir PATH   Profile directory; defaults to ~/.zcode/agents.
-  --zcode-gpt-model ID      Add 方案顾问 and 固定审阅员 with this explicit GPT model ID.
+  --zcode-gpt-model ID      Add scs-advisor and scs-fixed-reviewer with this explicit GPT model ID.
   --zcode-gpt-thought-level LEVEL
                             Optional thoughtLevel for those newly installed GPT profiles.
-  --zcode-deepseek-model ID Add 查询侦察员 and 测试验证员 with this explicit DeepSeek model ID.
+  --zcode-deepseek-model ID Add scs-scout, scs-test-verifier, and scs-device-verifier
+                            with this explicit DeepSeek model ID.
   --zcode-deepseek-thought-level LEVEL
                             Optional thoughtLevel for those newly installed DeepSeek profiles.
                             Fixed profiles are skipped without their model ID; never inherit.
@@ -126,8 +137,8 @@ if [ "$WITH_ZCODE_AGENTS" -eq 1 ]; then
   case "$ZCODE_AGENTS_DIR" in /*) ;; *) ZCODE_AGENTS_DIR="$PWD/$ZCODE_AGENTS_DIR" ;; esac
   validate_zcode_model_options gpt "$ZCODE_GPT_MODEL" "$ZCODE_GPT_THOUGHT_LEVEL"
   validate_zcode_model_options deepseek "$ZCODE_DEEPSEEK_MODEL" "$ZCODE_DEEPSEEK_THOUGHT_LEVEL"
-  if [ -n "$ZCODE_GPT_MODEL" ]; then ZCODE_PROFILE_NAMES+=(方案顾问 固定审阅员); fi
-  if [ -n "$ZCODE_DEEPSEEK_MODEL" ]; then ZCODE_PROFILE_NAMES+=(查询侦察员 测试验证员); fi
+  if [ -n "$ZCODE_GPT_MODEL" ]; then ZCODE_PROFILE_NAMES+=(scs-advisor scs-fixed-reviewer); fi
+  if [ -n "$ZCODE_DEEPSEEK_MODEL" ]; then ZCODE_PROFILE_NAMES+=(scs-scout scs-test-verifier scs-device-verifier); fi
 fi
 if [ -z "$QUESTION_CHANNEL" ]; then
   case "$HOST" in
@@ -193,7 +204,7 @@ if [ -n "$INSTRUCTIONS_FILE" ]; then safe_path "$INSTRUCTIONS_FILE"; validate_bl
 
 zcode_profile_template() {
   case "$1" in
-    方案顾问|固定审阅员|查询侦察员|测试验证员) printf '%s\n' "$SCRIPT_DIR/zcode-agents/$1.md.in" ;;
+    scs-advisor|scs-fixed-reviewer|scs-scout|scs-test-verifier|scs-device-verifier) printf '%s\n' "$SCRIPT_DIR/zcode-agents/$1.md.in" ;;
     *) printf '%s\n' "$SCRIPT_DIR/zcode-agents/$1.md" ;;
   esac
 }
@@ -222,6 +233,25 @@ if [ "$WITH_ZCODE_AGENTS" -eq 1 ]; then
      { [ -e "$ZCODE_AGENTS_DIR" ] && [ ! -d "$ZCODE_AGENTS_DIR" ]; }; then
     echo 'Refusing unsafe ZCode profiles directory.' >&2; exit 1
   fi
+  # Check every legacy name before any install writes, even when its role is
+  # not selected by the model flags or its replacement already exists.
+  legacy_found=0
+  for mapping in "${ZCODE_LEGACY_PROFILES[@]}"; do
+    legacy_path="$ZCODE_AGENTS_DIR/${mapping%:*}.md"
+    if [ -e "$legacy_path" ] || [ -L "$legacy_path" ]; then
+      printf 'Legacy ZCode profile: %s -> %s.md (name: "%s")\n' \
+        "$legacy_path" "${mapping#*:}" "${mapping#*:}" >&2
+      legacy_found=1
+    fi
+  done
+  if [ "$legacy_found" -eq 1 ]; then
+    printf '%s\n' \
+      'Installation stopped before making changes. Back up legacy profiles outside the agents directory.' \
+      'Rename each legacy file and update only its frontmatter name; keep its model, thoughtLevel, tools, and prompt.' \
+      'If the new filename already exists, compare both profiles and resolve the conflict manually without overwriting either file.' \
+      "See $SCRIPT_DIR/zcode-agents/profiles/README.md for migration steps, then rerun the installer." >&2
+    exit 1
+  fi
   for name in "${ZCODE_PROFILE_NAMES[@]}"; do
     [ -f "$(zcode_profile_template "$name")" ] || { echo "Missing ZCode profile template: $name" >&2; exit 1; }
   done
@@ -239,8 +269,8 @@ install_zcode_agents() {
     fi
     template="$(zcode_profile_template "$name")"
     case "$name" in
-      方案顾问|固定审阅员) model="$ZCODE_GPT_MODEL"; thought="$ZCODE_GPT_THOUGHT_LEVEL" ;;
-      查询侦察员|测试验证员) model="$ZCODE_DEEPSEEK_MODEL"; thought="$ZCODE_DEEPSEEK_THOUGHT_LEVEL" ;;
+      scs-advisor|scs-fixed-reviewer) model="$ZCODE_GPT_MODEL"; thought="$ZCODE_GPT_THOUGHT_LEVEL" ;;
+      scs-scout|scs-test-verifier|scs-device-verifier) model="$ZCODE_DEEPSEEK_MODEL"; thought="$ZCODE_DEEPSEEK_THOUGHT_LEVEL" ;;
     esac
     stage="$(mktemp "$ZCODE_AGENTS_DIR/.scs-profile.XXXXXX")"
     if [[ "$template" == *.md.in ]]; then
@@ -271,10 +301,10 @@ install_zcode_agents() {
     stage=""
   done
   if [ -z "$ZCODE_GPT_MODEL" ]; then
-    echo 'Not installing new 方案顾问 or 固定审阅员 profiles: use --zcode-gpt-model with an explicit ZCode model ID.'
+    echo 'Not installing new scs-advisor or scs-fixed-reviewer profiles: use --zcode-gpt-model with an explicit ZCode model ID.'
   fi
   if [ -z "$ZCODE_DEEPSEEK_MODEL" ]; then
-    echo 'Not installing new 查询侦察员 or 测试验证员 profiles: use --zcode-deepseek-model with an explicit ZCode model ID.'
+    echo 'Not installing new scs-scout, scs-test-verifier, or scs-device-verifier profiles: use --zcode-deepseek-model with an explicit ZCode model ID.'
   fi
 }
 

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -9,11 +10,21 @@ import pytest
 from scs_mcp import __version__
 
 REPO = Path(__file__).resolve().parents[2]
+ZCODE_PROFILES = {
+    "方案顾问": "scs-advisor",
+    "固定审阅员": "scs-fixed-reviewer",
+    "继承审阅员": "scs-inherited-reviewer",
+    "查询侦察员": "scs-scout",
+    "实施工程师": "scs-implementer",
+    "测试验证员": "scs-test-verifier",
+    "设备与端到端验证员": "scs-device-verifier",
+}
 
 
 def install(tmp_path, *args, env=None):
     return subprocess.run(["bash", str(REPO / "install.sh"), *args],
-        env={**os.environ, "AGENT_HOME": str(tmp_path / "agent-home"), **(env or {})},
+        env={**os.environ, "HOME": str(tmp_path / "home"),
+             "AGENT_HOME": str(tmp_path / "agent-home"), **(env or {})},
         text=True, capture_output=True, timeout=20)
 
 
@@ -109,19 +120,91 @@ def test_runtime_child_symlink_rejected_before_install(tmp_path):
 def test_zcode_installs_missing_agents_and_preserves_existing_models(tmp_path):
     home = tmp_path / "agent-home"
     agents = tmp_path / "zcode-agents"
-    agents.mkdir()
-    existing = agents / "固定审阅员.md"
-    existing.write_text('---\nname: "固定审阅员"\nmodel: "local/existing"\n---\n', encoding="utf-8")
-    args = ("--host", "zcode", "--mode", "hybrid", "--python", sys.executable,
-            "--project-root", str(tmp_path), "--with-zcode-agents", "--zcode-agents-dir", str(agents),
-            "--zcode-gpt-model", "local/gpt", "--zcode-deepseek-model", "local/deepseek")
-    result = install(tmp_path, *args)
+    args = ("--host", "zcode", "--with-zcode-agents", "--zcode-agents-dir", str(agents),
+            "--zcode-gpt-model", "local/gpt", "--zcode-deepseek-model", "local/deepseek",
+            "--zcode-deepseek-thought-level", "max")
+    result = install(tmp_path, *args, "--mode", "hybrid", "--python", sys.executable,
+                     "--project-root", str(tmp_path))
     assert result.returncode == 0, result.stderr
-    assert {p.stem for p in agents.glob("*.md")} == {
-        "固定审阅员", "方案顾问", "继承审阅员", "查询侦察员", "实施工程师", "测试验证员",
-        "设备与端到端验证员"}
-    assert 'model: "local/existing"' in existing.read_text()
-    advisor = (agents / "方案顾问.md").read_text()
-    assert 'model: "local/gpt"' in advisor and "长任务在确认验证与复核策略后派发一次" in advisor
+    assert {p.stem for p in agents.glob("*.md")} == set(ZCODE_PROFILES.values())
+    matrix = json.loads((REPO / "zcode-agents/permissions.json").read_text(encoding="utf-8"))
+    assert matrix.keys() == set(ZCODE_PROFILES.values())
+    for label, name in ZCODE_PROFILES.items():
+        profile = (agents / f"{name}.md").read_text(encoding="utf-8")
+        _, frontmatter, _ = profile.split("---\n", 2)
+        fields = dict(line.split(": ", 1) for line in frontmatter.splitlines())
+        assert json.loads(fields["name"]) == name
+        assert re.fullmatch(r"[A-Za-z0-9-]{3,50}", name)
+        assert label in fields["description"]
+        assert fields["tools"] == "[" + ", ".join(matrix[name]) + "]"
+        if name in {"scs-scout", "scs-test-verifier", "scs-device-verifier"}:
+            assert fields["model"] == '"local/deepseek"'
+            assert fields["thoughtLevel"] == '"max"'
+        elif name in {"scs-advisor", "scs-fixed-reviewer"}:
+            assert fields["model"] == '"local/gpt"'
+            assert "thoughtLevel" not in fields
+        else:
+            assert fields["model"] == '"inherit"'
+    advisor = (agents / "scs-advisor.md").read_text(encoding="utf-8")
+    assert "长任务在确认验证与复核策略后派发一次" in advisor
     example = json.loads((home / "mcp/single-conversation-subagent/zcode-example.json").read_text())
     assert example["mcp"]["servers"]["single-conversation-subagent"]["env"]["SCS_NATIVE_REVIEW"] == "1"
+
+    existing = agents / "scs-fixed-reviewer.md"
+    custom = b'---\nname: "scs-fixed-reviewer"\nmodel: "local/existing"\n---\n\nCustom prompt.\n'
+    existing.write_bytes(custom)
+    existing.chmod(0o600)
+    result = install(tmp_path, *args)
+    assert result.returncode == 0, result.stderr
+    assert "Preserved existing ZCode profile path" in result.stdout
+    assert existing.read_bytes() == custom
+    assert existing.stat().st_mode & 0o777 == 0o600
+
+
+def test_zcode_skips_fixed_profiles_without_model_options(tmp_path):
+    agents = tmp_path / "home/.zcode/agents"
+    result = install(tmp_path, "--host", "zcode", "--with-zcode-agents")
+    assert result.returncode == 0, result.stderr
+    assert {p.stem for p in agents.glob("*.md")} == {"scs-implementer", "scs-inherited-reviewer"}
+    assert "scs-device-verifier" in result.stdout
+
+
+@pytest.mark.parametrize("legacy_name,new_id", ZCODE_PROFILES.items())
+def test_zcode_legacy_profile_stops_before_installing_anything(tmp_path, legacy_name, new_id):
+    agents = tmp_path / "home/.zcode/agents"
+    agents.mkdir(parents=True)
+    legacy = agents / f"{legacy_name}.md"
+    content = f'---\nname: "{legacy_name}"\nmodel: "local/custom"\n---\n'.encode("utf-8")
+    legacy.write_bytes(content)
+    rules = tmp_path / "AGENTS.md"
+    rules.write_text("Unrelated instructions\n", encoding="utf-8")
+
+    result = install(tmp_path, "--host", "zcode", "--with-zcode-agents",
+                     "--instructions-file", str(rules))
+    assert result.returncode != 0
+    assert f'{legacy} -> {new_id}.md (name: "{new_id}")' in result.stderr
+    assert "stopped before making changes" in result.stderr
+    assert "profiles/README.md" in result.stderr
+    assert not (tmp_path / "agent-home").exists()
+    assert rules.read_text(encoding="utf-8") == "Unrelated instructions\n"
+    assert list(agents.iterdir()) == [legacy]
+    assert legacy.read_bytes() == content
+
+
+def test_zcode_legacy_dangling_symlink_and_new_profile_are_not_touched(tmp_path):
+    agents = tmp_path / "profiles"
+    agents.mkdir()
+    legacy = agents / "固定审阅员.md"
+    missing = tmp_path / "missing.md"
+    legacy.symlink_to(missing)
+    existing = agents / "scs-fixed-reviewer.md"
+    existing.write_bytes(b"Configured replacement\n")
+
+    result = install(tmp_path, "--host", "zcode", "--with-zcode-agents",
+                     "--zcode-agents-dir", str(agents), "--zcode-gpt-model", "local/gpt")
+    assert result.returncode != 0
+    assert "without overwriting either file" in result.stderr
+    assert not (tmp_path / "agent-home").exists()
+    assert set(agents.iterdir()) == {legacy, existing}
+    assert legacy.readlink() == missing and not missing.exists()
+    assert existing.read_bytes() == b"Configured replacement\n"

@@ -1,8 +1,8 @@
 ---
-name: "固定审阅员"
-description: "只读技术复核：使用显式配置的 GPT 模型；负责包级、收尾和操作预审。"
-model: "new-provider-2/gpt-6.2-sol"
-thoughtLevel: "enabled"
+name: "scs-fixed-reviewer"
+description: "固定审阅员｜只读技术复核：使用显式配置的 GPT 模型；负责包级、收尾和操作预审。"
+@SCS_MODEL@
+@SCS_THOUGHT_LEVEL@
 tools: [Read, Grep, Glob]
 ---
 

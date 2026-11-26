@@ -12,13 +12,14 @@
 长任务在确认后派 **方案顾问** 做一次开工前的只读方案指导，取得实际回执后拆包派发。
 
 - `work_attempt_prepare` 或 `work_attempt_prepare_many` 在原生模式返回 `agent_type`。执行角色按依赖、范围、资源派发。复核在其它 attempt 结束后单独 prepare；记录宿主真实返回的 `host_agent_id`。结果达到 `ENDED` 时提交其证据，按 `review_subject` 绑定 prepare 时冻结的对象。
+- 新派发与新回执使用 `scs-fixed-reviewer`。历史包级复核按 attempt 冻结的实际角色 ID 核对，历史准入回执按已存 ID 核对，不改原件或哈希。没有已登记结果的新操作预审须使用 `scs-fixed-reviewer`。
 - 在返回的 `evidence_dir` 中保存 `final-message.md` 和 `manifest.json`。最终消息来自实际宿主结果，恰好一行 `结论: ACCEPT` 或 `结论: REJECT`。`manifest.json` 使用以下字段；`model` 用宿主观测到的 `provider/model` 或 `unobserved`。一个合法的 REJECT 对应 `FAIL`。
 
 ```json
 {
   "schema_version": 2,
   "review_subject": "<prepare 返回的 64 位十六进制哈希>",
-  "agent_type": "固定审阅员",
+  "agent_type": "scs-fixed-reviewer",
   "agent_id": "<ZCode 真实 Agent ID>",
   "model": "unobserved",
   "status": "completed",
@@ -83,7 +84,7 @@
 - quick/investigate（及未知旧 mode）：无额外要求。
 - 推荐理由一句话，最多 160 字；首次用 `workspace_scan` 辅助判断范围，不把扫描全文回传到每道题。
 
-ZCode 长任务必须先取得一次 `方案顾问` 的真实回执，再拆包派发。主对话将结果写入项目协作记录；`codex_review` 和 `codex_gate` 记录的都是正式审查策略。其他宿主的方案指导保留原行为。
+ZCode 长任务必须先取得一次 `scs-advisor` 的真实回执，再拆包派发。主对话将结果写入项目协作记录；`codex_review` 和 `codex_gate` 记录的都是正式审查策略。其他宿主的方案指导保留原行为。
 
 ## 恢复会话与补登记
 
