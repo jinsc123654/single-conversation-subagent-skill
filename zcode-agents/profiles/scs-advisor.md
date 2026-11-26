@@ -1,6 +1,7 @@
 ---
 name: "scs-advisor"
 description: "方案顾问｜一次性只读方案指导：使用显式配置的 GPT 模型，在实施前评估方案与风险。"
+color: blue
 model: "new-provider-2/gpt-6.2-sol"
 thoughtLevel: "enabled"
 tools: [Read, Grep, Glob]

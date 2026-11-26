@@ -1,6 +1,7 @@
 ---
 name: "scs-device-verifier"
 description: "设备与端到端验证员｜设备/端到端验证：在授权范围内执行 ADB、串口、烧录或浏览器旅程，归档现场证据。"
+color: yellow
 model: "new-provider-2/deepseek-v4.1-flash"
 thoughtLevel: "max"
 tools: [Read, Grep, Glob, Bash]

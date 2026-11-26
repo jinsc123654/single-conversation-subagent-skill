@@ -1,6 +1,7 @@
 ---
 name: "scs-implementer"
 description: "实施工程师｜定界实施：只修改委托允许的文件，返回最小改动和自检建议。"
+color: red
 model: "inherit"
 tools: [Read, Grep, Glob, Edit, Write, Bash, WebFetch, WebSearch, TodoWrite]
 ---

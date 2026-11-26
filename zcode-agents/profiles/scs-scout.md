@@ -1,6 +1,7 @@
 ---
 name: "scs-scout"
 description: "查询侦察员｜只读侦察：使用显式配置的 DeepSeek 模型，查找入口、调用链、影响范围和证据。"
+color: cyan
 model: "new-provider-2/deepseek-v4.1-flash"
 thoughtLevel: "max"
 tools: [Read, Grep, Glob, WebFetch, WebSearch]
