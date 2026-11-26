@@ -1,6 +1,7 @@
 ---
 name: "scs-test-verifier"
 description: "测试验证员｜执行验证：使用显式配置的 DeepSeek 模型，只运行指定命令并报告退出码、通过数和失败证据。"
+color: orange
 model: "new-provider-2/deepseek-v4.1-flash"
 thoughtLevel: "max"
 tools: [Read, Grep, Glob, Bash]

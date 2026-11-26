@@ -1,6 +1,7 @@
 ---
 name: "scs-fixed-reviewer"
 description: "固定审阅员｜只读技术复核：使用显式配置的 GPT 模型；负责包级、收尾和操作预审。"
+color: pink
 model: "new-provider-2/gpt-6.2-sol"
 thoughtLevel: "enabled"
 tools: [Read, Grep, Glob]

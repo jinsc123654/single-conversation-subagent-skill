@@ -1,6 +1,7 @@
 ---
 name: "scs-inherited-reviewer"
 description: "继承审阅员｜只读技术复核：显式继承主对话模型；用于已选 inherit 路线。"
+color: purple
 model: "inherit"
 tools: [Read, Grep, Glob]
 ---
