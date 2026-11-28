@@ -8,6 +8,8 @@
 - ZCode 实施工程师可用 TodoWrite 管本 attempt 的内部步骤并自主完成授权内实施、自检；方案顾问在最终回执附实施 TodoList，由主对话或外部获授权实施者接收，不自行委派。
 - ZCode 子 Agent 异步派发或续跑后默认等宿主通知，不用阻塞式 `TaskOutput` 循环轮询。必要时只做一次非阻塞状态查询；等待窗口到期不当作任务失败或停止。
 - ZCode 所有子 Agent（含顾问和审阅员）同线后续每轮检查上下文，预计低于 70% 优先 `SendMessage`，达到 70% 换实例；长任务续跑仍先 prepare 新 attempt，复核仍依本轮对象与新回执验收。
+- 派发前检查前置到 Skill 开头：相容候选先实际 `ListModels` → 上下文探针，现有协调记录或工具简报保留 `dispatch_decision`；未核查不能冒充 `UNKNOWN`，累计 token 账单不能作容量依据，新 attempt 不自动新开 Agent。70% 只判断目标子 Agent，移除按主对话上下文占用自动换会话的建议。
+- 原生 ZCode 的 session 开启/读取及单项/批量 prepare 返回 `ZCODE_DISPATCH_PREFLIGHT_REQUIRED` 提醒，prepare 附最多 8 个同 controller/同角色、无活动 attempt 的 ENDED 登记；候选不证明宿主已完成、相容或可复用，不自动调度、不拦截宿主工具，普通宿主响应与数据库不变。
 
 - 查询侦察员恢复受控联网：`WebFetch/WebSearch` 仅用于公开文档/公开页面，禁止内网、私有 URL、凭据、源码/数据上传和下载执行；联网不可用时报告并继续本地分析。
 - 方案顾问/固定审阅员/继承审阅员收回只读：顾问只做方案指导，审阅员只用 Read/Grep/Glob；需要强模型修复时另开实施 attempt，审阅员不参与修复。

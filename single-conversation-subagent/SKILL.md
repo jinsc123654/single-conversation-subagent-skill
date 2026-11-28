@@ -7,6 +7,16 @@ description: 单对话两级 Subagent 协作；按模式确认验证和复核，
 
 **ZCode 使用宿主注册身份。** 按 [角色映射](references/roles.md#zcode-注册身份) 用 `Agent(subagent_type=<英文角色 ID>)` 派发，沿用角色的模型和权限。下文的中文角色名称指职责，不是可传入 Agent 的 ID；正式审查只派 `scs-fixed-reviewer`。其他宿主仍用各自的执行角色和 `codex-review`。ZCode 启用 `SCS_NATIVE_REVIEW=1`。
 
+## ZCode 派发前检查
+
+每次 `Agent` 或对已完成实例的 `SendMessage` 前，由主对话完成这项检查；顾问、整改、补测、包级复核、收尾和操作预审都不例外。向运行中实例补充已授权信息不算续跑。先完成开场、授权与必要的 prepare，本节只决定用哪个实例，不新增执行许可。
+
+1. 查找**同一宿主父会话**内已完成的同角色实例，核对目标、基线、本轮授权及审阅独立性；跨工作包不自动排除。首次派发、无相容候选、不同工作线或用户明确要求全新盲审，可以直接新开并说明具体原因，无须做无候选的容量检查。别把别的父会话里探针返回的 `REUSE` 当成宿主允许跨会话续跑。
+2. 有相容候选就先实际调用 `ListModels`，再运行 [只读上下文探针](references/zcode-context.md)。`REUSE` 且预计低于 70% 时优先 `SendMessage`；`ROTATE` 或实际核查返回 `UNKNOWN` 时新开。未调用、没读用法、嫌麻烦和泛称“容量未知”不是 `UNKNOWN` 结果；工具或脚本确实不可用时，记录具体失败/缺项后保守新开，不反复重试、不编造占比。
+3. 派发前在**现有协调记录或本次工具简报首部**保留一行 `dispatch_decision`：角色、候选实际 ID/无候选、相容性、探针结果与预计占比（或无需/无法检查的具体原因）、`SendMessage`/`Agent` 选择。不要只写在内部推理里，也不另建规划文档。例：`dispatch_decision: role=scs-test-verifier; candidate=<实际ID>; compatible=yes; probe=REUSE; projected=16.92%; action=SendMessage; reason=同板补测`。对用户简述选择即可，不展示内部 ID。
+
+**70% 只判断目标子 Agent，不判断主对话；累计 token 是账单，不是上下文。** 例如累计 453 万、最近一次请求 13.2 万，不能以“453 万超过窗口”为由换实例；只采用探针的目标子 Agent 最近请求 + 本轮余量及该子 Agent 实际模型窗口。父会话 ID 只核对归属，当前对话的 `ListModels` 只提供模型目录，不读取主对话的 token 或套用主对话模型窗口。新 attempt 不等于新 Agent。相容实例返回 `REUSE` 却仍要新开时，记录容量以外的具体原因，不能改称 `UNKNOWN`。每轮重算，候选尚未静止时不凭容量重派。MCP 的提示不代替这项检查，也不自动调度或强制拦截宿主工具。
+
 ## 开场
 
 1. 项目根用用户明确指定的目录，否则用当前对话工作目录。模式和根已明确就开始会话绑定；只有缺少信息时，做至多一次直接相关的只读查询。开场确认以前先不做任务排查、构建、串口或设备操作。ZCode 从宿主角色注册表核对 `scs-fixed-reviewer`；其他宿主核对 `codex-review`。有则 `registered`，明确无则 `unregistered`，未知则 `unknown`。同时核对宿主实际生效的七个角色工具集与 `zcode-agents/permissions.json`：超出矩阵（例如顾问可写、审阅员可执行命令）时停止该角色派发并按真实原因登记，不按正文声明假设只读。
@@ -24,7 +34,7 @@ description: 单对话两级 Subagent 协作；按模式确认验证和复核，
 - 原生路径（ZCode 默认）：`interaction_request(channel="native")` 返回 `NATIVE_QUESTION_REQUIRED` 时，立即调用宿主原生问答工具。用返回的简短 `display_text` 和 `options.label` 提问，将推荐项置顶并标明。提交时用对应的 `options.value`。登记状态本身不证明已显示。等到用户实际回答，再用原 `question_id` 调 `interaction_submit`；**看到 `CONFIRMED` 才请求下一题**。没有原生工具时，使用同一题的文本回退。
 - 文本路径：展示完整 `display_text`，结束当轮等待明确回复，然后用同一题号提交。每次只用一路提问。收到 `QUESTION_PENDING` 时处理返回的原题；如果用户已答就补提交，否则继续等待。需要重试已结束的题时，按用户明确要求重开。取消、拒绝、失败和默认勾选均不确认选择。
 - MCP form 是配置为 mcp 或 auto 且支持表单时的回退。仅 `interaction_ask` 使用服务端 15 秒截止。按已告知的超时策略处理，`TIMED_OUT` 不写确认。无 form 或无回通道时用同一题号走原生或文本。原生/文本不声称 15 秒。详见 [MCP 用法](references/mcp.md)。
-- 推荐理由一句话，最多 160 字。首次用 `workspace_scan` 辅助判断范围，不把扫描全文回传到每道题。上下文压缩时只保留会话 ID、项目根、已确认选择、待答题号、工作包修订、下一步和证据路径；按需读取详细状态。
+- 推荐理由一句话，最多 160 字。首次用 `workspace_scan` 辅助判断范围，不把扫描全文回传到每道题。上下文压缩时保留会话 ID、项目根、已确认选择、待答题号、工作包修订、下一步、证据路径，以及同线候选的角色/实际 ID/完成状态和最近 `dispatch_decision` 定位；容量下轮仍重算，其他详情按需读取。
 
 ## 长任务执行
 

@@ -22,7 +22,7 @@ from .roots import Roots
 from .project_index import publish
 from .state import OPTIONS
 from .storage import Store
-from .work import Work
+from .work import Work, zcode_dispatch_warning
 from .workspace import scan_workspace
 
 
@@ -146,7 +146,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         and explicit_skip when resuming. A known review_registration updates the
         original session without changing its confirmed choices. Long sessions
         derive codex_gate from their question row (none|closure|packages); old
-        long sessions without one are asked once and are not migrated.
+        long sessions without one are asked once and are not migrated. Native
+        ZCode also returns an advisory dispatch warning, including for advisor
+        and closure work that does not use attempt preparation.
         """
         if (register_obsidian or resume_session_id is not None) and (
                 not project_root or not Path(project_root).is_absolute()):
@@ -163,6 +165,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         result["host"] = display_host
         result["client_label"] = client_name or display_host
         result["project_root"] = str(root)
+        if result["native_review"]:
+            result.setdefault("warnings", []).append(zcode_dispatch_warning())
         if result["mode"] is None and not result["questions"]:
             result["workspace_scan"] = scan_workspace(root)[:320]
             result["mode_options"] = OPTIONS["mode"]
@@ -184,9 +188,13 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
 
         codex_gate is projected from the current confirmed question (null when
         not asked), codex_review keeps its original boolean meaning, and intake
-        reports the shared ready/policy/source/reason predicate.
+        reports the shared ready/policy/source/reason predicate. Native ZCode
+        adds a dispatch reminder without querying candidates or host usage.
         """
-        return roots.for_session(session_id).get(session_id)
+        result = roots.for_session(session_id).get(session_id)
+        if result["native_review"]:
+            result.setdefault("warnings", []).append(zcode_dispatch_warning())
+        return result
 
     async def prepare(session_id: str, kind: str, recommendation: list[str], channel: str,
                       question_id: str | None, ctx: Context,
@@ -463,7 +471,9 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         names the package and confirms this review round. Use subtask_id='review';
         an optional slot is created if missing, in which case the returned version
         increments. Each manual round needs a fresh explicit user request.
-        Legacy stored read resources are skipped with warnings.
+        Legacy stored read resources are skipped with warnings. Native ZCode
+        warnings include dispatch checks and bounded ENDED same-role records;
+        these neither establish host compatibility nor choose reuse or launch.
         """
         result = roots.work(session_id).prepare_attempt(session_id, package_id, expected_version,
                                                         subtask_id, host_agent_id, ttl_seconds,
@@ -503,7 +513,8 @@ def create_server(project_root: str | Path, question_channel: str = "auto", host
         ready yet, so prepare in waves. A review attempt must be prepared alone.
         The package version is unchanged; each entry carries attempt, leases,
         evidence_dir and warnings. host_agent_ids, when supplied, matches
-        subtask_ids one to one.
+        subtask_ids one to one. Native ZCode dispatch hints are per entry;
+        candidate records are not automatically allocated to batch tasks.
         """
         result = roots.work(session_id).prepare_attempts(session_id, package_id, expected_version,
                                                          subtask_ids, host_agent_ids, ttl_seconds)

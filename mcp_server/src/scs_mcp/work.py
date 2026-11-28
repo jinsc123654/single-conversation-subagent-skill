@@ -37,6 +37,31 @@ REVIEW_MAX_FILES = 500
 REVIEW_MAX_BYTES = 100 * 1024 * 1024
 ZCODE_AGENTS = {"analyze": "scs-scout", "implement": "scs-implementer", "test": "scs-test-verifier",
                 "journey": "scs-device-verifier", "review": FIXED_REVIEWER}
+ZCODE_DISPATCH_CANDIDATE_LIMIT = 8
+ZCODE_DISPATCH_REQUIRED_CHECKS = (
+    "由主对话查找同一宿主父会话内已完成的同角色实例，核对目标、基线、本轮授权和审阅独立性；"
+    "SCS session 相同不证明宿主父会话相同，parent 仅核验身份归属。",
+    "有相容候选时先在当前对话实际调用 ListModels（仅提供模型 catalog），再运行 Skill 的只读上下文探针；"
+    "未核查不等于 UNKNOWN，工具或脚本不可用须记录实际失败或缺项。",
+    "70% 只检查目标子 Agent：最近一次已完成请求的 input_tokens + output_tokens + reserve，"
+    "除以该子 Agent 实际 provider/model 的上下文窗口；不得使用主对话 token、累计账单或 metadata.totalTokens。",
+    "相容且探针 REUSE、预计低于 70% 时优先 SendMessage；ROTATE 或实际 UNKNOWN 时保守新开；"
+    "首次、无相容候选、不同工作线或明确要求全新盲审时无需无候选容量检查，选择仍由主对话作出。",
+    "旧执行和资源静止后才续跑或重派；需要 prepare 的工作使用新 attempt 和租约，转交本轮范围、授权和证据目录；"
+    "同批不得把同一 Agent 分给并发任务。",
+    "在现有协调记录或工具简报保留 dispatch_decision：角色、候选或无候选、相容性、实际探针结果或具体缺项、"
+    "选择和原因；不得把未调用或未读用法记成 UNKNOWN。",
+)
+
+
+def zcode_dispatch_warning() -> dict:
+    """Advisory only; no host lookup, capacity verdict, authorization or scheduling."""
+    return {"code": "ZCODE_DISPATCH_PREFLIGHT_REQUIRED",
+            "message": "每次 Agent 或对已完成实例的 SendMessage 前执行 Skill 派发前检查，顾问、包级复核、收尾和操作预审也适用；"
+                       "本提示不授权、不分配实例、不拦截宿主工具。",
+            "required_checks": list(ZCODE_DISPATCH_REQUIRED_CHECKS)}
+
+
 # Bumped whenever the subject payload shape or canonical encoding changes.
 # The field is part of the digested payload, so ACCEPTs recorded by an older
 # version fail freshness checks (REVIEW_STALE) instead of being reused under a
@@ -412,6 +437,36 @@ class Work:
             if active:
                 raise ScsError("HOST_AGENT_ACTIVE", "This ZCode Agent already has an active attempt.")
 
+    def _dispatch_warning(self, con, session_id: str, agent_type: str) -> dict:
+        # Select the newest ENDED record per Agent across packages. ENDED is an
+        # SCS lifecycle fact, not proof of host completion or compatibility.
+        rows = con.execute("""
+            WITH candidates AS (
+                SELECT id AS attempt_id, package_id, revision, subtask_id, host_agent_id,
+                       controller_session, state, updated_at,
+                       ROW_NUMBER() OVER (PARTITION BY host_agent_id ORDER BY updated_at DESC, id DESC) AS rank
+                FROM work_attempts AS ended
+                WHERE controller_session=? AND state='ENDED'
+                  AND host_agent_id IS NOT NULL AND TRIM(host_agent_id)!=''
+                  AND json_extract(input_snapshot, '$.agent_type')=?
+                  AND NOT EXISTS (SELECT 1 FROM work_attempts AS active
+                                  WHERE active.host_agent_id=ended.host_agent_id AND active.state!='ENDED')
+            )
+            SELECT attempt_id, package_id, revision, subtask_id, host_agent_id,
+                   controller_session, state, updated_at
+            FROM candidates WHERE rank=1 ORDER BY updated_at DESC, attempt_id DESC LIMIT ?
+        """, (session_id, agent_type, ZCODE_DISPATCH_CANDIDATE_LIMIT + 1)).fetchall()
+        warning = zcode_dispatch_warning()
+        warning.update(agent_type=agent_type,
+                       candidates=[dict(row) for row in rows[:ZCODE_DISPATCH_CANDIDATE_LIMIT]],
+                       candidate_limit=ZCODE_DISPATCH_CANDIDATE_LIMIT,
+                       candidates_truncated=len(rows) > ZCODE_DISPATCH_CANDIDATE_LIMIT,
+                       candidate_scope="SCS controller_session only; host parent must be verified",
+                       candidate_notice="候选仅为同 controller_session、同角色且无活动 attempt 的 ENDED 登记；"
+                                        "不证明宿主 completed、可达、已相容或可续跑。空列表不证明没有宿主候选；"
+                                        "顾问和独立收尾可能未登记 attempt，同批候选不代表自动分配。")
+        return warning
+
     def _prepare_in_tx(self, con, session_id: str, row, data: dict, task: dict,
                        host_agent_id: str | None, ttl_seconds: float, user_requested: bool = False,
                        execution_profile: str | None = None) -> dict:
@@ -535,6 +590,7 @@ class Work:
             entry["review_required"] = self._requires_review(data)
         if self.store.native_review:
             entry["agent_type"] = input_snapshot["agent_type"]
+            warnings.append(self._dispatch_warning(con, session_id, entry["agent_type"]))
         return entry
 
     def prepare_attempt(self, session_id: str, package_id: str, expected_version: int,
